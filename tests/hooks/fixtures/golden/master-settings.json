@@ -1,0 +1,125 @@
+{
+  "env": {
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5",
+    "GIT_AUTHOR_NAME": "Anderson Pereira Brzezinski",
+    "GIT_AUTHOR_EMAIL": "240569289+brz-anderson@users.noreply.github.com",
+    "GIT_COMMITTER_NAME": "Anderson Pereira Brzezinski",
+    "GIT_COMMITTER_EMAIL": "240569289+brz-anderson@users.noreply.github.com",
+    "GIT_SSH_COMMAND": "ssh -F ~/.ssh/config"
+  },
+  "enabledPlugins": {
+    "context7@claude-plugins-official": true
+  },
+  "promptCacheTtl": "1h",
+  "subagentPromptCacheTtl": "5m",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" subagent || true",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/fact_audit.py\" stop || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" turn || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" failure || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" command || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" skill || true",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" mcp || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/measure.py\" mcp || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/compact_guard.py\" pre || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${BRZA_PYTHON:-python3} \"${BRZA_WORKSPACE:-$CLAUDE_PROJECT_DIR}/.claude/hooks/compact_guard.py\" post || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
+  "disableClaudeAiConnectors": true
+}

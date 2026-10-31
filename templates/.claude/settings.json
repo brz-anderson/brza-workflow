@@ -1,0 +1,16 @@
+{
+  "env": {
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5",
+    "GIT_AUTHOR_NAME": "{{author.name}}",
+    "GIT_AUTHOR_EMAIL": "{{author.email}}",
+    "GIT_COMMITTER_NAME": "{{author.name}}",
+    "GIT_COMMITTER_EMAIL": "{{author.email}}"
+  },
+  "enabledPlugins": {
+    "context7@claude-plugins-official": true
+  },
+  "promptCacheTtl": "1h",
+  "subagentPromptCacheTtl": "5m",
+  "hooks": {},
+  "disableClaudeAiConnectors": true
+}

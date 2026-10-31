@@ -9,10 +9,9 @@ description: >-
 
 # notes-checker
 
-Conferência determinística da forma das notas — `work/`, `plans/` e `wiki/` na raiz do brza-workspace — contra a norma
+Conferência determinística da forma das notas — `work/`, `plans/` e `wiki/` na raiz do {{workspace.name}} — contra a norma
 do [`work/README.md`](../../../work/README.md) e do [`plans/README.md`](../../../plans/README.md). O molde do plano, na
-`plan-runner`, entra só para resolver links que apontem para ele. Adaptada do `notes-checker` do workspace da Fixfy, sem
-o que é só de lá. É um script, e não uma leitura do agente, de propósito: regra conferida por agente varia entre
+`plan-runner`, entra só para resolver links que apontem para ele. É um script, e não uma leitura do agente, de propósito: regra conferida por agente varia entre
 execuções. A skill só o roda e lê o resultado.
 
 ## Rodar a conferência
@@ -81,7 +80,7 @@ construção.
 
 - **Reporte o resultado como saiu**, com os erros um a um. Aviso não vira tarefa por conta própria.
 - **Erro em nota que a sessão escreveu agora:** corrija pela norma do `work/README.md`.
-- **Erro em nota de outra tarefa:** não corrija; relate a Anderson.
+- **Erro em nota de outra tarefa:** não corrija; relate a {{workspace.owner}}.
 - **Os vocabulários estão no script, no `work/README.md` e no `plans/README.md`.** Se a norma mudar status, gênero, tag,
   `phase` ou `origin`, o script muda no mesmo commit; divergência entre os dois é achado, não escolha silenciosa.
 

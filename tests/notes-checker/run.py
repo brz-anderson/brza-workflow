@@ -71,6 +71,7 @@ def main():
                  + check_move_plan(tmp) + check_plans_at_root(tmp))
         fails += check_plan_rules()
         fails += check_description()
+        fails += check_manifest_dates()
         fails += check_workstream_links()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -488,6 +489,59 @@ def check_description():
         "work/issues/antiga-sem.md", "work/decisions/antiga-sem.md", "work/issues/sem-data.md",
         "work/worklogs/2026-11-02-w.md", "wiki/guides/guia-novo.md", "plans/PLN-950-novo/PLN-950-design.md"},
            sorted(missing))
+    return fails
+
+
+MANIFEST_DATES_NOTE = "---\nstatus: done\nopened: 2026-11-15\n---\n"  # done sem completed
+
+
+def check_manifest_dates():
+    """O CUTOFF e o WORKLOGS_LINK_FROM vêm do `.brza/workspace.toml` da raiz, quando há; sem ele, os padrões."""
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    fails = 0
+
+    def expect(label, ok, detail=""):
+        nonlocal fails
+        print(("  ok  " if ok else "FALHA ") + label + ("" if ok else f": {detail}"))
+        fails += not ok
+
+    def root_with(name, manifest):
+        root = os.path.join(tmp, name)
+        write_notes(root, {"work/issues/feito.md": MANIFEST_DATES_NOTE})
+        if manifest is not None:
+            write_notes(root, {".brza/workspace.toml": manifest})
+        return root
+
+    def done_without_completed(root):
+        _, out = run_checker("--root", root, "--json")
+        found = json.loads(out)
+        return ("done-without-completed" in {r for r, _, _ in found["errors"]},
+                "done-without-completed" in {r for r, _, _ in found["warnings"]})
+
+    try:
+        born = '[workspace]\nborn = "2026-12-01"\n'
+        roots = {
+            "sem": root_with("sem", None),
+            "born": root_with("born", 'schema = 1\n' + born),
+            "link": root_with("link", 'schema = 1\n' + born + '\n[checker]\nworklogs_link_from = "2026-12-15"\n'),
+            "sem-born": root_with("sem-born", 'schema = 1\n[workspace]\nname = "x"\n'),
+            "data-ruim": root_with("data-ruim", 'schema = 1\n[workspace]\nborn = "ontem"\n'),
+            "ilegivel": root_with("ilegivel", "isto = não é toml ["),
+        }
+        defaults = (cn.CUTOFF, cn.WORKLOGS_LINK_FROM)
+        expect("sem manifesto, valem os padrões do arquivo", cn.manifest_dates(roots["sem"]) == defaults)
+        expect("o `born` é o corte, e o link parte do mesmo dia", cn.manifest_dates(roots["born"]) == ("2026-12-01",) * 2)
+        expect("o `checker.worklogs_link_from` vale quando está lá",
+               cn.manifest_dates(roots["link"]) == ("2026-12-01", "2026-12-15"))
+        expect("manifesto sem `born` cai nos padrões", cn.manifest_dates(roots["sem-born"]) == defaults)
+        expect("`born` que não é data cai nos padrões", cn.manifest_dates(roots["data-ruim"]) == defaults)
+        expect("manifesto ilegível cai nos padrões", cn.manifest_dates(roots["ilegivel"]) == defaults)
+        expect("o corte do padrão cobra a nota de 2026-11-15: erro", done_without_completed(roots["sem"]) == (True, False))
+        expect("o `born` de 2026-12-01 faz a mesma nota virar aviso",
+               done_without_completed(roots["born"]) == (False, True), done_without_completed(roots["born"]))
+        expect("o manifesto ilegível não derruba o checador", done_without_completed(roots["ilegivel"]) == (True, False))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return fails
 
 

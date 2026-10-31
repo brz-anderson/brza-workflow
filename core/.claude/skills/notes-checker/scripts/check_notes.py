@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Checador das notas do brza-workspace: work/, plans/ e wiki/ na raiz do repositório.
+"""Checador das notas do workspace: work/, plans/ e wiki/ na raiz do repositório.
 
-Confere a forma das notas contra a norma do work/README.md e do plans/README.md. Adaptado do checador do workspace da
-Fixfy, sem o que é só de lá (o fixfy-vault, o painel, as origens sprint e card, o campo ticket, as tags da Fixfy):
+Confere a forma das notas contra a norma do work/README.md e do plans/README.md.
 
   erro   nome de arquivo duplicado; link Markdown relativo quebrado — o que existe em outra branch workstream/* não
          está quebrado, e o origin_ref de plano também se procura lá; [[wikilink]] fora de código;
@@ -25,6 +24,7 @@ Uso:
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -38,8 +38,9 @@ STATUSES = {"open", "in_progress", "in_review", "done", "dropped"}
 STATELESS_GENRES = {"guide", "worklog", "note"}
 TAGS = {"auth", "chat", "design", "infra", "planning", "release", "tooling"}
 FORBIDDEN_TAG_PREFIXES = ("work/", "repo/", "scope/", "status/")
-# O dia em que o workspace nasceu (a abertura do PLN-001): toda nota datada daí em diante é cobrada; só a que não tem
-# data nenhuma sai como aviso, porque data que não está escrita não se infere.
+# O dia em que o workspace nasceu: toda nota datada daí em diante é cobrada; só a que não tem data nenhuma sai como
+# aviso, porque data que não está escrita não se infere. Este é o padrão, sem manifesto; com o `.brza/workspace.toml`
+# na raiz, vale o `workspace.born` dele (`manifest_dates`).
 CUTOFF = "2026-10-26"
 ROOT_ZONES = ("work", "plans", "wiki")
 # O dia a partir do qual plano, issue e decisão levam o campo `description` (uma frase, para o índice da master). Vale
@@ -53,8 +54,9 @@ PHASE_STATUS = {"interview": "open", "design": "open", "execution": "in_progress
                 "blocked": "open", "closed": "done", "dropped": "dropped"}
 ORIGINS = {"issue", "decision", "plan", "request"}
 HOURS = ("estimate_h", "executed_h", "remaining_h")
-# A linha do ## Worklogs leva o link do worklog a partir deste dia: o seguinte ao da criação do checador (o PLN-001 tem
-# linha de 2026-10-27 sem link), fixado aqui e no plans/README.md. Sem ele, a regra não cobraria linha nenhuma.
+# A linha do ## Worklogs leva o link do worklog a partir deste dia: o seguinte ao da criação do checador, fixado aqui e no
+# plans/README.md. Sem ele, a regra não cobraria linha nenhuma. Também o padrão sem manifesto; com ele, vale o
+# `checker.worklogs_link_from`, ou o `workspace.born`.
 WORKLOGS_LINK_FROM = "2026-10-28"
 # A seção de ponteiro do plano onde cada gênero que o linka aparece; a issue também pode estar no origin_ref
 POINTER_SECTIONS = {"worklog": ("## Worklogs",), "review": ("## Revisões",), "decision": ("## Decisões",),
@@ -473,7 +475,30 @@ def check(root):
     return all_files, errors, warnings, broken
 
 
+def manifest_dates(root):
+    """(CUTOFF, WORKLOGS_LINK_FROM) do `.brza/workspace.toml` de `root`: o `workspace.born`, e o
+    `checker.worklogs_link_from`, que ausente é o dia de `born`. Sem manifesto, sem `born` ou com o manifesto ilegível,
+    os padrões deste arquivo."""
+    hooks = os.path.join(DEFAULT_ROOT, ".claude", "hooks", "brza_root.py")
+    try:
+        spec = importlib.util.spec_from_file_location("brza_root", hooks)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        manifest = module.read_manifest(root)
+    except (OSError, ImportError, AttributeError, SyntaxError):
+        return CUTOFF, WORKLOGS_LINK_FROM
+    dated = re.compile(r"\d{4}-\d{2}-\d{2}$")
+    workspace = (manifest or {}).get("workspace")
+    born = workspace.get("born") if isinstance(workspace, dict) else None
+    if not (isinstance(born, str) and dated.match(born)):
+        return CUTOFF, WORKLOGS_LINK_FROM
+    checker = (manifest or {}).get("checker")
+    link = checker.get("worklogs_link_from") if isinstance(checker, dict) else None
+    return born, link if isinstance(link, str) and dated.match(link) else born
+
+
 def main():
+    global CUTOFF, WORKLOGS_LINK_FROM
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", default=DEFAULT_ROOT)
     p.add_argument("--json", action="store_true")
@@ -485,6 +510,7 @@ def main():
         print(f"notas não encontradas: {root} não tem work/, plans/ nem wiki/; passe --root", file=sys.stderr)
         sys.exit(2)
 
+    CUTOFF, WORKLOGS_LINK_FROM = manifest_dates(root)
     all_files, errors, warnings, broken = check(root)
     errors.extend(("unresolved-link", s, t) for s, t in broken)
 

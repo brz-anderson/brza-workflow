@@ -17,7 +17,7 @@ O `/compact` é de quem pediu: o modelo não o roda. A skill termina dizendo que
 
 ## 1. Situar
 
-- **A raiz** é o worktree do workstream: `git rev-parse --show-toplevel`, numa branch `workstream/<nome>`. Na `master`,
+- **A raiz** é o worktree do workstream: `git rev-parse --show-toplevel`, numa branch `workstream/<nome>`. Na `{{workspace.branch}}`,
   pare: lá não mora nota, e a trava não confere nada.
 - **O que ficou aberto:**
 
@@ -56,7 +56,7 @@ para todos os workstreams é candidato à norma: diga isso no worklog e a quem p
 brza note commit <caminhos> -m "docs: <o que a tarefa fechou>"
 ```
 
-Os caminhos são o worklog, o plano ou a issue, e a memória. O comando recusa a `master`, roda o checador antes e dá o
+Os caminhos são o worklog, o plano ou a issue, e a memória. O comando recusa a `{{workspace.branch}}`, roda o checador antes e dá o
 push. Se o checador barrar, corrija e rode de novo; o `notes-checker` explica o erro.
 
 ## 6. Conferir e devolver

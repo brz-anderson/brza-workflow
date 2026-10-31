@@ -16,16 +16,16 @@ um que falte trava o fechamento**, e a resposta é dizer o que falta e onde:
 3. **O durável saiu para a casa dona** e está em `## Decisões` e `## Documentação`, com o link. Leia o plano procurando
    o que precisa sobreviver a ele:
    - rodada que decide algo além do plano → a nota de `work/decisions/`, `done`, com "decidido em `PLN-NNN/R2.1`" e o
-     resumo, gravada com a confirmação de Anderson, que a norma pede para a nota;
-   - regra que o código do `brza-studio` precisa cumprir depois → a norma dele (`AGENTS.md`), por uma sessão aberta lá;
-   - o que Anderson precisa lembrar de como usar uma ferramenta → um guia em `wiki/guides/`;
+     resumo, gravada com a confirmação de {{workspace.owner}}, que a norma pede para a nota;
+   - regra que o código do `{{code.name}}` precisa cumprir depois → a norma dele (`AGENTS.md`), por uma sessão aberta lá;
+   - o que {{workspace.owner}} precisa lembrar de como usar uma ferramenta → um guia em `wiki/guides/`;
    - pendência que ficou para depois → uma issue em `work/issues/`;
    - achado falso → `→ falso` no parecer, com o `**Por que é falso:**` e a evidência; o parecer é a casa dele.
 4. **As decisões que o plano respondeu estão `done`**, citando a rodada.
 5. **O resumo está redigido** — o pedido, o que foi entregue, os desvios, os achados por destino, o que ficou fora —, um
-   em cada commit ou pull request do `brza-studio` que a entrega abriu, com o link do plano. Trabalho só em notas de
+   em cada commit ou pull request do `{{code.name}}` que a entrega abriu, com o link do plano. Trabalho só em notas de
    `work/` e `plans/`, que commita sem pull request, não tem resumo a publicar: o plano fechado é o registro. Você
-   redige; Anderson publica, com confirmação.
+   redige; {{workspace.owner}} publica, com confirmação.
 6. **Com Janela, uma linha fecha a seção** — a meta foi cumprida ou não, e a diferença entre `estimate_h` e `executed_h`
    —, inclusive quando a meta não foi cumprida.
 
@@ -35,7 +35,7 @@ Com a conferência limpa, grave num commit só, pela seção "Quem grava" da `SK
 marcados, `status: done`, `phase: closed` e `completed` no frontmatter, o `Retomar` reescrito e a linha do
 `## Worklogs`. Nada sai de `plans/`.
 
-- **O número não é reusado**: o índice da `master` só cresce, e o `plan-open` numera pelo maior.
+- **O número não é reusado**: o índice da `{{workspace.branch}}` só cresce, e o `plan-open` numera pelo maior.
 - **`PLN` parado no Desenho** fecha de três jeitos: virou decisão ou norma — foi escrita, e o plano vai a `done` citando
   o que nasceu dele —; virou passos — o plano continua, com `phase: execution` —; ou foi rejeitado — `status: dropped` e
   `phase: dropped`, com a linha do porquê em `## Worklogs`.
