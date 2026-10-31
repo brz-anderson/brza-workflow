@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""Traz a norma do núcleo do brza-workflow para o workspace, sem tocar a parte local dele.
+
+    brza sync [--dry-run] [--ref <branch|sha>] [--force <caminho>]… [--no-push] [--core-only]
+
+A camada 1 (`sync_core`) lê o núcleo por `git show <commit>:core/<caminho>` — e o `core/` de cada pacote do manifesto,
+`packages/<nome>/core/` —, e não da árvore de trabalho do brza-workflow. O commit é a `origin/<core.ref>` do manifesto
+(`master` sem ele) ou o `--ref`, que vale só nesta rodada. Cada arquivo é renderizado (`.md`, com os `{{tabela.chave}}`
+do manifesto) ou copiado, e comparado com o `.brza/core.lock`:
+  - ausente no disco, igual ao novo, igual ao lock ou sem entrada no lock: escreve;
+  - diferente do lock (editado no workspace): não escreve, imprime o diff contra o novo e marca recusa; o
+    `--force <caminho>` escreve e atualiza o lock;
+  - no lock e fora do núcleo novo: apagado, se não foi editado; editado, fica e sai do lock.
+Do `.claude/settings.json` o sync é dono só da chave `hooks`, que vem do `core/.claude/settings.hooks.json` e entra no
+lock como `.claude/settings.json#hooks`. O que o D3 do PLN-006 diz que saiu do núcleo (`resume_guard.py` e o teste dele)
+é apagado no primeiro sync. O manifesto, o índice, o `README.md` e a `.claude/rules/workspace.md` nunca são tocados.
+
+No checkout principal do workspace, o comando recusa fora da `[workspace].branch` e com mudança sem commit nos caminhos
+do núcleo; traz o que a origin tem (fast-forward); escreve; grava o lock; commita `chore(norma): brza-workflow@<sha7>`
+na branch do workspace e dá o push, salvo `--no-push` ou sem remote. Sai com 1 se algum arquivo foi recusado, ou o git,
+o lock ou o manifesto falharam. O `--dry-run` calcula e imprime tudo (com o diff do que mudaria) e não escreve nada: nem
+no disco, nem no git do workspace.
+
+Sem o `--core-only`, depois da camada 1 roda a camada 2, o `brza note sync`, que leva a norma aos worktrees dos
+workstreams. O `brza init` chama só a camada 1, por `sync_core(root, with_git=False)`, no diretório novo.
+
+Roda no Python 3.9: só o brza_root e a stdlib.
+"""
+import argparse
+import datetime
+import difflib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / 'core' / '.claude' / 'hooks'))
+import brza_root  # noqa: E402
+
+SETTINGS = '.claude/settings.json'
+HOOKS_KEY = SETTINGS + '#hooks'
+HOOKS_SOURCE = '.claude/settings.hooks.json'
+# O que o D3 diz que sai do núcleo: apagado no primeiro sync, e no seguinte já não existe
+RETIRED = ('.claude/hooks/resume_guard.py', '.claude/hooks/tests/test_resume_guard.py')
+
+
+class SyncError(Exception):
+    """O sync não segue, e a mensagem diz por quê; o `main` a imprime como `recusado:` e sai com 1."""
+
+
+class Result(NamedTuple):
+    code: int                # 0 em dia ou feito; 1 com arquivo recusado
+    commit: str              # o commit do brza-workflow que o sync seguiu
+    written: List[str]       # os caminhos escritos (ou que o --dry-run escreveria)
+    removed: List[str]
+    refused: List[str]
+    kept: List[str]          # saiu do núcleo, mas foi editado: fica e sai do lock
+    committed: Optional[str] # o sha do commit na branch do workspace, ou None
+
+
+# O git
+
+def _run(args: Sequence[str], cwd: Path, binary: bool = False):
+    try:
+        done = subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, text=not binary)
+    except OSError as e:
+        raise SyncError('git não roda: %s' % e)
+    if done.returncode != 0:
+        err = done.stderr if not binary else done.stderr.decode('utf-8', 'replace')
+        raise SyncError('git %s falhou em %s: %s' % (' '.join(args[:3]), cwd, (err or '').strip()))
+    return done.stdout
+
+
+def git(*args: str, cwd: Path) -> str:
+    return _run(args, cwd)
+
+
+def git_ok(*args: str, cwd: Path) -> bool:
+    return subprocess.run(['git', '-C', str(cwd), *args], capture_output=True).returncode == 0
+
+
+def has_remote(repo: Path, name: str) -> bool:
+    return git_ok('remote', 'get-url', name, cwd=repo)
+
+
+# O brza-workflow
+
+def flow_dir() -> Path:
+    """O checkout do brza-workflow: a BRZA_WORKFLOW, ou o pai do `bin/` deste arquivo."""
+    return Path(os.environ.get('BRZA_WORKFLOW') or HERE.parent)
+
+
+def resolve_commit(flow: Path, ref: str, fetch: bool = True) -> str:
+    """O commit do brza-workflow que `ref` nomeia: `origin/<ref>` depois do `git fetch origin`, e, sem ela, a `ref`
+    como está (branch local, sha ou tag). O fetch só roda se o brza-workflow tem a origin."""
+    remote = has_remote(flow, 'origin')
+    if fetch and remote:
+        _run(('fetch', '-q', 'origin'), flow)
+    candidates = (['origin/' + ref] if remote else []) + [ref]
+    for name in candidates:
+        done = subprocess.run(['git', '-C', str(flow), 'rev-parse', '--verify', '-q', name + '^{commit}'],
+                              capture_output=True, text=True)
+        if done.returncode == 0:
+            return done.stdout.strip()
+    raise SyncError('a ref %s não existe no brza-workflow (%s)' % (ref, flow))
+
+
+class Source(NamedTuple):
+    mode: str   # 100644 ou 100755
+    blob: str
+
+
+def ls_tree(flow: Path, commit: str, prefix: str) -> Dict[str, Source]:
+    """Os arquivos de `prefix/` no commit, por caminho relativo a ele."""
+    out = _run(('ls-tree', '-r', '-z', commit, '--', prefix + '/'), flow)
+    found = {}
+    for entry in out.split('\0'):
+        if not entry:
+            continue
+        meta, _, path = entry.partition('\t')
+        mode, _, blob = meta.split(' ')
+        found[path[len(prefix) + 1:]] = Source(mode, blob)
+    return found
+
+
+def sources_of(flow: Path, commit: str, packages: Sequence[str]) -> Dict[str, Source]:
+    """O que o núcleo dá ao workspace: `core/` e o `core/` de cada pacote, por caminho de destino. O
+    `settings.hooks.json` fica de fora (é só a chave `hooks`), e dois donos do mesmo caminho recusam."""
+    found = ls_tree(flow, commit, 'core')
+    found.pop(HOOKS_SOURCE, None)
+    for name in packages:
+        if not _run(('ls-tree', commit, '--', 'packages/%s' % name), flow).strip():
+            raise SyncError('o pacote %s do manifesto não existe no brza-workflow@%s' % (name, commit[:7]))
+        for path, source in ls_tree(flow, commit, 'packages/%s/core' % name).items():
+            if path in found:
+                raise SyncError('o pacote %s e o núcleo dão o mesmo caminho: %s' % (name, path))
+            found[path] = source
+    return found
+
+
+def blob_bytes(flow: Path, sha: str) -> bytes:
+    return _run(('cat-file', 'blob', sha), flow, binary=True)
+
+
+# O workspace
+
+def read_bytes(path: Path) -> Optional[bytes]:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise SyncError('não li %s: %s' % (path, e))
+
+
+def load_manifest(root: Path) -> dict:
+    data = read_bytes(root / brza_root.MANIFEST)
+    if data is None:
+        raise SyncError('%s não tem %s; a raiz é um workspace (brza init)' % (root, brza_root.MANIFEST))
+    try:
+        manifest = brza_root.parse_toml(data.decode('utf-8'))
+    except ValueError as e:
+        raise SyncError('%s ilegível: %s' % (brza_root.MANIFEST, e))
+    problems = brza_root.validate_manifest(manifest)
+    if problems:
+        raise SyncError('%s fora do esquema: %s' % (brza_root.MANIFEST, '; '.join(problems)))
+    return manifest
+
+
+def load_lock(root: Path) -> dict:
+    """Os `files` do lock, ou {} sem lock. O lock quebrado recusa: tratá-lo como ausente sobrescreveria edição local."""
+    try:
+        lock = brza_root.read_lock(root)
+    except brza_root.LockError as e:
+        raise SyncError('o lock está quebrado, e não o trato como ausente (apague-o à mão se quer um sync do zero): %s'
+                        % e)
+    return lock['files'] if lock else {}
+
+
+def render_file(path: str, data: bytes, manifest: dict) -> bytes:
+    """O conteúdo que o workspace recebe: o `.md` renderizado, o resto copiado."""
+    if not path.endswith('.md'):
+        return data
+    try:
+        return brza_root.render(data.decode('utf-8'), manifest, path).encode('utf-8')
+    except (UnicodeDecodeError, brza_root.RenderError) as e:
+        raise SyncError('não renderizei %s: %s' % (path, e))
+
+
+def diff_of(path: str, old: Optional[bytes], new: Optional[bytes]) -> str:
+    """O diff unificado do que está no workspace (a) contra o que o núcleo traz (b)."""
+    def lines(data):
+        return (data or b'').decode('utf-8', 'replace').splitlines(keepends=True)
+    out = ''.join(difflib.unified_diff(lines(old), lines(new), 'a/%s (workspace)' % path, 'b/%s (núcleo)' % path))
+    return out if out.endswith('\n') or not out else out + '\n'
+
+
+class Plan:
+    """O que o sync faz: o cálculo todo, sem escrever nada."""
+
+    def __init__(self):
+        self.write = {}       # type: Dict[str, Tuple[bytes, str]]  # caminho -> (conteúdo, modo)
+        self.remove = []      # type: List[str]
+        self.refused = {}     # type: Dict[str, str]                # caminho -> diff
+        self.kept = []        # type: List[str]
+        self.hooks_text = None   # type: Optional[str]   # o settings.json novo, quando a chave hooks muda
+        self.hooks_diff = None   # type: Optional[str]   # o diff do hooks recusado
+        self.files = {}       # type: Dict[str, str]    # o `[files]` do lock novo
+
+
+def plan_sync(root: Path, flow: Path, commit: str, manifest: dict, lock_files: Dict[str, str],
+              force: Sequence[str]) -> Plan:
+    cfg = brza_root.with_defaults(manifest)
+    sources = sources_of(flow, commit, cfg['core']['packages'])
+    plan, forced = Plan(), set(force)
+    for path, source in sorted(sources.items()):
+        new = render_file(path, blob_bytes(flow, source.blob), manifest)
+        disk, locked = read_bytes(root / path), lock_files.get(path)
+        new_digest = brza_root.digest(new)
+        if disk is not None and brza_root.digest(disk) == new_digest:
+            plan.files[path] = new_digest
+        elif (disk is None or locked is None or brza_root.digest(disk) == locked or path in forced):
+            plan.write[path] = (new, source.mode)
+            plan.files[path] = new_digest
+        else:
+            plan.refused[path] = diff_of(path, disk, new)
+            plan.files[path] = locked
+    gone = [p for p in lock_files if p not in sources and p != HOOKS_KEY]
+    gone += [p for p in RETIRED if p not in lock_files and p not in sources]
+    for path in sorted(set(gone)):
+        disk = read_bytes(root / path)
+        if disk is None:
+            continue
+        if path not in lock_files or brza_root.digest(disk) == lock_files[path] or path in forced:
+            plan.remove.append(path)
+        else:
+            plan.kept.append(path)
+    plan_hooks(plan, root, flow, commit, lock_files, forced)
+    return plan
+
+
+def plan_hooks(plan: Plan, root: Path, flow: Path, commit: str, lock_files: Dict[str, str], forced: set):
+    """A chave `hooks` do settings.json: troca só ela, a menos que tenha sido editada no workspace."""
+    source = _run(('show', '%s:core/%s' % (commit, HOOKS_SOURCE)), flow)
+    try:
+        wanted = json.loads(source)['hooks']
+    except (ValueError, KeyError, TypeError) as e:
+        raise SyncError('o %s do núcleo não traz a chave `hooks`: %s' % (HOOKS_SOURCE, e))
+    data = read_bytes(root / SETTINGS)
+    try:
+        current = json.loads(data.decode('utf-8')) if data and data.strip() else {}
+    except ValueError as e:
+        raise SyncError('%s não é JSON: %s' % (SETTINGS, e))
+    if not isinstance(current, dict):
+        raise SyncError('%s não é um objeto' % SETTINGS)
+    have, locked = current.get('hooks'), lock_files.get(HOOKS_KEY)
+    if have == wanted:
+        plan.files[HOOKS_KEY] = brza_root.hooks_digest(wanted)
+        return
+    if have is None or locked is None or brza_root.hooks_digest(have) == locked or forced & {HOOKS_KEY, SETTINGS}:
+        try:
+            plan.hooks_text = brza_root.merge_hooks(data.decode('utf-8') if data else None, source)
+        except ValueError as e:
+            raise SyncError('%s: %s' % (SETTINGS, e))
+        plan.files[HOOKS_KEY] = brza_root.hooks_digest(wanted)
+        return
+
+    def dump(hooks):
+        return json.dumps(hooks, indent=2, ensure_ascii=False).encode('utf-8') + b'\n'
+    plan.hooks_diff = diff_of(HOOKS_KEY, dump(have), dump(wanted))
+    plan.files[HOOKS_KEY] = locked
+
+
+def tracked(root: Path, paths: Sequence[str]) -> set:
+    if not paths:
+        return set()
+    out = _run(('ls-files', '-z', '--', *paths), root)
+    return set(p for p in out.split('\0') if p)
+
+
+def core_paths(sources: Sequence[str], lock_files: Dict[str, str]) -> List[str]:
+    """Os caminhos que o sync pode tocar: os do núcleo, os do lock, os aposentados, o settings e o lock."""
+    paths = set(sources) | set(p for p in lock_files if p != HOOKS_KEY) | set(RETIRED)
+    return sorted(paths | {SETTINGS, brza_root.LOCK})
+
+
+def guard_workspace(root: Path, manifest: dict, flow: Path, commit: str):
+    """O que a camada 1 exige do checkout: a branch do workspace e nenhuma mudança sem commit nos caminhos do núcleo."""
+    want = brza_root.workspace_branch(manifest)
+    have = brza_root.branch_of(root)
+    if have != want:
+        raise SyncError('o checkout %s está em %s, e o sync roda na %s do workspace' % (root, have or 'detached', want))
+    cfg = brza_root.with_defaults(manifest)
+    sources = sources_of(flow, commit, cfg['core']['packages'])
+    paths = core_paths(list(sources), load_lock(root))
+    dirty = _run(('status', '--porcelain', '-z', '--', *paths), root)
+    names = [e[3:] for e in dirty.split('\0') if len(e) > 3]
+    if names:
+        raise SyncError('mudança sem commit nos caminhos do núcleo: %s; commite ou desfaça antes do sync'
+                        % ', '.join(names))
+
+
+def pull(root: Path, manifest: dict):
+    """O git pull --ff-only do workspace: traz as linhas do índice que o `brza note` empurrou. Sem remote, nada."""
+    remote, branch = brza_root.workspace_remote(manifest), brza_root.workspace_branch(manifest)
+    if not has_remote(root, remote):
+        return
+    _run(('fetch', '-q', remote), root)
+    if not git_ok('rev-parse', '--verify', '-q', 'refs/remotes/%s/%s' % (remote, branch), cwd=root):
+        return
+    try:
+        _run(('merge', '--ff-only', '-q', '%s/%s' % (remote, branch)), root)
+    except SyncError as e:
+        raise SyncError('o pull --ff-only de %s/%s falhou, e a branch diverge; resolva à mão: %s' % (remote, branch, e))
+
+
+def apply(root: Path, plan: Plan) -> List[str]:
+    """Escreve e apaga no disco, e devolve os caminhos tocados."""
+    touched = []
+    for path, (data, mode) in sorted(plan.write.items()):
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        if mode == '100755':
+            target.chmod(target.stat().st_mode | 0o111)
+        touched.append(path)
+    for path in plan.remove:
+        (root / path).unlink()
+        parent = (root / path).parent
+        while parent != root and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+        touched.append(path)
+    if plan.hooks_text is not None:
+        (root / SETTINGS).parent.mkdir(parents=True, exist_ok=True)
+        (root / SETTINGS).write_text(plan.hooks_text, encoding='utf-8')
+        touched.append(SETTINGS)
+    return touched
+
+
+def sync_core(root, flow=None, ref=None, force=(), dry_run=False, with_git=True, push=True,
+              out: Callable[[str], None] = print, today=None) -> Result:
+    """A camada 1 do sync no workspace em `root`: traz o núcleo (e os pacotes do manifesto) do brza-workflow, troca a
+    chave `hooks` do settings.json e grava o `.brza/core.lock`. Levanta SyncError quando não segue.
+
+    `with_git=True` é o `brza sync`: confere a branch e os caminhos do núcleo, traz a origin, commita
+    `chore(norma): brza-workflow@<sha7>` e dá o push (`push=True`, e só com remote). `with_git=False` é o do `brza init`, no
+    diretório novo: escreve os arquivos e o lock, e deixa o git para quem chamou. `dry_run=True` não escreve nada e
+    imprime o que faria. `flow` é o checkout do brza-workflow (padrão: `flow_dir()`); `ref`, o commit de uma vez
+    (padrão: o `core.ref` do manifesto); `force`, os caminhos escritos mesmo editados."""
+    root, flow = Path(root), Path(flow) if flow else flow_dir()
+    manifest = load_manifest(root)
+    ref = ref or brza_root.with_defaults(manifest)['core']['ref']
+    commit = resolve_commit(flow, ref)
+    short = commit[:7]
+    if with_git:
+        guard_workspace(root, manifest, flow, commit)
+        if not dry_run:
+            pull(root, manifest)
+    lock_files = load_lock(root)
+    plan = plan_sync(root, flow, commit, manifest, lock_files, force)
+    old = brza_root.read_lock(root)
+    lock_changed = (old is None or old['commit'] != commit or old['ref'] != ref
+                    or old['files'] != plan.files)
+    report(plan, dry_run, out, root)
+    touched = [] if dry_run else apply(root, plan)
+    code = 1 if plan.refused or plan.hooks_diff else 0
+    refused = sorted(plan.refused) + ([HOOKS_KEY] if plan.hooks_diff else [])
+    if dry_run:
+        out('dry-run: nada foi escrito; brza-workflow@%s' % short)
+        return Result(code, commit, sorted(plan.write) + ([SETTINGS] if plan.hooks_text is not None else []),
+                      plan.remove, refused, plan.kept, None)
+    if lock_changed:
+        text = brza_root.dump_lock(commit, ref, today or datetime.date.today().isoformat(), plan.files)
+        (root / brza_root.LOCK).parent.mkdir(parents=True, exist_ok=True)
+        (root / brza_root.LOCK).write_text(text, encoding='utf-8')
+        touched.append(brza_root.LOCK)
+    written = sorted(plan.write) + ([SETTINGS] if plan.hooks_text is not None else [])
+    committed = None
+    if not touched:
+        out('em dia: brza-workflow@%s' % short)
+    elif with_git:
+        committed = commit_and_push(root, manifest, touched, plan.remove, short, push, out)
+    else:
+        out('norma escrita: brza-workflow@%s' % short)
+    return Result(code, commit, written, plan.remove, refused, plan.kept, committed)
+
+
+def report(plan: Plan, dry_run: bool, out: Callable[[str], None], root: Path):
+    verb = (lambda done, would: would if dry_run else done)
+    for path in sorted(plan.write):
+        out('%s %s' % (verb('escrito:  ', 'escreveria:'), path))
+        if dry_run:
+            before = read_bytes(root / path)
+            if before is not None:
+                out(diff_of(path, before, plan.write[path][0]).rstrip('\n'))
+    if plan.hooks_text is not None:
+        out('%s %s (só a chave hooks)' % (verb('escrito:  ', 'escreveria:'), SETTINGS))
+    for path in plan.remove:
+        out('%s %s (saiu do núcleo)' % (verb('apagado:  ', 'apagaria:'), path))
+    for path in plan.kept:
+        out('mantido:  %s (saiu do núcleo, mas foi editado aqui; sai do lock)' % path)
+    for path, diff in sorted(plan.refused.items()):
+        out('recusado: %s (editado no workspace; o diff é contra o núcleo novo, e `--force %s` o escreve)'
+            % (path, path))
+        out(diff.rstrip('\n'))
+    if plan.hooks_diff:
+        out('recusado: %s (a chave hooks foi editada no workspace; `--force %s` a escreve)' % (SETTINGS, HOOKS_KEY))
+        out(plan.hooks_diff.rstrip('\n'))
+
+
+def commit_and_push(root: Path, manifest: dict, touched: List[str], removed: List[str], short: str, push: bool,
+                    out: Callable[[str], None]) -> str:
+    """O commit só dos caminhos tocados (outro arquivo no índice não entra) e o push, se há remote."""
+    known = tracked(root, touched)
+    existing = [p for p in touched if (root / p).exists()]
+    if existing:
+        _run(('add', '--', *existing), root)
+    gone = [p for p in touched if p in known and not (root / p).exists()]
+    if gone:
+        _run(('rm', '-q', '--cached', '--', *gone), root)
+    paths = existing + gone
+    _run(('commit', '-q', '-m', 'chore(norma): brza-workflow@%s' % short, '--', *paths), root)
+    sha = _run(('rev-parse', 'HEAD'), root).strip()
+    out('commit:   %s chore(norma): brza-workflow@%s' % (sha[:7], short))
+    remote, branch = brza_root.workspace_remote(manifest), brza_root.workspace_branch(manifest)
+    if not push:
+        out('sem push (--no-push)')
+    elif not has_remote(root, remote):
+        out('sem push: o workspace não tem o remote %s' % remote)
+    else:
+        try:
+            _run(('push', '-q', remote, branch), root)
+        except SyncError as e:
+            raise SyncError('o commit %s ficou local, e o push falhou: %s' % (sha[:7], e))
+        out('enviado:  %s/%s' % (remote, branch))
+    return sha
+
+
+def note_sync(root: Path, no_push: bool) -> int:
+    """A camada 2: o `brza note sync`, que leva a norma aos worktrees dos workstreams."""
+    argv = [str(HERE / 'brza-note'), 'sync'] + (['--no-push'] if no_push else [])
+    return subprocess.run(argv, cwd=str(root), env=dict(os.environ, BRZA_WORKSPACE=str(root))).returncode
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog='brza sync', description='Traz a norma do núcleo do brza-workflow para o '
+                                 'workspace do cwd, sem tocar a parte local.')
+    ap.add_argument('--dry-run', action='store_true', help='mostra o que faria, com o diff, e não escreve nada')
+    ap.add_argument('--ref', metavar='branch|sha', help='o commit do brza-workflow desta rodada; padrão o core.ref')
+    ap.add_argument('--force', action='append', default=[], metavar='caminho',
+                    help='escreve o arquivo mesmo editado no workspace; repetível')
+    ap.add_argument('--no-push', action='store_true', help='commita, mas não dá o push')
+    ap.add_argument('--core-only', action='store_true', help='só a camada 1; sem o `brza note sync` dos workstreams')
+    args = ap.parse_args(argv)
+    found = brza_root.find(str(Path.cwd()))
+    if not found:
+        print('recusado: nenhum workspace achado a partir de %s (sem .brza/workspace.toml)' % Path.cwd())
+        return 1
+    try:
+        result = sync_core(found.root, ref=args.ref, force=args.force, dry_run=args.dry_run, push=not args.no_push)
+    except SyncError as e:
+        print('recusado: %s' % e)
+        return 1
+    code = result.code
+    if not args.core_only and not args.dry_run:
+        code = max(code, note_sync(found.root, args.no_push))
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())

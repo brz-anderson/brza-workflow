@@ -25,7 +25,7 @@
       ao índice para o id e o caminho que faltam; idempotente. Serve à migração e a reparar o índice depois de um
       commit que não o gravou.
   brza-note workstream <nome>
-      cria a branch workstream/<nome> da origin/master (depois de git fetch) e o worktree em
+      cria a branch workstream/<nome> da <remote>/<branch> da norma (depois de git fetch) e o worktree em
       <workspace>/.worktrees/<nome>, com push -u. Recusa se a branch local ou o worktree já existem; se a branch só
       existe na origin, o worktree sai dela, para reabrir um workstream sem worktree. Depois do worktree, liga a
       memória da sessão: cria <worktree>/memory/, vazio e sem commit, e grava no <worktree>/.claude/settings.local.json
@@ -33,11 +33,12 @@
   brza-note memory-setup
       faz essa ligação em todo worktree de workstream que já existe; idempotente, uma linha por workstream.
   brza-note sync [--no-push]
-      git fetch; em cada worktree do workspace numa branch workstream/*, git merge --no-edit origin/master, e o push
+      git fetch; em cada worktree do workspace numa branch workstream/*, git merge --no-edit <remote>/<branch>, e o push
       dos que mudaram. O conflito aborta o merge daquele worktree, relata e segue para o próximo; sai com 1 no fim.
       Uma linha por workstream.
 
-A master guarda só a norma, e a nota vive na branch do workstream, que nunca volta à master; a norma chega ao
+O <remote>/<branch> é o `[workspace].remote` e o `[workspace].branch` do manifesto, `origin/master` sem eles. A
+master guarda só a norma, e a nota vive na branch do workstream, que nunca volta à master; a norma chega ao
 workstream pelo sync. A raiz onde a nota vai, a raiz-alvo, sai assim, na ordem:
   1. --workstream <nome>, em new e commit: <workspace>/.worktrees/<nome>, de onde quer que se rode;
   2. o cwd num worktree do workspace cuja branch é workstream/*: esse worktree;
@@ -139,22 +140,34 @@ def today() -> datetime.date:
     return datetime.date.today()
 
 
-def sessions_module() -> dict:
-    return runpy.run_path(str(HERE.parent / 'packages' / 'client' / 'bin' / 'brza-sessions'))
+def sessions_module() -> dict | None:
+    """O módulo do `brza-sessions` do pacote do cliente, ou None sem ele: o núcleo roda sem o pacote (R10.1)."""
+    path = HERE.parent / 'packages' / 'client' / 'bin' / 'brza-sessions'
+    return runpy.run_path(str(path)) if path.is_file() else None
 
 
 def session_name() -> str | None:
-    """O nome da sessão: o CLAUDE_SESSION_NAME ou, num chat do app, o do mapa de sessões e, sem entrada, o /rename."""
+    """O nome da sessão: o CLAUDE_SESSION_NAME ou, num chat do app, o do mapa de sessões e, sem entrada, o /rename.
+    Sem o `brza-sessions` do pacote do cliente, só o CLAUDE_SESSION_NAME vale; do contrário, None."""
     if name := os.environ.get('CLAUDE_SESSION_NAME'):
         return name
     chat = os.environ.get('ORCA_AGENT_SESSION_ID')
     if not chat:
         return None
     sessions = sessions_module()
+    if sessions is None:
+        return None
     if entry := sessions['session_map']().get(chat):
         return entry['name']
     claude_session = sessions['provider_session'](chat)
     return sessions['chat_name'](claude_session) if claude_session else None
+
+
+def remote_and_branch() -> tuple[str, str]:
+    """O remote e a branch da norma do workspace: `[workspace].remote` e `[workspace].branch` do manifesto, ou
+    `origin` e `master` sem eles (X8 do PLN-006)."""
+    manifest = runtime.brza_root.read_manifest(runtime.WORKSPACE) or {}
+    return runtime.brza_root.workspace_remote(manifest), runtime.brza_root.workspace_branch(manifest)
 
 
 def common_dir(cwd: Path) -> tuple[Path, Path] | None:
@@ -588,25 +601,26 @@ def workstream(name: str) -> int:
     """Cria o workstream `name`: a branch workstream/<nome> e o worktree em <workspace>/.worktrees/<nome>, com
     push -u."""
     ws, branch = runtime.WORKSPACE, f'{WORKSTREAM_PREFIX}{name}'
+    remote, base = remote_and_branch()
     path = ws / '.worktrees' / name
     if path.exists():
         print(f'recusado: o worktree {path} já existe')
         return 1
-    runtime.git('fetch', '-q', 'origin', cwd=ws)
+    runtime.git('fetch', '-q', remote, cwd=ws)
     if ref_exists(f'refs/heads/{branch}', ws):
         print(f'recusado: a branch {branch} já existe; para abrir o worktree dela: git worktree add {path} {branch}')
         return 1
-    if ref_exists(f'refs/remotes/origin/{branch}', ws):
+    if ref_exists(f'refs/remotes/{remote}/{branch}', ws):
         # Workstream reaberto: a branch só existe na origin, e o worktree sai dela com o upstream dela
-        runtime.git('worktree', 'add', '-b', branch, str(path), f'origin/{branch}', cwd=ws)
-        runtime.git('branch', '-q', f'--set-upstream-to=origin/{branch}', cwd=path)
-        print(f'worktree: {path}  ({branch}, reaberta da origin)')
+        runtime.git('worktree', 'add', '-b', branch, str(path), f'{remote}/{branch}', cwd=ws)
+        runtime.git('branch', '-q', f'--set-upstream-to={remote}/{branch}', cwd=path)
+        print(f'worktree: {path}  ({branch}, reaberta da {remote})')
         memory(path)
         return 0
-    # O -u do push troca o upstream que o worktree add herda da origin/master
-    runtime.git('worktree', 'add', '-b', branch, str(path), 'origin/master', cwd=ws)
-    runtime.git('push', '-q', '-u', 'origin', branch, cwd=path)
-    print(f'worktree: {path}  ({branch}, da origin/master)')
+    # O -u do push troca o upstream que o worktree add herda da base
+    runtime.git('worktree', 'add', '-b', branch, str(path), f'{remote}/{base}', cwd=ws)
+    runtime.git('push', '-q', '-u', remote, branch, cwd=path)
+    print(f'worktree: {path}  ({branch}, da {remote}/{base})')
     memory(path)
     return 0
 
@@ -644,24 +658,26 @@ def workstream_worktrees() -> dict[Path, str]:
 
 
 def merge_master(path: Path) -> str:
-    """O git merge --no-edit origin/master no worktree: 'em dia' ou 'mesclado'; o conflito aborta o merge e levanta
+    """O git merge --no-edit <remote>/<branch> da norma no worktree: 'em dia' ou 'mesclado'; o conflito aborta o merge e levanta
     Refused, e outra falha do git sobe como BrzaError."""
+    remote, base = remote_and_branch()
     head = runtime.git('rev-parse', 'HEAD', cwd=path).strip()
     try:
-        runtime.git('merge', '-q', '--no-edit', 'origin/master', cwd=path)
+        runtime.git('merge', '-q', '--no-edit', f'{remote}/{base}', cwd=path)
     except runtime.BrzaError as e:
         try:
             runtime.git('rev-parse', '-q', '--verify', 'MERGE_HEAD', cwd=path)
         except runtime.BrzaError:
             raise e from None
         runtime.git('merge', '--abort', cwd=path)
-        raise Refused('o merge com a origin/master foi abortado; resolva à mão no worktree') from None
+        raise Refused(f'o merge com a {remote}/{base} foi abortado; resolva à mão no worktree') from None
     return 'em dia' if runtime.git('rev-parse', 'HEAD', cwd=path).strip() == head else 'mesclado'
 
 
 def sync(do_push: bool) -> int:
-    """O git merge origin/master em cada worktree de workstream, e o push dos que mudaram; uma linha por workstream."""
-    runtime.git('fetch', '-q', 'origin', cwd=runtime.WORKSPACE)
+    """O git merge <remote>/<branch> da norma em cada worktree de workstream, e o push dos que mudaram; uma linha por
+    workstream."""
+    runtime.git('fetch', '-q', remote_and_branch()[0], cwd=runtime.WORKSPACE)
     failed = False
     for path, branch in sorted(workstream_worktrees().items()):
         label = branch.removeprefix(WORKSTREAM_PREFIX)

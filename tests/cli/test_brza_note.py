@@ -168,6 +168,28 @@ class NoteTest(NoteFixture):
         text, _ = self.new_worklog_in_chat({}, None, None)
         self.assertIn('na sessão `<a escrever>`', text)
 
+    def test_session_name_without_the_client_package_is_none(self):
+        """R10.1: o núcleo roda sem o pacote do cliente; sem o brza-sessions, o chat não dá nome."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / 'bin'
+            bin_dir.mkdir()
+            with patch.dict('os.environ', {'ORCA_AGENT_SESSION_ID': 'claude_x'}), patch.dict(GLOBALS, {'HERE': bin_dir}):
+                os.environ.pop('CLAUDE_SESSION_NAME', None)
+                self.assertIsNone(GLOBALS['sessions_module']())
+                self.assertIsNone(GLOBALS['session_name']())
+                os.environ['CLAUDE_SESSION_NAME'] = 'pln-006-p6'
+                self.assertEqual(GLOBALS['session_name'](), 'pln-006-p6')
+
+    def test_new_worklog_without_the_client_package_leaves_the_name_to_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / 'bin'
+            bin_dir.mkdir()
+            with patch.dict('os.environ', {'ORCA_AGENT_SESSION_ID': 'claude_x'}), patch.dict(GLOBALS, {'HERE': bin_dir}):
+                os.environ.pop('CLAUDE_SESSION_NAME', None)
+                code, out = self.run_note('new', 'worklog', 'sem-pacote')
+        self.assertEqual(code, 0, out)
+        self.assertIn('na sessão `<a escrever>`', (self.tree / 'work' / 'worklogs' / '2026-10-28-sem-pacote.md').read_text())
+
     def test_new_issue_has_open_status_today_scope_and_priority(self):
         code, out = self.run_note('new', 'issue', 'algo-quebrado', '--scope', 'workspace,brza-studio',
                                   '--priority', 'high')
@@ -694,6 +716,46 @@ class NoteTest(NoteFixture):
         code, out = self.run_note('sync', cwd=self.base)
         self.assertEqual(code, 0, out)
         self.assertTrue((self.tree / 'norma.md').exists())
+
+    # o remote e a branch do manifesto (X8)
+
+    def own_remote_and_branch(self):
+        """O manifesto manda `up`/`main`: o remote `up` é outro nome da mesma origin, e a `main` anda à frente da
+        master com o arquivo `so-na-main.md`."""
+        (self.ws / '.brza').mkdir(exist_ok=True)
+        (self.ws / '.brza' / 'workspace.toml').write_text('schema = 1\n\n[workspace]\nbranch = "main"\nremote = "up"\n')
+        git('remote', 'add', 'up', str(self.origin), cwd=self.ws)
+        subprocess.run(['git', 'clone', '-q', str(self.origin), str(self.other)], check=True, capture_output=True)
+        git('checkout', '-q', '-b', 'main', cwd=self.other)
+        (self.other / 'so-na-main.md').write_text('main\n')
+        git('add', '.', cwd=self.other)
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'docs: main', cwd=self.other)
+        git('push', '-q', 'origin', 'main', cwd=self.other)
+
+    def test_workstream_branches_from_the_manifest_remote_and_branch(self):
+        self.own_remote_and_branch()
+        code, out = self.run_note('workstream', 'novo')
+        self.assertEqual(code, 0, out)
+        path = self.ws / '.worktrees' / 'novo'
+        self.assertTrue((path / 'so-na-main.md').exists())
+        self.assertIn('da up/main', out)
+        self.assertEqual(git('rev-parse', '--abbrev-ref', '@{upstream}', cwd=path), 'up/workstream/novo')
+
+    def test_sync_merges_the_manifest_remote_and_branch(self):
+        self.own_remote_and_branch()
+        code, out = self.run_note('sync', '--no-push')
+        self.assertEqual(code, 0, out)
+        self.assertIn('studio: mesclado, sem push', out)
+        self.assertTrue((self.tree / 'so-na-main.md').exists())
+
+    def test_merge_conflict_message_names_the_manifest_ref(self):
+        self.own_remote_and_branch()
+        self.write('so-na-main.md', 'do workstream\n')
+        git('add', '.', cwd=self.tree)
+        git('commit', '-q', '-m', 'workstream: arquivo', cwd=self.tree)
+        code, out = self.run_note('sync', '--no-push')
+        self.assertEqual(code, 1, out)
+        self.assertIn('o merge com a up/main foi abortado', out)
 
 
 if __name__ == '__main__':
