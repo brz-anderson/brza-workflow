@@ -19,6 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 BIN = ROOT / 'bin'
 CLIENT = ROOT / 'packages' / 'client' / 'bin'
+os.environ['BRZA_REGISTRY'] = '/nonexistent/brza/workspaces.toml'  # nada aqui lê o registro real da máquina
 sys.path.insert(0, str(BIN))
 import brza_runtime as runtime  # noqa: E402
 

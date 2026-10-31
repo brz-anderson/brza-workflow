@@ -6,9 +6,11 @@
 import json
 import os
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
-from test_measure import HERE, HookTest, lines_of
+from test_measure import HERE, HOOKS, HookTest, lines_of
 
 FIXTURES = os.path.join(HERE, "fixtures")
 IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -35,21 +37,35 @@ def write(path, text):
         f.write(text)
 
 
+MANIFEST = """schema = 1
+
+[workspace]
+name = "acme-notes"
+branch = "trunk"
+
+[code]
+name = "acme-app"
+"""
+
+
 def note(name, kind, body="corpo"):
     return f"---\nname: {name}\ndescription: d\nmetadata:\n  type: {kind}\n---\n\n{body}\n"
 
 
 class RepoTest(HookTest):
-    """O workspace (master + worktrees workstream/studio e workstream/tools-kit) e o studio, em /tmp."""
+    """Um workspace de outro nome, `acme-notes`, com a branch `trunk` e o manifesto (worktrees workstream/studio e
+    workstream/tools-kit), e o código `acme-app`, na `main`, ligado a ele pelo registro, em /tmp."""
 
     def setUp(self):
         super().setUp()
         base = os.path.realpath(self.tmp.name)
-        self.workspace, self.studio = os.path.join(base, "workspace"), os.path.join(base, "studio")
-        for repo in (self.workspace, self.studio):
+        self.workspace, self.studio = os.path.join(base, "acme-notes"), os.path.join(base, "acme-app")
+        for repo, branch in ((self.workspace, "trunk"), (self.studio, "main")):
             os.makedirs(repo)
-            git(repo, "init", "-q", "-b", "master")
+            git(repo, "init", "-q", "-b", branch)
             commit_file(repo, "README.md")
+        commit_file(self.workspace, ".brza/workspace.toml", MANIFEST)
+        write(os.environ["BRZA_REGISTRY"], f'[[workspace]]\nroot = "{self.workspace}"\ncode = "{self.studio}"\n')
         git(self.workspace, "branch", "workstream/studio")
         git(self.workspace, "branch", "workstream/tools-kit")
         self.trees = {}
@@ -57,11 +73,19 @@ class RepoTest(HookTest):
             self.trees[name] = os.path.join(self.workspace, ".worktrees", name)
             git(self.workspace, "worktree", "add", "-q", self.trees[name], f"workstream/{name}")
         commit_file(self.trees["studio"], "plans/PLN-007-chat/README.md")
-        self.measure.WORKSPACE, self.measure.STUDIO = self.workspace, self.studio
         self.measure._WORKSTREAMS.clear()
 
+    def no_git_for_the_root(self):
+        """O módulo brza_root é um só no processo: o espião sai no fim do teste."""
+        patcher = mock.patch.object(self.measure.brza_root, "git", lambda *a, **k: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def root_of(self, path):
+        return self.measure.brza_root.find(path)
+
     def studio_tree(self, branch):
-        path = os.path.join(os.path.dirname(self.studio), "studio-" + branch.replace("/", "-"))
+        path = os.path.join(os.path.dirname(self.studio), "elsewhere", "app-" + branch.replace("/", "-"))
         git(self.studio, "worktree", "add", "-q", "-b", branch, path)
         return path
 
@@ -74,14 +98,48 @@ class RepoTest(HookTest):
         self.run_hook({"session_id": "s", "cwd": cwd, **extra}, mode="turn")
 
 
+class RootOfTheMeasurementTest(RepoTest):
+    """A raiz da medição: MEASURE_DIR, depois BRZA_WORKSPACE, depois o checkout principal do próprio script."""
+
+    def root_for(self, script, **env):
+        code = ("import importlib.util, sys\n"
+                "spec = importlib.util.spec_from_file_location('measure', sys.argv[1])\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(module)\n"
+                "print(module.ROOT)\n")
+        base = {k: v for k, v in os.environ.items() if k not in ("MEASURE_DIR", "BRZA_WORKSPACE")}
+        done = subprocess.run([sys.executable, "-c", code, script], capture_output=True, text=True, env={**base, **env})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def install_hooks(self, tree):
+        for name in ("measure.py", "brza_root.py"):
+            with open(os.path.join(HOOKS, name), encoding="utf-8") as f:
+                write(os.path.join(tree, ".claude", "hooks", name), f.read())
+        return os.path.join(tree, ".claude", "hooks", "measure.py")
+
+    def test_a_script_in_a_worktree_measures_in_the_main_checkout(self):
+        script = self.install_hooks(self.trees["studio"])
+        self.assertEqual(self.root_for(script), self.workspace)
+        self.assertEqual(self.root_for(self.install_hooks(self.workspace)), self.workspace)
+
+    def test_the_variables_win_over_the_script_location(self):
+        script = self.install_hooks(self.trees["studio"])
+        self.assertEqual(self.root_for(script, BRZA_WORKSPACE="/x/ws"), "/x/ws")
+        self.assertEqual(self.root_for(script, BRZA_WORKSPACE="/x/ws", MEASURE_DIR="/x/m"), "/x/m")
+
+
 class WorkstreamTest(RepoTest):
     def test_workspace_worktree_gives_the_branch_name_even_from_a_subdirectory(self):
         os.makedirs(os.path.join(self.trees["tools-kit"], "work", "notes"))
         self.assertEqual(self.measure.workstream_of(self.trees["tools-kit"]), "tools-kit")
         self.assertEqual(self.measure.workstream_of(os.path.join(self.trees["tools-kit"], "work", "notes")), "tools-kit")
 
-    def test_main_checkout_on_master_is_master(self):
-        self.assertEqual(self.measure.workstream_of(self.workspace), "master")
+    def test_main_checkout_on_the_manifest_branch_is_that_branch_and_not_a_literal_master(self):
+        self.assertEqual(self.measure.workstream_of(self.workspace), "trunk")
+        self.measure._WORKSTREAMS.clear()
+        git(self.workspace, "checkout", "-q", "-b", "master")  # com o manifesto em `trunk`, a `master` é uma branch qualquer
+        self.assertIsNone(self.measure.workstream_of(self.workspace))
 
     def test_workspace_branch_that_is_not_a_workstream_has_none(self):
         git(self.workspace, "checkout", "-q", "-b", "scratch")
@@ -92,19 +150,39 @@ class WorkstreamTest(RepoTest):
         self.assertEqual(self.measure.workstream_of(tree), "studio")
         self.assertEqual(self.measure.resolve_workstream(tree)[1], self.trees["studio"])
 
+    def test_a_code_worktree_outside_the_code_directory_needs_the_registry_entry(self):
+        tree = self.studio_tree("feat/pln-007-chat-preview")
+        self.assertFalse(tree.startswith(self.studio + os.sep))
+        os.unlink(os.environ["BRZA_REGISTRY"])
+        self.measure._WORKSTREAMS.clear()
+        self.assertIsNone(self.measure.workstream_of(tree))
+        self.assertEqual(self.measure.resolve_workstream(tree), (None, None))
+
+    def test_the_plan_branch_pattern_and_the_remote_come_from_the_manifest(self):
+        text = MANIFEST.replace('name = "acme-app"', 'name = "acme-app"\nplan_branch = "plano/(\\\\d+)-"')
+        text = text.replace('branch = "trunk"', 'branch = "trunk"\nremote = "upstream"')
+        commit_file(self.workspace, ".brza/workspace.toml", text)
+        git(self.workspace, "update-ref", "refs/remotes/upstream/workstream/tools-kit", "workstream/studio")
+        git(self.workspace, "worktree", "remove", "--force", self.trees["studio"])
+        git(self.workspace, "branch", "-q", "-D", "workstream/studio")
+        tree = self.studio_tree("plano/007-chat")
+        self.assertEqual(self.measure.workstream_of(tree), "tools-kit")  # só a `upstream` do manifesto o tem
+        self.assertIsNone(self.measure.workstream_of(self.studio_tree("feat/pln-007-chat")))  # o padrão do manifesto
+
     def test_studio_plan_is_found_on_origin_only_when_no_local_branch_has_it(self):
         commit_file(self.trees["tools-kit"], "plans/PLN-009-kit/README.md")
         git(self.workspace, "update-ref", "refs/remotes/origin/workstream/tools-kit", "workstream/tools-kit")
         git(self.workspace, "update-ref", "refs/remotes/origin/workstream/ghost", "workstream/tools-kit")
-        self.assertEqual(self.measure.workstream_of_plan("009"), "tools-kit")  # local primeiro
+        ws = self.root_of(self.workspace)
+        self.assertEqual(self.measure.workstream_of_plan("009", ws), "tools-kit")  # local primeiro
         git(self.workspace, "worktree", "remove", "--force", self.trees["tools-kit"])
         git(self.workspace, "branch", "-q", "-D", "workstream/tools-kit")
-        self.assertIsNone(self.measure.workstream_of_plan("009"))  # dois em origin: ambíguo, como o brza-note recusa
+        self.assertIsNone(self.measure.workstream_of_plan("009", ws))  # dois em origin: ambíguo, como o brza-note recusa
         git(self.workspace, "update-ref", "-d", "refs/remotes/origin/workstream/ghost")
-        self.assertEqual(self.measure.workstream_of_plan("009"), "tools-kit")
+        self.assertEqual(self.measure.workstream_of_plan("009", ws), "tools-kit")
 
     def test_studio_without_plan_in_branch_or_with_unknown_plan_has_none(self):
-        self.assertIsNone(self.measure.workstream_of(self.studio))  # master do studio
+        self.assertIsNone(self.measure.workstream_of(self.studio))  # a `main` do código
         self.assertIsNone(self.measure.workstream_of(self.studio_tree("fix/pln-999-nada")))  # plano sem workstream
 
     def test_other_places_have_none_and_git_failure_does_not_break(self):
@@ -114,7 +192,7 @@ class WorkstreamTest(RepoTest):
         self.assertIsNone(self.measure.workstream_of(other))
         self.assertIsNone(self.measure.workstream_of(os.path.join(other, "ausente")))
         self.assertIsNone(self.measure.workstream_of(None))
-        self.measure.git = lambda *a, **k: None
+        self.no_git_for_the_root()
         self.measure._WORKSTREAMS.clear()
         self.assertIsNone(self.measure.workstream_of(self.trees["studio"]))
 
@@ -233,6 +311,7 @@ class MemoryTest(RepoTest):
 
     def test_git_failure_does_not_break_the_hook(self):
         self.measure.git = lambda *a, **k: None
+        self.no_git_for_the_root()
         self.stop(self.tree)
         self.assertFalse(os.path.exists(self.measure.SNAPSHOT))  # sem workstream, sem retrato e sem hook_error
         self.assertEqual([r for r in self.logged() if r["event"] == "hook_error"] if os.path.exists(self.measure.LOG) else [], [])

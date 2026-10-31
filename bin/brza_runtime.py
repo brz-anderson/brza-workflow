@@ -12,16 +12,39 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
+# O brza_root é dos hooks do núcleo e do CLI: o `core/` do checkout do brza-workflow, onde este arquivo mora em `bin/`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core' / '.claude' / 'hooks'))
+import brza_root  # noqa: E402
+
 APP_BIN = Path('/Applications/BrzA Studio.app/Contents/Resources/bin')
 DEFAULT_CLI = APP_BIN / 'brza'
 DEFAULT_USER_DATA = Path.home() / 'Library' / 'Application Support' / 'brza-studio'
-WORKSPACE = Path(os.environ.get('BRZA_WORKSPACE') or Path.home() / 'Projects' / 'brza-workspace')
-STUDIO = Path(os.environ.get('BRZA_STUDIO') or Path.home() / 'Projects' / 'brza-studio')
 LOCAL_BIN = Path.home() / '.local' / 'bin'
+
+
+def discover(cwd: Path | None = None) -> tuple[Path, Path, dict]:
+    """(a raiz do workspace, o checkout do código, o manifesto) do cwd, pelo `brza_root.find`: o manifesto no common dir,
+    ou o registro da máquina para o código, e a BRZA_WORKSPACE como override. O código vem da BRZA_STUDIO, do registro
+    ou do `[code].path` do manifesto.
+
+    Sem workspace achado, vale o legado — a BRZA_WORKSPACE sem manifesto, ou ~/Projects/brza-workspace —, que existe
+    para o brza-workspace de hoje, ainda sem manifesto, até o P8 do PLN-006 dar um a ele; e o manifesto é {}."""
+    found = brza_root.find(cwd or Path.cwd())
+    legacy = Path(os.environ.get('BRZA_WORKSPACE') or Path.home() / 'Projects' / 'brza-workspace')
+    root = found.root if found else legacy
+    manifest = found.manifest if found else {}
+    code = (os.environ.get('BRZA_STUDIO') or brza_root.code_path(root, manifest)
+            or Path.home() / 'Projects' / 'brza-studio')
+    return Path(root), Path(code), manifest
+
+
+# A raiz do workspace e o código dele, como os scripts leem; o cwd de quando o processo sobe decide, e os testes trocam.
+WORKSPACE, STUDIO, _MANIFEST = discover()
 
 
 class BrzaError(RuntimeError):
@@ -142,7 +165,7 @@ def worktree_remove(path: Path):
 # O workstream e a memória dele
 
 WORKSTREAM_PREFIX = 'workstream/'
-STUDIO_BRANCH = re.compile(r'[a-z]+/pln-(\d+)(-|$)')
+STUDIO_BRANCH = brza_root.plan_branch(_MANIFEST)  # o `[code].plan_branch` do manifesto, ou o padrão
 
 
 class Refused(Exception):
@@ -158,7 +181,7 @@ def workstream_root(name: str) -> Path:
 
 
 def workstreams_with_plan(number: str, refs: str) -> list[str]:
-    """Os nomes dos workstreams, entre as branches de `refs` (refs/heads/workstream ou refs/remotes/origin/workstream),
+    """Os nomes dos workstreams, entre as branches de `refs` (refs/heads/workstream ou refs/remotes/<remote>/workstream),
     que têm plans/PLN-<number>-* — um git ls-tree por ref."""
     prefix = f'plans/PLN-{number}-'
     base = f'{refs}/'
@@ -171,9 +194,10 @@ def workstreams_with_plan(number: str, refs: str) -> list[str]:
 
 
 def workstream_of_plan(number: str) -> str:
-    """O workstream que tem o plano PLN-<number>: as branches locais primeiro e, sem achar nenhuma, as de origin. Nenhum
-    ou mais de um recusa e pede o --workstream."""
-    for refs in ('refs/heads/workstream', 'refs/remotes/origin/workstream'):
+    """O workstream que tem o plano PLN-<number>: as branches locais primeiro e, sem achar nenhuma, as do remote do
+    manifesto (`origin` sem ele). Nenhum ou mais de um recusa e pede o --workstream."""
+    remote = brza_root.workspace_remote(brza_root.read_manifest(WORKSPACE) or {})
+    for refs in ('refs/heads/workstream', f'refs/remotes/{remote}/workstream'):
         found = workstreams_with_plan(number, refs)
         if len(found) == 1:
             return found[0]

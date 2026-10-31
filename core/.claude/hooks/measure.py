@@ -16,8 +16,9 @@ Um modo por evento do Claude Code, no primeiro argumento:
 - `memory` (junto do `Stop` e do `SubagentStop`, sem modo próprio): um evento por arquivo de memória criado, editado ou
   apagado no worktree do workstream do cwd, pela diferença para o retrato em .measurements/memory-snapshot.json.
 
-Toda linha leva o `workstream` do cwd: o de `workstream/<x>` no brza-workspace, `master` no checkout da master, o do plano
-cuja `pln-NNN` está na branch do brza-studio, ou null. O turno leva também as `rounds`: as respostas às perguntas com
+Toda linha leva o `workstream` do cwd: o de `workstream/<x>` no workspace, o nome da branch da norma (`[workspace].branch`
+do manifesto) no checkout dela, o do plano cuja `pln-NNN` está na branch do repositório de código, ou null. A raiz do
+workspace vem do `brza_root`: o manifesto no common dir, ou o registro da máquina para o código. O turno leva também as `rounds`: as respostas às perguntas com
 opções (`AskUserQuestion`) do trecho, contadas como recomendada, outra opção ou texto livre.
 
 Só mede: nunca bloqueia nem escreve fora de .measurements/. O `resume_guard.py` grava no mesmo log a linha `guard`.
@@ -33,6 +34,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import brza_root  # noqa: E402 — a raiz do workspace, o manifesto e o registro, compartilhados com o CLI
 
 try:
     import fcntl
@@ -73,22 +77,28 @@ def request_cost(price, tokens):
             + tokens.get("cache_read", 0) * price["cache_read"] + tokens.get("output", 0) * price["output"]) / 1e6
 
 
-# A raiz é a do workspace, e não o diretório da sessão: sessão aberta no brza-studio também carrega este hook, pelo
-# --settings da função do ~/.zshrc, que passa a BRZA_WORKSPACE. Sem ela vale o diretório onde o script mora, e nunca
-# o CLAUDE_PROJECT_DIR, para um .measurements/ não nascer no brza-studio. MEASURE_DIR existe só para teste.
-ROOT = (os.environ.get("MEASURE_DIR") or os.environ.get("BRZA_WORKSPACE")
-        or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+def script_root():
+    """O checkout principal do repositório onde este script mora, pelo common dir — `.worktrees/<x>/.claude/hooks`
+    leva à raiz, e não ao worktree —; sem git, o diretório três acima."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = brza_root.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=here)
+    if out and os.path.basename(out.strip()) == ".git":
+        return os.path.dirname(out.strip())
+    return os.path.dirname(os.path.dirname(os.path.dirname(here)))
+
+
+# A raiz é a do workspace, e não o diretório da sessão: sessão aberta no repositório de código também carrega este hook,
+# pelo --settings do lançador, que passa a BRZA_WORKSPACE. Sem ela vale o checkout principal do script, e nunca o
+# CLAUDE_PROJECT_DIR, para um .measurements/ não nascer no código. MEASURE_DIR existe só para teste.
+ROOT = os.environ.get("MEASURE_DIR") or os.environ.get("BRZA_WORKSPACE") or script_root()
 DIR = os.path.join(ROOT, ".measurements")
 LOG = os.path.join(DIR, "measurements.jsonl")
 STATE = os.path.join(DIR, "state.json")
 LOCK = os.path.join(DIR, "state.lock")
 SNAPSHOT = os.path.join(DIR, "memory-snapshot.json")
-# As raízes dos dois repositórios que carregam este hook: o workspace (as notas, em branches workstream/*) e o brza-studio
-# (as sessões de código, em branches <tipo>/pln-NNN-<slug>). Lógica copiada do scripts/brza/brza-note, sem importá-lo.
-WORKSPACE = os.path.expanduser(os.environ.get("BRZA_WORKSPACE") or "~/Projects/brza-workspace")
-STUDIO = os.path.expanduser(os.environ.get("BRZA_STUDIO") or "~/Projects/brza-studio")
+# O workspace (as notas, em branches workstream/*) e o repositório de código (as sessões de código, em branches que o
+# `[code].plan_branch` do manifesto casa) se acham pelo brza_root, e não por caminho fixo.
 WORKSTREAM_PREFIX = "workstream/"
-STUDIO_BRANCH = re.compile(r"[a-z]+/pln-(\d+)(-|$)")
 # Diretório de configuração da conta que abriu a sessão: o adm-claude do ~/.zshrc passa CLAUDE_CONFIG_DIR.
 CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
@@ -533,22 +543,25 @@ def git(*args, cwd):
     return done.stdout if done.returncode == 0 else None
 
 
-def workstreams_with_plan(number, refs):
-    """Os workstreams, entre as branches de `refs` (refs/heads/workstream ou refs/remotes/origin/workstream), que têm
-    plans/PLN-<number>-* — um git ls-tree por ref. Mesma busca do `workstreams_with_plan` do scripts/brza/brza-note."""
+def workstreams_with_plan(number, refs, root):
+    """Os workstreams, entre as branches de `refs` (refs/heads/workstream ou refs/remotes/<remote>/workstream), que têm
+    plans/PLN-<number>-* — um git ls-tree por ref, no workspace `root`. Mesma busca do `workstreams_with_plan` do
+    bin/brza_runtime.py do brza-workflow."""
     prefix, base, found = f"plans/PLN-{number}-", f"{refs}/", []
-    for ref in (git("for-each-ref", "--format=%(refname)", base, cwd=WORKSPACE) or "").split():
-        names = (git("ls-tree", "--name-only", "-z", ref, "plans/", cwd=WORKSPACE) or "").split("\0")
+    for ref in (git("for-each-ref", "--format=%(refname)", base, cwd=root) or "").split():
+        names = (git("ls-tree", "--name-only", "-z", ref, "plans/", cwd=root) or "").split("\0")
         if any(n.startswith(prefix) for n in names):
             found.append(ref[len(base):])
     return sorted(found)
 
 
-def workstream_of_plan(number):
-    """O workstream que tem o plano PLN-<number>: as branches locais primeiro e, sem achar nenhuma, as de origin. Mais
-    de um (ou nenhum) é ambíguo e fica sem workstream: o brza-note recusa e pede o --workstream, e o hook só mede."""
-    for refs in ("refs/heads/workstream", "refs/remotes/origin/workstream"):
-        found = workstreams_with_plan(number, refs)
+def workstream_of_plan(number, ws):
+    """O workstream que tem o plano PLN-<number> no workspace `ws` (um `brza_root.Workspace`): as branches locais
+    primeiro e, sem achar nenhuma, as do remote do manifesto. Mais de um (ou nenhum) é ambíguo e fica sem workstream: o
+    brza-note recusa e pede o --workstream, e o hook só mede."""
+    remote = brza_root.workspace_remote(ws.manifest)
+    for refs in ("refs/heads/workstream", f"refs/remotes/{remote}/workstream"):
+        found = workstreams_with_plan(number, refs, str(ws.root))
         if len(found) == 1:
             return found[0]
         if found:
@@ -564,11 +577,11 @@ _WORKSTREAMS = {}  # cwd → (workstream, worktree do workstream), por execuçã
 
 
 def resolve_workstream(cwd):
-    """(workstream, worktree) do cwd, ou (None, None). O repositório sai do `git rev-parse --git-common-dir`:
-    - brza-workspace, branch `workstream/<x>` → (x, a raiz desse worktree); branch `master` → ("master", None), porque a
-      master guarda só a norma e não tem memória;
-    - brza-studio, branch `<tipo>/pln-NNN-<slug>` → o workstream do plano, com o worktree dele em
-      <workspace>/.worktrees/<x>, se existir;
+    """(workstream, worktree) do cwd, ou (None, None). O workspace sai do `brza_root.find`:
+    - no workspace (papel `notes`), branch `workstream/<x>` → (x, a raiz desse worktree); a branch da norma
+      (`[workspace].branch`) → (o nome dela, None), porque a norma não tem memória;
+    - no repositório de código (papel `code`, ligado pelo registro), branch que o `[code].plan_branch` casa → o workstream
+      do plano, com o worktree dele em <raiz>/.worktrees/<x>, se existir;
     - o resto → (None, None)."""
     if not cwd or not isinstance(cwd, str):
         return None, None
@@ -581,23 +594,21 @@ def resolve_workstream(cwd):
 
 
 def _resolve_workstream(cwd):
-    out = git("rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", cwd=cwd)
-    if not out or len(out.split("\n")) < 2:
+    ws = brza_root.find(cwd, branch=True)
+    if not ws or not ws.role:
         return None, None
-    top, common = (realpath(x) for x in out.strip().split("\n")[:2])
-    branch = (git("symbolic-ref", "--short", "-q", "HEAD", cwd=top) or "").strip()
-    if common == realpath(os.path.join(WORKSPACE, ".git")):
+    branch = ws.branch or ""
+    if ws.role == "notes":
         if branch.startswith(WORKSTREAM_PREFIX) and len(branch) > len(WORKSTREAM_PREFIX):
-            return branch[len(WORKSTREAM_PREFIX):], top
-        return ("master", None) if branch == "master" else (None, None)
-    if common == realpath(os.path.join(STUDIO, ".git")):
-        match = STUDIO_BRANCH.match(branch)
-        name = workstream_of_plan(match.group(1)) if match else None
-        if not name:
-            return None, None
-        tree = os.path.join(WORKSPACE, ".worktrees", name)
-        return name, realpath(tree) if os.path.exists(os.path.join(tree, ".git")) else None
-    return None, None
+            return branch[len(WORKSTREAM_PREFIX):], realpath(str(ws.top))
+        main = brza_root.workspace_branch(ws.manifest)
+        return (main, None) if branch == main else (None, None)
+    match = brza_root.plan_branch(ws.manifest).match(branch)
+    name = workstream_of_plan(match.group(1), ws) if match else None
+    if not name:
+        return None, None
+    tree = os.path.join(str(ws.root), ".worktrees", name)
+    return name, realpath(tree) if os.path.exists(os.path.join(tree, ".git")) else None
 
 
 def workstream_of(cwd):

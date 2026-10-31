@@ -56,8 +56,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
-from brza_runtime import (WORKSPACE, BrzaError, brza, canonicalize, git, rpc, send_to_chat,  # noqa: E402,F401
-                          user_data)
+from brza_runtime import (WORKSPACE, BrzaError, brza, brza_root, canonicalize, git, rpc,  # noqa: E402,F401
+                          send_to_chat, user_data)
 
 CHAT_COMMAND = 'claude-brza'
 VERBS = ('open', 'list', 'send', 'title', 'close')
@@ -143,16 +143,10 @@ def running(name: str) -> bool:
 
 
 def workspace_root(cwd: Path | None = None) -> Path:
-    """A raiz do brza-workspace: a do git common dir do cwd, quando ele é um checkout do brza-workspace, ou a WORKSPACE.
-
-    O checkout do brza-workspace se reconhece por trazer este comando em scripts/brza/. Num worktree em `.worktrees/`, o
-    common dir é o `.git` da raiz; num checkout do brza-studio, ou fora de um repositório, vale a WORKSPACE."""
-    try:
-        common = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=cwd or Path.cwd()).strip()
-    except BrzaError:
-        return WORKSPACE
-    root = Path(common).resolve().parent
-    return root if (root / 'scripts' / 'brza' / 'brza-sessions').is_file() else WORKSPACE
+    """A raiz do workspace do cwd, pelo `brza_root.find` — o manifesto no common dir, ou o registro da máquina, para um
+    worktree do código —, ou a WORKSPACE quando o cwd não é de um workspace."""
+    found = brza_root.find(cwd or Path.cwd())
+    return found.root if found else WORKSPACE
 
 
 def resolve_checkout(checkout: Path, cwd: Path | None = None) -> Path:

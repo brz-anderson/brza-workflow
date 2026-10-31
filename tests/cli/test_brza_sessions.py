@@ -15,6 +15,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+os.environ['BRZA_REGISTRY'] = '/nonexistent/brza/workspaces.toml'  # nada aqui lê o registro real da máquina
 SESSIONS = runpy.run_path(str(Path(__file__).resolve().parent.parent.parent / 'packages' / 'client' / 'bin' / 'brza-sessions'))
 # As funções leem os globais do módulo em que nasceram, não da cópia que o run_path devolve.
 GLOBALS = SESSIONS['main'].__globals__
@@ -249,15 +250,17 @@ class CommandTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn('abriria:  c3-prova', out)
 
-    # O --checkout relativo parte da raiz do brza-workspace, e não do cwd (pedido da sessão workspace, 2026-10-31).
+    # O --checkout relativo parte da raiz do workspace, e não do cwd (pedido da sessão workspace, 2026-10-31).
 
     def workspace_clone(self) -> Path:
-        """Um brza-workspace num repositório temporário, com o worktree `.worktrees/workspace`."""
+        """Um workspace de outro nome (`acme-notes`), com o manifesto, num repositório temporário, com o worktree
+        `.worktrees/workspace`."""
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name).resolve() / 'brza-workspace'
-        (root / 'scripts' / 'brza').mkdir(parents=True)
-        (root / 'scripts' / 'brza' / 'brza-sessions').write_text('')
+        self.temp = Path(temp.name).resolve()
+        root = self.temp / 'acme-notes'
+        (root / '.brza').mkdir(parents=True)
+        (root / '.brza' / 'workspace.toml').write_text('schema = 1\n[workspace]\nname = "acme-notes"\n')
         env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
                'GIT_COMMITTER_EMAIL': 't@t'}
         for args in (('init', '-q', '-b', 'master'), ('add', '.'), ('commit', '-qm', 'norma'),
@@ -273,6 +276,23 @@ class CommandTest(unittest.TestCase):
                 return self.run_main(*argv)
         finally:
             os.chdir(here)
+
+    def test_a_relative_checkout_from_a_code_worktree_outside_its_directory_starts_at_the_workspace_root(self):
+        root = self.workspace_clone()
+        code = self.temp / 'acme-app'
+        code.mkdir()
+        env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
+               'GIT_COMMITTER_EMAIL': 't@t'}
+        for args in (('init', '-q', '-b', 'main'), ('commit', '-q', '--allow-empty', '-m', 'x'),
+                     ('worktree', 'add', '-q', '-b', 'feat/pln-001-x', str(self.temp / 'elsewhere' / 'feat'))):
+            subprocess.run(['git', '-C', str(code), *args], check=True, capture_output=True, env=env)
+        registry = self.temp / 'registry.toml'
+        registry.write_text(f'[[workspace]]\nroot = "{root}"\ncode = "{code}"\n')
+        with patch.dict(os.environ, {'BRZA_REGISTRY': str(registry)}):
+            code_exit, out = self.run_in(self.temp / 'elsewhere' / 'feat', 'tools-kit-shot', '--checkout',
+                                         '.worktrees/tools-kit')
+        self.assertEqual(code_exit, 0, out)
+        self.assertEqual(self.read_map()[0]['checkout'], str(root / '.worktrees' / 'tools-kit'))
 
     def test_a_relative_checkout_from_a_worktree_starts_at_the_workspace_root(self):
         root = self.workspace_clone()

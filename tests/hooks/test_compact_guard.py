@@ -181,7 +181,9 @@ class CompactGuardTest(unittest.TestCase):
         script = os.path.join(HOOKS, "compact_guard.py")
         # Sem o mock, o processo novo resolve o workstream pelo git: o repositório temporário não é do workspace, e passa.
         done = subprocess.run([sys.executable, script, "pre"], input=json.dumps({"cwd": self.tree, "trigger": "manual"}),
-                              capture_output=True, text=True, env={**os.environ, "MEASURE_DIR": self.tmp.name})
+                              capture_output=True, text=True,
+                              env={**os.environ, "MEASURE_DIR": self.tmp.name,
+                                   "BRZA_REGISTRY": os.path.join(self.tmp.name, "sem-registro.toml")})
         self.assertEqual((done.returncode, done.stdout), (0, ""))
 
     def test_main_survives_bad_input(self):
@@ -189,6 +191,74 @@ class CompactGuardTest(unittest.TestCase):
         done = subprocess.run([sys.executable, script, "pre"], input="não é json", capture_output=True, text=True,
                               env={**os.environ, "MEASURE_DIR": self.tmp.name})
         self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+
+class OtherWorkspaceTest(unittest.TestCase):
+    """O hook inteiro, em processo, com o resolvedor de verdade: um workspace de outro nome (`acme-notes`, na branch
+    `trunk`) e o código dele (`acme-app`) ligados pelo registro, com o worktree do código fora do diretório dele."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = os.path.realpath(self.tmp.name)
+        self.notes, self.code = os.path.join(base, "acme-notes"), os.path.join(base, "acme-app")
+        for repo, branch in ((self.notes, "trunk"), (self.code, "main")):
+            os.makedirs(repo)
+            run("init", "-q", "-b", branch, cwd=repo)
+        os.makedirs(os.path.join(self.notes, ".brza"))
+        with open(os.path.join(self.notes, ".brza", "workspace.toml"), "w", encoding="utf-8") as f:
+            f.write('schema = 1\n[workspace]\nname = "acme-notes"\nbranch = "trunk"\n[code]\nname = "acme-app"\n')
+        for repo in (self.notes, self.code):
+            with open(os.path.join(repo, "README.md"), "w", encoding="utf-8") as f:
+                f.write("x\n")
+            run("add", "-A", cwd=repo)
+            run("commit", "-q", "-m", "base", cwd=repo)
+        run("branch", "workstream/w", cwd=self.notes)
+        self.tree = os.path.join(self.notes, ".worktrees", "w")
+        run("worktree", "add", "-q", self.tree, "workstream/w", cwd=self.notes)
+        os.makedirs(os.path.join(self.tree, "plans", "PLN-001-x"))
+        with open(os.path.join(self.tree, "plans", "PLN-001-x", "PLN-001-plan.md"), "w", encoding="utf-8") as f:
+            f.write("# plano\n")
+        run("add", "-A", cwd=self.tree)
+        run("commit", "-q", "-m", "plano", cwd=self.tree)
+        self.far = os.path.join(base, "elsewhere", "feat")
+        run("worktree", "add", "-q", "-b", "feat/pln-001-x", self.far, cwd=self.code)
+        self.registry = os.path.join(base, "registry.toml")
+        with open(self.registry, "w", encoding="utf-8") as f:
+            f.write(f'[[workspace]]\nroot = "{self.notes}"\ncode = "{self.code}"\n')
+        os.makedirs(os.path.join(self.tree, "memory"))
+        with open(os.path.join(self.tree, "memory", "m.md"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+
+    def pre(self, cwd, registry=True):
+        env = {k: v for k, v in os.environ.items() if k != "BRZA_WORKSPACE"}
+        env.update({"MEASURE_DIR": os.path.join(self.tmp.name, "measure"),
+                    "BRZA_REGISTRY": self.registry if registry else os.path.join(self.tmp.name, "nada.toml")})
+        done = subprocess.run([sys.executable, os.path.join(HOOKS, "compact_guard.py"), "pre"],
+                              input=json.dumps({"cwd": cwd, "trigger": "manual"}), capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout) if done.stdout else None
+
+    def test_the_workspace_worktree_is_blocked_with_the_skill(self):
+        out = self.pre(self.tree)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("workstream w", out["reason"])
+        self.assertIn("/close-task", out["reason"])
+
+    def test_the_code_worktree_outside_its_directory_is_blocked_with_the_steps_by_the_registry(self):
+        out = self.pre(self.far)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn(f"no worktree do workstream w ({self.tree})", out["reason"])
+        self.assertNotIn("/close-task", out["reason"])
+        self.assertNotIn("brza-", out["reason"])
+
+    def test_without_the_registry_entry_the_code_worktree_is_not_checked(self):
+        self.assertIsNone(self.pre(self.far, registry=False))
+
+    def test_the_norm_branch_checkout_and_the_literal_master_are_not_checked(self):
+        self.assertIsNone(self.pre(self.notes))  # trunk
+        run("checkout", "-q", "-b", "master", cwd=self.notes)
+        self.assertIsNone(self.pre(self.notes))  # com o manifesto em trunk, master é uma branch qualquer
 
 
 if __name__ == "__main__":

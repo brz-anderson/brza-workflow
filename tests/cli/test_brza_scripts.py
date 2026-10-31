@@ -18,6 +18,7 @@ HERE = Path(__file__).parent
 ROOT = HERE.resolve().parent.parent
 BIN = ROOT / 'bin'
 CLIENT = ROOT / 'packages' / 'client' / 'bin'
+os.environ['BRZA_REGISTRY'] = '/nonexistent/brza/workspaces.toml'  # nada aqui lê o registro real da máquina
 WRAPPER = runpy.run_path(str(CLIENT / 'claude-brza'))
 RUN = runpy.run_path(str(CLIENT / 'brza-run'))
 INSTALL = runpy.run_path(str(BIN / 'brza-install'))

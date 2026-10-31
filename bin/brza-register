@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Liga um workspace ao repositório de código dele, no registro da máquina.
+
+    brza register <raiz> [--code <caminho>]
+
+Acrescenta `{root, code}` ao `~/.config/brza/workspaces.toml` (ou ao `$XDG_CONFIG_HOME/brza/`), que é como o `brza where`,
+os hooks e o `brza note` acham o workspace a partir do repositório de código, inclusive de um worktree fora do diretório
+dele. O `<raiz>` é um workspace, com `.brza/workspace.toml`; sem `--code`, vale o `[code].path` do manifesto. O código
+é gravado como o checkout principal, mesmo quando se passa um worktree.
+
+Recusa, com saída 1, o código já ligado a outro workspace, o workspace já ligado a outro código, a raiz sem manifesto, o código
+que não é repositório git e o registro ilegível. O par que já está lá não muda nada (0, "já registrado"). A saída diz
+`registro: <caminho>`: o arquivo é de usuário, e cada escrita vai ao worklog, em "## Fora do workspace".
+
+Só o brza_root, e roda no Python 3.9 do sistema.
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core' / '.claude' / 'hooks'))
+import brza_root  # noqa: E402
+
+
+def refuse(message):
+    print(f'recusado: {message}')
+    return 1
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog='brza register', description='Liga um workspace ao código dele no registro da máquina.')
+    ap.add_argument('root', metavar='raiz', help='o workspace, com .brza/workspace.toml')
+    ap.add_argument('--code', metavar='caminho', help='o repositório de código; padrão o [code].path do manifesto')
+    args = ap.parse_args(argv)
+    root = Path(os.path.realpath(os.path.expanduser(args.root)))
+    manifest = brza_root.read_manifest(root)
+    if manifest is None:
+        return refuse(f'{root} não tem um {brza_root.MANIFEST} legível; a raiz é um workspace (brza init)')
+    code = Path(os.path.expanduser(args.code)) if args.code else brza_root.manifest_code_path(manifest)
+    if not code:
+        return refuse('sem --code, e o manifesto não traz [code].path')
+    dirs = brza_root._dirs(code) if code.is_dir() else None
+    if not dirs:
+        return refuse(f'{code} não é um repositório git')
+    try:
+        added = brza_root.register(root, dirs[1])
+    except brza_root.RegisterError as e:
+        return refuse(str(e))
+    print(f'{"registrado" if added else "já registrado"}: {root} -> {dirs[1]}')
+    print(f'registro: {brza_root.registry_path()}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

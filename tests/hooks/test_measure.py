@@ -35,11 +35,15 @@ def lines_of(path):
 class HookTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # O registro da máquina de teste: um arquivo que não existe, e nunca o ~/.config real.
+        os.environ["BRZA_REGISTRY"] = os.path.join(self.tmp.name, "config", "workspaces.toml")
+        os.environ.pop("BRZA_WORKSPACE", None)
         self.measure = load_measure(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
         os.environ.pop("MEASURE_DIR", None)
+        os.environ.pop("BRZA_REGISTRY", None)
 
     def logged(self):
         return [json.loads(line) for line in lines_of(self.measure.LOG)]

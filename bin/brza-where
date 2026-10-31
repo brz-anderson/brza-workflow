@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Imprime `<raiz> notes|code` — a raiz do workspace do cwd e o papel do cwd nele — ou nada.
+
+    brza where [diretório]
+
+`notes` é um checkout ou worktree do workspace; `code` é o do repositório de código ligado a ele pelo registro da
+máquina (`~/.config/brza/workspaces.toml`), onde quer que o worktree esteja. Fora disso, ou sem entrada no registro,
+não imprime nada e sai com 0: é o que o `~/.zshrc` chama a cada `claude` lançado, e `-n "$(brza where)"` decide.
+A BRZA_WORKSPACE, apontando para um workspace com manifesto, só escolhe a raiz; o papel ainda vem do cwd.
+
+Só o brza_root, e roda no Python 3.9 do sistema: sobe em ~30 ms, e não importa o runtime do app.
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core' / '.claude' / 'hooks'))
+import brza_root  # noqa: E402
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog='brza where', description='A raiz do workspace do cwd e o papel dele: notes ou code.')
+    ap.add_argument('directory', nargs='?', default=None, metavar='diretório', help='padrão o cwd')
+    args = ap.parse_args(argv)
+    found = brza_root.find(args.directory or str(Path.cwd()))
+    if found and found.role:
+        print(f'{found.root} {found.role}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

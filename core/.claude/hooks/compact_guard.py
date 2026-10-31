@@ -2,18 +2,19 @@
 """Trava de fechamento: barra o /compact digitado enquanto a tarefa não fechou nas notas do workstream, e avisa depois
 da compactação que deixou nota sem commit.
 
-O worktree conferido é o do workstream do cwd, pelo `measure.resolve_workstream`: o próprio, no brza-workspace, ou, no
-brza-studio, o do workstream do plano da branch. Dois modos:
+O worktree conferido é o do workstream do cwd, pelo `measure.resolve_workstream`: o próprio, no workspace, ou, no
+repositório de código, o do workstream do plano da branch. O workspace se acha pelo `brza_root`, e não por nome fixo.
+Dois modos:
 
 - `pre`, no PreCompact com matcher `manual`: barra quando há arquivo sujo ou não rastreado em work/, plans/, wiki/,
   memory/ ou .claude/agent-memory/, ou quando falta em work/worklogs/ o arquivo com a data de hoje. A mensagem, que
-  aparece para quem digitou, aponta o /close-task; no brza-studio, que não carrega as skills daqui, dá os passos. O
+  aparece para quem digitou, aponta o /close-task; no repositório de código, que não carrega as skills daqui, dá os passos. O
   `/compact sem-fechar` passa, e o `sem-fechar` fica no estado por 30 min.
 - `post`, no SessionStart com matcher `compact`, automática ou manual: com nota suja no mesmo worktree, injeta no
   contexto a ordem de atualizar o worklog do dia a partir do resumo e fechar a tarefa. Depois de um `sem-fechar` da
   mesma sessão, não injeta.
 
-Nunca barra na master, fora de workstream, sem o worktree do workstream, quando o git falha nem em qualquer exceção.
+Nunca barra na branch da norma, fora de workstream, sem o worktree do workstream, quando o git falha nem em qualquer exceção.
 Cada conferência vira uma linha `guard` com `kind: compact` na medição.
 """
 
@@ -70,7 +71,7 @@ def target(p):
     """(workstream, worktree, no_studio) da sessão, ou None quando não há o que conferir."""
     cwd = p.get("cwd") or os.getcwd()
     name, worktree = measure.resolve_workstream(cwd)
-    if not name or name == "master" or not worktree:
+    if not name or not worktree:  # a branch da norma volta sem worktree: não tem nota de workstream
         return None
     return name, worktree, not inside(cwd, worktree)
 
@@ -81,7 +82,7 @@ def listing(files):
 
 
 def closing(name, worktree, studio):
-    """Como fechar a tarefa: o /close-task no workspace; os passos no brza-studio, que não carrega a skill."""
+    """Como fechar a tarefa: o /close-task no workspace; os passos no repositório de código, que não carrega a skill."""
     if not studio:
         return "rode /close-task, que grava o worklog e o Retomar e commita as notas"
     return (f"feche a tarefa no worktree do workstream {name} ({worktree}): grave o worklog de hoje em work/worklogs/ "
