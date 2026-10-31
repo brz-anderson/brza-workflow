@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """O `claude` das sessões de chat do BrzA Studio, com o que a função `brza_claude` do ~/.zshrc passa no terminal.
 
-O chat roda o Claude Code sem o zsh de login, e por isso sem as funções do ~/.zshrc. Com o cwd no brza-workspace, o
-`--setting-sources=user,project,local` do chat já carrega o .claude/settings.json daqui; num checkout do brza-studio, a
-sessão subiria sem os hooks de medição, sem a trava de retomada e sem a identidade do brz-anderson. O app chama no lugar
-do `claude` o executável de `agentCmdOverrides.claude`, que o `brza install --chat-command` aponta para o
-~/.local/bin/claude-brza, um link para este arquivo.
+O chat roda o Claude Code sem o zsh de login, e por isso sem as funções do ~/.zshrc. Com o cwd no workspace, o
+`--setting-sources=user,project,local` do chat já carrega o .claude/settings.json dele; num checkout do código, a sessão
+subiria sem os hooks de medição e sem a identidade do workspace. O app chama no lugar do `claude` o executável de
+`agentCmdOverrides.claude`, que o `brza install --chat-command` aponta para o ~/.local/bin/claude-brza, um link para
+este arquivo.
 
-Quando o cwd é do brza-workspace ou do brza-studio, o wrapper faz o mesmo que a `brza_claude`: põe a BRZA_WORKSPACE e o
---settings do brza-workspace. No brza-studio, e só nele, acrescenta também o `--agents` com os subagentes do
-.claude/agents do brza-workspace (o brza_runtime.agents_json), se houver algum e a chamada não trouxer o `--agents`; no
-brza-workspace o claude já lê o .claude/agents do projeto. O repositório sai do `git rev-parse --git-common-dir`, e não do prefixo do caminho,
-porque o worktree que o app cria fica em ~/orca/workspaces/…, fora dos dois. Fora deles — o `--version`, o one-shot que
-o app roda com cwd=/ e os checkouts da Fixfy —, o claude puro, com os argumentos intactos. Qualquer falha também cai no
-claude puro, porque o override vale para todo chat do Claude no app.
+O workspace do cwd sai do `brza_root.find`: o `.brza/workspace.toml` do checkout principal do repositório do cwd —
+papel `notes` — ou, para o repositório de código, o registro da máquina (~/.config/brza/workspaces.toml, que o
+`brza register` escreve) — papel `code`. O worktree do app, em ~/orca/workspaces/…, fora das duas pastas, acha o
+workspace pelo common dir. A BRZA_WORKSPACE, apontando para um workspace com manifesto, só escolhe a raiz.
 
-O claude real é o primeiro `claude` do PATH que não seja este arquivo. As raízes vêm da BRZA_WORKSPACE e da BRZA_STUDIO
-ou, sem elas, de ~/Projects/brza-workspace e ~/Projects/brza-studio.
+Com workspace e papel, o wrapper faz o mesmo que a `brza_claude`: põe a BRZA_WORKSPACE=<raiz> e o --settings do
+workspace. No papel `code`, e só nele, acrescenta também o `--agents` com os subagentes do .claude/agents do workspace
+(o brza_runtime.agents_json), se houver algum e a chamada não trouxer o `--agents`; no workspace o claude já lê o
+.claude/agents do projeto. Fora disso — o `--version`, o one-shot que o app roda com cwd=/ e qualquer repositório sem
+ligação —, o claude puro, com os argumentos intactos. Qualquer falha também cai no claude puro, porque o override vale
+para todo chat do Claude no app.
+
+O claude real é o primeiro `claude` do PATH que não seja este arquivo. Nenhum nome ou caminho de workspace é fixo.
 """
 import os
 import subprocess
@@ -26,6 +29,8 @@ from pathlib import Path
 SELF = Path(__file__).resolve()
 sys.path.insert(0, str(SELF.parent))
 sys.path.insert(0, str(SELF.parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
+sys.path.insert(0, str(SELF.parents[3] / 'core' / '.claude' / 'hooks'))  # o brza_root, dos hooks do núcleo
+import brza_root  # noqa: E402
 
 
 def real_claude():
@@ -36,48 +41,15 @@ def real_claude():
     sys.exit('claude-brza: nenhum claude no PATH')
 
 
-def roots(environ):
-    """(brza-workspace, brza-studio), em caminho físico."""
-    home = Path.home() / 'Projects'
-    return tuple(Path(environ.get(var) or home / name).expanduser().resolve()
-                 for var, name in (('BRZA_WORKSPACE', 'brza-workspace'), ('BRZA_STUDIO', 'brza-studio')))
+def workspace_of(cwd: Path, environ):
+    """O workspace do cwd, com o papel (`notes` ou `code`), ou None: fora de um workspace, sem registro para o código, ou
+    com a BRZA_WORKSPACE apontando para outro."""
+    found = brza_root.find(cwd, environ)
+    return found if found and found.role else None
 
 
-def inside(path: Path, root: Path) -> bool:
-    """Compara sem maiúsculas, porque o APFS aceita ~/projects/brza-studio."""
-    here, base = str(path).lower(), str(root).lower()
-    return here == base or here.startswith(base + '/')
-
-
-def main_checkout(cwd: Path):
-    """O checkout principal do repositório do cwd, pelo git common dir, ou None fora de um repositório git."""
-    r = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-                       capture_output=True, text=True, timeout=5)
-    if r.returncode:
-        return None
-    common = Path(r.stdout.strip()).resolve()
-    return common.parent if common.name == '.git' else common
-
-
-def repo_of(cwd: Path, environ) -> str | None:
-    """'workspace' ou 'studio', o repositório brza do cwd — pelo caminho e, sem ele, pelo checkout principal —, ou None."""
-    for label, root in zip(('workspace', 'studio'), roots(environ)):
-        if inside(cwd, root):
-            return label
-    checkout = main_checkout(cwd)
-    if checkout is not None:
-        for label, root in zip(('workspace', 'studio'), roots(environ)):
-            if inside(checkout, root):
-                return label
-    return None
-
-
-def is_brza(cwd: Path, environ) -> bool:
-    return repo_of(cwd, environ) is not None
-
-
-def studio_agents(workspace: Path):
-    """Os argumentos `--agents <json>` dos subagentes do brza-workspace, ou [] sem agente ou com qualquer falha, que
+def code_agents(workspace: Path):
+    """Os argumentos `--agents <json>` dos subagentes do workspace, ou [] sem agente ou com qualquer falha, que
     não pode custar o --settings."""
     try:
         import brza_runtime
@@ -89,15 +61,14 @@ def studio_agents(workspace: Path):
 
 def command(claude, argv, cwd: Path, environ):
     """(argumentos, ambiente) da chamada."""
-    repo = repo_of(cwd.resolve(), environ)
-    if repo is None:
+    found = workspace_of(cwd, environ)
+    if found is None:
         return [claude, *argv], environ
-    workspace = roots(environ)[0]
-    env = {**environ, 'BRZA_WORKSPACE': str(workspace)}
+    env = {**environ, 'BRZA_WORKSPACE': str(found.root)}
     agents = []
-    if repo == 'studio' and not any(a == '--agents' or a.startswith('--agents=') for a in argv):
-        agents = studio_agents(workspace)
-    return [claude, '--settings', str(workspace / '.claude' / 'settings.json'), *agents, *argv], env
+    if found.role == 'code' and not any(a == '--agents' or a.startswith('--agents=') for a in argv):
+        agents = code_agents(found.root)
+    return [claude, '--settings', str(found.root / '.claude' / 'settings.json'), *agents, *argv], env
 
 
 def main():

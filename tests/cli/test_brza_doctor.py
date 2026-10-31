@@ -1,5 +1,6 @@
-"""Testes do brza-doctor, num workspace de mentira: o scripts/brza e o .claude/settings.json num diretório temporário,
-o ~/.local/bin temporário, o ambiente e o `rpc` trocados, e um brza-studio com uma origin/master de verdade.
+"""Testes do brza-doctor, num workspace de mentira: o checkout do brza-workflow, o manifesto, o registro e o
+.claude/settings.json num diretório temporário, o ~/.local/bin temporário, o ambiente e o `rpc` trocados, e um
+brza-studio com uma origin/master de verdade.
 
     python3 -m unittest discover -s tests/cli
 """
@@ -9,6 +10,7 @@ import json
 import os
 import plistlib
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,8 +28,16 @@ import brza_runtime as runtime  # noqa: E402
 DOCTOR = runpy.run_path(str(CLIENT / 'brza-doctor'))
 # As funções leem os globais do módulo em que nasceram, não da cópia que o run_path devolve.
 GLOBALS = DOCTOR['main'].__globals__
-NOREPLY = '240569289+brz-anderson@users.noreply.github.com'
-IDENT = f'Anderson Pereira Brzezinski <{NOREPLY}> 1793166405 -0300'
+EMAIL = 'dev@acme.example'
+IDENT = f'Alguém <{EMAIL}> 1793166405 -0300'
+MANIFEST = ('schema = 1\n\n[workspace]\nname = "acme-notes"\n\n[author]\nname = "Alguém"\nemail = "{email}"\n\n'
+            '[code]\nname = "acme-app"\npath = "{code}"\n')
+
+
+def make_exec(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('#!/bin/sh\n')
+    path.chmod(0o755)
 
 
 def git(*args, cwd: Path) -> str:
@@ -41,12 +51,22 @@ class DoctorTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
 
+        self.workflow = self.base / 'brza-workflow'
+        self.core, self.client = self.workflow / 'bin', self.workflow / 'packages' / 'client' / 'bin'
+        for folder, names in ((self.core, ('brza-install', 'brza-note')),
+                              (self.client, ('brza-doctor', 'brza-run', 'claude-brza'))):
+            for name in names:
+                make_exec(folder / name)
+        (self.core / 'brza_runtime.py').write_text('')
+
+        self.studio = self.base / 'brza-studio'
         self.workspace = self.base / 'brza-workspace'
-        scripts = self.workspace / 'scripts' / 'brza'
-        scripts.mkdir(parents=True)
-        for name in ('brza-run', 'brza-tree', 'claude-brza'):
-            (scripts / name).write_text('#!/bin/sh\n')
-            (scripts / name).chmod(0o755)
+        self.workspace.mkdir()
+        (self.workspace / '.brza').mkdir()
+        self.manifest = self.workspace / '.brza' / 'workspace.toml'
+        self.manifest.write_text(MANIFEST.format(email=EMAIL, code=self.studio))
+        self.local = self.workspace / 'scripts' / 'brza'
+        make_exec(self.local / 'brza-tree')
         (self.workspace / '.claude').mkdir()
         self.settings = self.workspace / '.claude' / 'settings.json'
         self.settings.write_text(json.dumps({'hooks': {'Stop': [{'hooks': [
@@ -54,10 +74,12 @@ class DoctorTest(unittest.TestCase):
 
         self.bin = self.base / 'bin'
         self.bin.mkdir()
-        for name in ('brza-run', 'brza-tree', 'claude-brza'):
-            (self.bin / name).symlink_to(scripts / name)
+        for folder, names in ((self.core, ('brza-install', 'brza-note')),
+                              (self.client, ('brza-doctor', 'brza-run', 'claude-brza')),
+                              (self.local, ('brza-tree',))):
+            for name in names:
+                (self.bin / name).symlink_to(folder / name)
 
-        self.studio = self.base / 'brza-studio'
         subprocess.run(['git', 'init', '-q', '-b', 'master', str(self.studio)], check=True)
         git('commit', '-q', '--allow-empty', '-m', 'um', cwd=self.studio)
         self.old = git('rev-parse', 'HEAD', cwd=self.studio)
@@ -65,6 +87,8 @@ class DoctorTest(unittest.TestCase):
         git('commit', '-q', '--allow-empty', '-m', 'três', cwd=self.studio)
         self.tip = git('rev-parse', 'HEAD', cwd=self.studio)
         git('update-ref', 'refs/remotes/origin/master', self.tip, cwd=self.studio)
+        self.registry = self.base / 'config' / 'workspaces.toml'
+        self.register(self.workspace, self.studio)
 
         self.app = self.base / 'Applications' / 'BrzA Studio.app'
         self.make_app(self.tip[:12])
@@ -73,6 +97,7 @@ class DoctorTest(unittest.TestCase):
         (self.dev_profile / 'orca-data.json').write_text('{}')
 
         self.ident = IDENT
+        self.config_email = None
         self.override = str(self.bin / 'claude-brza')
         self.rpc_error = None
         self.pnpm = '/opt/homebrew/bin/pnpm'
@@ -80,12 +105,19 @@ class DoctorTest(unittest.TestCase):
                   patch.object(runtime, 'STUDIO', self.studio),
                   patch.object(runtime, 'LOCAL_BIN', self.bin),
                   patch.object(runtime, 'rpc', self.fake_rpc),
-                  patch.dict(os.environ, {'BRZA_WORKSPACE': str(self.workspace)}),
+                  patch.dict(os.environ, {'BRZA_WORKSPACE': str(self.workspace), 'BRZA_WORKFLOW': str(self.workflow),
+                                          'BRZA_REGISTRY': str(self.registry)}),
                   patch.dict(GLOBALS, {'APP': self.app, 'DEV_PROFILE': self.dev_profile,
                                        'git_ident': lambda kind: self.ident,
+                                       'git_config_email': lambda: self.config_email,
                                        'which': lambda name: self.pnpm if name == 'pnpm' else None})):
             p.start()
             self.addCleanup(p.stop)
+
+    def register(self, root: Path, code: Path):
+        self.registry.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.registry, 'a') as f:
+            f.write(f'[[workspace]]\nroot = "{root}"\ncode = "{code}"\n')
 
     def make_app(self, commit: str):
         (self.app / 'Contents').mkdir(parents=True, exist_ok=True)
@@ -114,8 +146,16 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn('ERRO', out)
         self.assertNotIn('AVISO', out)
-        for check in ('identidade', 'medição', 'links', 'chat', 'pnpm', 'perfil', 'app'):
+        for check in ('identidade', 'medição', 'links', 'registro', 'chat', 'pnpm', 'perfil', 'app'):
             self.assertTrue(self.line(out, check).startswith('ok'), out)
+
+    def test_identidade_certa_vem_do_author_do_manifesto(self):
+        code, out = self.run_doctor()
+        self.assertEqual(code, 0, out)
+        line = self.line(out, 'identidade')
+        self.assertTrue(line.startswith('ok'), out)
+        self.assertIn(EMAIL, line)
+        self.assertIn('[author].email', line)
 
     def test_identidade_errada_e_erro_com_o_conserto(self):
         self.ident = 'Anderson Pereira Brzezinski <anderson@fixfy.com.br> 1793166405 -0300'
@@ -124,6 +164,7 @@ class DoctorTest(unittest.TestCase):
         line = self.line(out, 'identidade')
         self.assertTrue(line.startswith('ERRO'), out)
         self.assertIn('anderson@fixfy.com.br', line)
+        self.assertIn(EMAIL, line)
         self.assertIn('conserta:', out)
         self.assertIn('claude-brza', out.split(line, 1)[1].splitlines()[1])
 
@@ -132,6 +173,35 @@ class DoctorTest(unittest.TestCase):
         code, out = self.run_doctor()
         self.assertEqual(code, 1)
         self.assertIn('GIT_COMMITTER_IDENT', self.line(out, 'identidade'))
+
+    def test_o_noreply_do_brz_anderson_nao_e_fixo(self):
+        self.ident = 'Anderson <240569289+brz-anderson@users.noreply.github.com> 1793166405 -0300'
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertIn(EMAIL, self.line(out, 'identidade'))
+        self.manifest.write_text(MANIFEST.format(email='240569289+brz-anderson@users.noreply.github.com',
+                                                 code=self.studio))
+        code, out = self.run_doctor()
+        self.assertTrue(self.line(out, 'identidade').startswith('ok'), out)
+
+    def test_sem_author_no_manifesto_vale_o_git_config(self):
+        self.manifest.write_text('schema = 1\n\n[code]\npath = "%s"\n' % self.studio)
+        self.config_email = EMAIL
+        code, out = self.run_doctor()
+        line = self.line(out, 'identidade')
+        self.assertTrue(line.startswith('ok'), out)
+        self.assertIn('git config', line)
+        self.config_email = 'outro@acme.example'
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertTrue(self.line(out, 'identidade').startswith('ERRO'), out)
+
+    def test_sem_author_nem_git_config_e_aviso_que_manda_gravar_o_author(self):
+        self.manifest.write_text('schema = 1\n\n[code]\npath = "%s"\n' % self.studio)
+        code, out = self.run_doctor()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.line(out, 'identidade').startswith('AVISO'), out)
+        self.assertIn('[author].email', out.split(self.line(out, 'identidade'), 1)[1].splitlines()[1])
 
     def test_sem_brza_workspace_no_ambiente_e_erro_de_medicao(self):
         del os.environ['BRZA_WORKSPACE']
@@ -153,22 +223,115 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(self.line(out, 'medição').startswith('ERRO'))
 
-    def test_link_ausente_e_erro_que_manda_o_install_all(self):
-        (self.bin / 'brza-tree').unlink()
+    def test_link_ausente_do_nucleo_e_erro_que_manda_o_install_all(self):
+        (self.bin / 'brza-note').unlink()
         code, out = self.run_doctor()
         self.assertEqual(code, 1)
         line = self.line(out, 'links')
         self.assertTrue(line.startswith('ERRO'))
-        self.assertIn('brza-tree ausente', line)
+        self.assertIn('brza-note ausente', line)
         self.assertIn('brza install --all', out)
+        self.assertNotIn('--client', out)
 
-    def test_link_alheio_e_erro_que_manda_apagar_antes(self):
+    def test_link_ausente_do_cliente_e_do_local_mandam_o_comando_de_cada_um(self):
+        (self.bin / 'brza-run').unlink()
+        (self.bin / 'brza-tree').unlink()
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        line = self.line(out, 'links')
+        self.assertIn('brza-run ausente', line)
+        self.assertIn('brza-tree ausente', line)
+        fix = out.split(line, 1)[1].splitlines()[1]
+        self.assertIn('brza install --client', fix)
+        self.assertIn(f'--local {self.workspace}', fix)
+        self.assertNotIn('--all', fix)
+
+    def test_link_alheio_e_erro_que_manda_o_relink(self):
         (self.bin / 'brza-run').unlink()
         (self.bin / 'brza-run').symlink_to('/tmp/outro')
         code, out = self.run_doctor()
         self.assertEqual(code, 1)
         self.assertIn('brza-run aponta para', self.line(out, 'links'))
-        self.assertIn(f'rm {self.bin / "brza-run"}', out)
+        self.assertIn('--relink', out)
+
+    def test_link_para_o_workspace_no_lugar_do_checkout_e_erro(self):
+        # o estado antes do P8: o brza-note ainda ligado ao scripts/brza do workspace
+        make_exec(self.local / 'brza-note')
+        (self.bin / 'brza-note').unlink()
+        (self.bin / 'brza-note').symlink_to(self.local / 'brza-note')
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertIn('brza-note aponta para', self.line(out, 'links'))
+        self.assertIn('brza install --all --relink', out)
+
+    def test_comando_local_com_o_mesmo_nome_do_nucleo_vale_o_do_nucleo(self):
+        make_exec(self.local / 'brza-note')
+        code, out = self.run_doctor()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.line(out, 'links').startswith('ok'))
+
+    def test_link_sem_alvo_fora_do_esperado_e_erro_que_manda_apagar(self):
+        (self.bin / 'brza-velho').symlink_to(self.base / 'sumiu')
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertIn('brza-velho sem alvo', self.line(out, 'links'))
+        self.assertIn(f'rm {self.bin / "brza-velho"}', out)
+
+    def test_workspace_sem_scripts_brza_nao_tem_link_local_a_conferir(self):
+        shutil.rmtree(self.local)
+        (self.bin / 'brza-tree').unlink()
+        code, out = self.run_doctor()
+        self.assertEqual(code, 0, out)
+
+    def test_workspace_nao_registrado_com_codigo_no_manifesto_e_erro_que_manda_o_register(self):
+        self.registry.unlink()
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        line = self.line(out, 'registro')
+        self.assertTrue(line.startswith('ERRO'), out)
+        self.assertIn(str(self.workspace), line)
+        self.assertIn(f'brza register {self.workspace}', out)
+
+    def test_workspace_sem_codigo_no_manifesto_nao_precisa_de_registro(self):
+        self.registry.unlink()
+        self.manifest.write_text(f'schema = 1\n\n[author]\nemail = "{EMAIL}"\n')
+        code, out = self.run_doctor()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.line(out, 'registro').startswith('ok'))
+
+    def test_codigo_ligado_a_dois_workspaces_e_erro(self):
+        other = self.base / 'outro-ws'
+        (other / '.brza').mkdir(parents=True)
+        (other / '.brza' / 'workspace.toml').write_text('schema = 1\n')
+        self.register(other, self.studio)
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        line = self.line(out, 'registro')
+        self.assertTrue(line.startswith('ERRO'), out)
+        self.assertIn('dois workspaces', line)
+        self.assertIn(str(other), line)
+
+    def test_registro_ilegivel_e_erro(self):
+        self.registry.write_text('[[workspace]\nroot = ')
+        code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        line = self.line(out, 'registro')
+        self.assertTrue(line.startswith('ERRO'), out)
+        self.assertIn('ilegível', line)
+
+    def test_entrada_com_workspace_ou_codigo_que_sumiu_e_aviso(self):
+        self.register(self.base / 'sumiu-ws', self.base / 'sumiu-code')
+        code, out = self.run_doctor()
+        self.assertEqual(code, 0, out)
+        line = self.line(out, 'registro')
+        self.assertTrue(line.startswith('AVISO'), out)
+        self.assertIn('sumiu-ws', line)
+
+    def test_workspace_sem_manifesto_e_aviso(self):
+        self.manifest.unlink()
+        code, out = self.run_doctor()
+        self.assertTrue(self.line(out, 'registro').startswith('AVISO'), out)
+        self.assertTrue(self.line(out, 'identidade').startswith('AVISO'), out)
 
     def test_override_vazio_e_erro_que_manda_o_chat_command(self):
         self.override = ''

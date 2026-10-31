@@ -1,4 +1,5 @@
-"""Testes do claude-brza, do brza-run e do brza-install. Os do brza-run vêm dos do orca-run da Fixfy.
+"""Testes do claude-brza e do brza-run. Os do brza-run vêm dos do orca-run da Fixfy. O brza-install tem o
+test_brza_install.py.
 
     python3 -m unittest discover -s tests/cli
 """
@@ -33,33 +34,57 @@ def git(*args):
     subprocess.run(['git', *args], check=True, capture_output=True)
 
 
+MANIFEST = 'schema = 1\n\n[workspace]\nname = "acme-notes"\n\n[code]\nname = "acme-app"\npath = "{code}"\n'
+
+
 class WrapperTest(unittest.TestCase):
+    """O workspace e o código com nomes que não são os do BrzA: o claude-brza acha os dois pelo manifesto e pelo
+    registro, e não pelo nome da pasta."""
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
-        self.workspace, self.studio = self.base / 'brza-workspace', self.base / 'brza-studio'
+        self.workspace, self.studio = self.base / 'acme-notes', self.base / 'acme-app'
         for repo in (self.workspace, self.studio):
             repo.mkdir()
             git('-C', str(repo), 'init', '-q')
             git('-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x')
-        self.env = {'PATH': '/bin', 'BRZA_WORKSPACE': str(self.workspace), 'BRZA_STUDIO': str(self.studio)}
+        (self.workspace / '.brza').mkdir()
+        (self.workspace / '.brza' / 'workspace.toml').write_text(MANIFEST.format(code=self.studio))
+        self.registry = self.base / 'config' / 'workspaces.toml'
+        self.register(self.workspace, self.studio)
+        self.env = {'PATH': '/bin'}
+        p = patch.dict(os.environ, {'BRZA_REGISTRY': str(self.registry)})
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ.pop('BRZA_WORKSPACE', None)
 
-    def test_checkouts_and_app_worktrees_are_brza(self):
-        outside = self.base / 'orca' / 'workspaces' / 'brza-studio' / 'feat'
+    def register(self, root: Path, code: Path):
+        self.registry.parent.mkdir(parents=True, exist_ok=True)
+        self.registry.write_text(f'[[workspace]]\nroot = "{root}"\ncode = "{code}"\n')
+
+    def test_checkouts_and_worktrees_outside_the_folder_are_found_with_their_role(self):
+        outside = self.base / 'orca' / 'workspaces' / 'acme-app' / 'feat'
         outside.parent.mkdir(parents=True)
         git('-C', str(self.studio), 'worktree', 'add', '-q', str(outside))
-        for path in (self.workspace, self.studio / 'src', Path(str(self.studio).upper()), outside):
-            self.assertTrue(WRAPPER['is_brza'](path, self.env), path)
+        (self.studio / 'src').mkdir()
+        for path, role in ((self.workspace, 'notes'), (self.studio / 'src', 'code'), (outside, 'code'),
+                           (Path(str(self.studio).upper()), 'code')):
+            found = WRAPPER['workspace_of'](path, self.env)
+            self.assertEqual((found.role, found.root), (role, self.workspace), path)
 
-    def test_other_repos_and_root_are_not_brza(self):
+    def test_other_repos_root_and_unregistered_code_are_not_found(self):
         other = self.base / 'fixfy'
         other.mkdir()
         git('-C', str(other), 'init', '-q')
         for path in (other, Path('/'), Path(str(self.studio) + '-outro')):
-            self.assertFalse(WRAPPER['is_brza'](path, self.env), path)
+            self.assertIsNone(WRAPPER['workspace_of'](path, self.env), path)
+        self.registry.unlink()
+        self.assertIsNone(WRAPPER['workspace_of'](self.studio, self.env))
+        self.assertIsNotNone(WRAPPER['workspace_of'](self.workspace, self.env))
 
-    def test_command_adds_settings_only_inside_brza(self):
+    def test_command_adds_settings_only_inside_a_workspace(self):
         args, out = WRAPPER['command']('/x/claude', ['-p', 'oi'], Path('/'), self.env)
         self.assertEqual((args, out), (['/x/claude', '-p', 'oi'], self.env))
         args, out = WRAPPER['command']('/x/claude', ['--input-format', 'stream-json'], self.studio, self.env)
@@ -67,6 +92,18 @@ class WrapperTest(unittest.TestCase):
                                 '--input-format', 'stream-json'])
         self.assertEqual(out['BRZA_WORKSPACE'], str(self.workspace))
         self.assertNotIn('GH_CONFIG_DIR', out)
+
+    def test_the_variable_overrides_the_root_and_the_role_still_comes_from_the_cwd(self):
+        other = self.base / 'outro-ws'
+        (other / '.brza').mkdir(parents=True)
+        (other / '.brza' / 'workspace.toml').write_text('schema = 1\n')
+        env = {**self.env, 'BRZA_WORKSPACE': str(other)}
+        args, out = WRAPPER['command']('/x/claude', [], self.workspace, env)
+        self.assertEqual(args, ['/x/claude'])  # o cwd não é do outro workspace nem do código registrado nele
+        env = {**self.env, 'BRZA_WORKSPACE': str(self.workspace)}
+        args, out = WRAPPER['command']('/x/claude', [], self.studio, env)
+        self.assertEqual(out['BRZA_WORKSPACE'], str(self.workspace))
+        self.assertIn('--settings', args)
 
     def add_agents(self):
         folder = self.workspace / '.claude' / 'agents'
@@ -77,7 +114,7 @@ class WrapperTest(unittest.TestCase):
     def settings_args(self):
         return ['--settings', str(self.workspace / '.claude' / 'settings.json')]
 
-    def test_studio_gets_the_agents_after_settings_and_the_workspace_does_not(self):
+    def test_the_code_gets_the_agents_after_settings_and_the_workspace_does_not(self):
         agents = self.add_agents()
         args, _ = WRAPPER['command']('/x/claude', ['-p', 'oi'], self.studio, self.env)
         self.assertEqual(args[:4], ['/x/claude', *self.settings_args(), '--agents'])
@@ -86,20 +123,19 @@ class WrapperTest(unittest.TestCase):
         args, _ = WRAPPER['command']('/x/claude', ['-p', 'oi'], self.workspace, self.env)
         self.assertEqual(args, ['/x/claude', *self.settings_args(), '-p', 'oi'])
 
-    def test_a_studio_worktree_outside_the_studio_folder_gets_the_agents_too(self):
+    def test_a_code_worktree_outside_the_code_folder_gets_the_agents_too(self):
         self.add_agents()
-        outside = self.base / 'orca' / 'workspaces' / 'brza-studio' / 'feat'
+        outside = self.base / 'orca' / 'workspaces' / 'acme-app' / 'feat'
         outside.parent.mkdir(parents=True)
         git('-C', str(self.studio), 'worktree', 'add', '-q', str(outside))
         args, _ = WRAPPER['command']('/x/claude', [], outside, self.env)
         self.assertIn('--agents', args)
-        self.assertEqual(WRAPPER['repo_of'](outside, self.env), 'studio')
-        ws_outside = self.base / 'orca' / 'workspaces' / 'brza-workspace' / 'feat'
+        ws_outside = self.base / 'orca' / 'workspaces' / 'acme-notes' / 'feat'
         ws_outside.parent.mkdir(parents=True)
         git('-C', str(self.workspace), 'worktree', 'add', '-q', str(ws_outside))
         args, _ = WRAPPER['command']('/x/claude', [], ws_outside, self.env)
         self.assertNotIn('--agents', args)
-        self.assertEqual(WRAPPER['repo_of'](ws_outside, self.env), 'workspace')
+        self.assertIn('--settings', args)
 
     def test_the_agents_the_user_passed_win_in_both_forms(self):
         self.add_agents()
@@ -108,7 +144,7 @@ class WrapperTest(unittest.TestCase):
                 args, _ = WRAPPER['command']('/x/claude', given, self.studio, self.env)
                 self.assertEqual(args, ['/x/claude', *self.settings_args(), *given])
 
-    def test_without_agents_the_studio_command_is_the_old_one(self):
+    def test_without_agents_the_code_command_has_only_the_settings(self):
         args, _ = WRAPPER['command']('/x/claude', ['-p', 'oi'], self.studio, self.env)
         self.assertEqual(args, ['/x/claude', *self.settings_args(), '-p', 'oi'])
         args, _ = WRAPPER['command']('/x/claude', ['-p', 'oi'], Path('/'), self.env)
@@ -119,6 +155,29 @@ class WrapperTest(unittest.TestCase):
         (self.workspace / '.claude' / 'agents' / 'ruim.md').write_bytes(b'\xff\xfe---\n')
         args, _ = WRAPPER['command']('/x/claude', ['-p', 'oi'], self.studio, self.env)
         self.assertEqual(args, ['/x/claude', *self.settings_args(), '-p', 'oi'])
+
+    def test_the_wrapper_has_no_fixed_name_or_path(self):
+        source = (CLIENT / 'claude-brza').read_text()
+        for fixed in ("'brza-workspace'", "'brza-studio'", 'BRZA_STUDIO', 'def roots', 'def repo_of'):
+            self.assertNotIn(fixed, source)
+
+    def test_the_linked_wrapper_runs_the_real_claude_with_the_workspace_of_the_cwd(self):
+        """O claude-brza como o app o roda: por um link, com um claude de mentira no PATH, no código registrado."""
+        links, real = self.base / 'links', self.base / 'real'
+        links.mkdir()
+        real.mkdir()
+        (links / 'claude-brza').symlink_to(CLIENT / 'claude-brza')
+        (real / 'claude').write_text(f'#!{sys.executable}\nimport json, os, sys\n'
+                                     "print(json.dumps([sys.argv[1:], os.environ.get('BRZA_WORKSPACE')]))\n")
+        (real / 'claude').chmod(0o755)
+        env = {**os.environ, 'PATH': f'{real}:/usr/bin:/bin', 'PYTHONDONTWRITEBYTECODE': '1'}
+        env.pop('BRZA_WORKSPACE', None)
+        for cwd, expected in ((self.studio, [['--settings', str(self.workspace / '.claude' / 'settings.json'), '-p', 'oi'],
+                                             str(self.workspace)]),
+                              (self.base, [['-p', 'oi'], None])):
+            r = subprocess.run([str(links / 'claude-brza'), '-p', 'oi'], capture_output=True, text=True, cwd=str(cwd),
+                               env=env)
+            self.assertEqual((r.returncode, json.loads(r.stdout)), (0, expected), r.stderr)
 
     def test_wrapper_skips_itself_in_path(self):
         mine, real = self.base / 'mine', self.base / 'real'
@@ -164,11 +223,9 @@ class AgentsCliTest(unittest.TestCase):
             code, out = self.run_cli()
         self.assertEqual((code, list(json.loads(out))), (0, ['a']))
 
-    @unittest.skip('P7: o brza-install ainda lista o scripts/brza/ do workspace, e o bin/ do brza-workflow não tem esse caminho')
     def test_the_installer_picks_it_up_as_a_command(self):
         self.assertTrue((BIN / 'brza-agents').stat().st_mode & 0o111)
-        with patch.object(runtime, 'WORKSPACE', ROOT):
-            self.assertIn('brza-agents', INSTALL['commands']())
+        self.assertIn('brza-agents', INSTALL['commands'](BIN))
 
 
 @contextlib.contextmanager
@@ -265,66 +322,6 @@ class BrzaRunTest(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertTrue(out.endswith('Saiu com 4.\n'))
         self.assertNotIn('close', [c[1] for c in calls])
-
-
-class InstallTest(unittest.TestCase):
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        base = Path(temp.name)
-        self.bin, self.workspace = base / 'bin', base / 'ws'
-        (self.workspace / 'scripts' / 'brza').mkdir(parents=True)
-        for name in ('claude-brza', 'brza-run'):
-            (self.workspace / 'scripts' / 'brza' / name).write_text('#!/bin/sh\n')
-        runtime = INSTALL['runtime']
-        for attr, value in (('LOCAL_BIN', self.bin), ('WORKSPACE', self.workspace)):
-            p = patch.object(runtime, attr, value)
-            p.start()
-            self.addCleanup(p.stop)
-
-    def test_link_is_created_once_and_foreign_link_is_refused(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            INSTALL['link_command']('brza-run', False)
-            self.assertEqual(INSTALL['link_state']('brza-run'), 'ok')
-            INSTALL['link_command']('brza-run', False)
-        (self.bin / 'claude-brza').symlink_to('/outro')
-        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
-            INSTALL['link_command']('claude-brza', False)
-
-    def test_dry_run_changes_nothing(self):
-        calls = []
-        with patch.object(INSTALL['runtime'], 'rpc', lambda *a: calls.append(a)), \
-                contextlib.redirect_stdout(io.StringIO()):
-            INSTALL['install_chat_command'](True)
-        self.assertEqual((INSTALL['link_state']('claude-brza'), calls), ('ausente', []))
-
-    def test_chat_command_points_the_override_to_the_link(self):
-        calls = []
-        with patch.object(INSTALL['runtime'], 'rpc', lambda *a: calls.append(a)), \
-                contextlib.redirect_stdout(io.StringIO()):
-            INSTALL['install_chat_command'](False)
-        self.assertEqual(calls, [('settings.mutateAgentLaunch',
-                                  {'type': 'command', 'agent': 'claude', 'value': str(self.bin / 'claude-brza')})])
-        self.assertEqual(INSTALL['link_state']('claude-brza'), 'ok')
-
-    def test_all_links_every_brza_command_including_itself(self):
-        scripts = self.workspace / 'scripts' / 'brza'
-        for name in ('brza-install', 'brza-novo', 'brza-run'):
-            (scripts / name).write_text('#!/bin/sh\n')
-            (scripts / name).chmod(0o755)
-        (scripts / 'brza-rascunho').write_text('não executável\n')
-        (scripts / 'brza_runtime.py').write_text('')
-        with contextlib.redirect_stdout(io.StringIO()):
-            INSTALL['install_all'](False)
-        self.assertEqual(sorted(p.name for p in self.bin.iterdir()), ['brza-install', 'brza-novo', 'brza-run'])
-        self.assertTrue(all(INSTALL['link_state'](p.name) == 'ok' for p in self.bin.iterdir()))
-
-    def test_all_dry_run_links_nothing(self):
-        (self.workspace / 'scripts' / 'brza' / 'brza-run').chmod(0o755)
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            INSTALL['install_all'](True)
-        self.assertIn('brza-run', out.getvalue())
-        self.assertFalse(self.bin.exists())
 
 
 if __name__ == '__main__':

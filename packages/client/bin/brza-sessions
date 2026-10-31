@@ -5,14 +5,14 @@ O open abre o chat e dá à aba o título do --title, ou o <nome> sem ele, pelo 
 tarefa entra na abertura. O --rename manda antes o `/rename <nome>`, que dá o nome à sessão do Claude, e o prompt entra
 depois pelo `agentSession.send`, com `delivery: 'queue-if-active'`: ele espera na fila até o /rename terminar. Passe o
 --rename quando a sessão for mandar ou receber correio: sem ele, ela entra no correio com um nome automático, como
-`brza-workspace-5b`, que ninguém sabe antes de abrir.
+`<workspace>-5b`, que ninguém sabe antes de abrir.
 
-O chat não passa pelo zsh de login, e a função `claude` do ~/.zshrc não roda. No brza-workspace isso não falta: o chat
-lê o `.claude/settings.json` do projeto pelo `--setting-sources`. Num checkout do brza-studio, os hooks e a identidade só
+O chat não passa pelo zsh de login, e a função `claude` do ~/.zshrc não roda. No workspace isso não falta: o chat
+lê o `.claude/settings.json` do projeto pelo `--setting-sources`. Num checkout do código, os hooks e a identidade só
 chegam pelo `agentCmdOverrides.claude` apontado para o claude-brza; sem ele, o script avisa numa linha CHECK e abre
 assim mesmo.
 
-O mapa de sessões é o .sessions/sessions.jsonl do brza-workspace, fora do git, uma linha por evento: `open`, `session`
+O mapa de sessões é o .sessions/sessions.jsonl do workspace do cwd (o `brza_root.find`), fora do git, uma linha por evento: `open`, `session`
 (o id da sessão do Claude, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
 aberto no app, ou que roda com o /rename (<config>/sessions/<pid>.json; o config é o ~/.claude ou o de uma conta do app,
 em <dados do app>/claude-profiles/<id>/home).
@@ -22,13 +22,13 @@ transcript da sessão do Claude (<config>/projects/*/<id>.jsonl), cujo id vem do
 é outro: é o nome do chat no app. Chat sem nenhum dos dois não tem nome e não é achado.
 
 Uso:
-  brza sessions <nome>                                  # abre o chat no brza-workspace; o `open` é opcional
+  brza sessions <nome>                                  # abre o chat no workspace; o `open` é opcional
   brza sessions <nome> --title "PLN-001: Coordenador"   # com o título na aba; sem ele, o <nome>
   brza sessions <nome> --rename                         # e dá o nome à sessão do Claude, para o correio
   brza sessions <nome> --prompt "<tarefa>"              # e manda a tarefa
   brza sessions <nome> --prompt-file <arquivo>          # a tarefa lida de um arquivo
-  brza sessions <nome> --checkout <caminho>             # noutro checkout, como um worktree do brza-studio; o relativo
-                                                        # parte da raiz do brza-workspace, não do cwd
+  brza sessions <nome> --checkout <caminho>             # noutro checkout, como um worktree do código; o relativo
+                                                        # parte da raiz do workspace, não do cwd
   brza sessions <nome> --wait                           # só anuncia com a sessão do Claude no ar; com --rename, nomeada
   brza sessions <nome> --dry-run                        # só mostra o que faria
   brza sessions list [--json]                           # os chats do app: nome, estado, chat, worktree, título
@@ -150,7 +150,7 @@ def workspace_root(cwd: Path | None = None) -> Path:
 
 
 def resolve_checkout(checkout: Path, cwd: Path | None = None) -> Path:
-    """O --checkout absoluto como veio; o relativo a partir da raiz do brza-workspace, e não do cwd."""
+    """O --checkout absoluto como veio; o relativo a partir da raiz do workspace, e não do cwd."""
     checkout = checkout.expanduser()
     return (checkout if checkout.is_absolute() else workspace_root(cwd) / checkout).resolve()
 
@@ -335,7 +335,7 @@ def main():
     ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
     ap.add_argument('--rename', action='store_true', help='manda o /rename <nome>, para o correio achar a sessão')
     ap.add_argument('--checkout', type=Path, default=WORKSPACE,
-                    help='o checkout do chat; o relativo parte da raiz do brza-workspace, não do cwd')
+                    help='o checkout do chat; o relativo parte da raiz do workspace, não do cwd')
     group = ap.add_mutually_exclusive_group()
     group.add_argument('--prompt')
     group.add_argument('--prompt-file', type=Path)

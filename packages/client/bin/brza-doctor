@@ -2,18 +2,24 @@
 """Confere se a sessão e a máquina estão prontas para o BrzA Studio, e diz o comando que conserta o que falta.
 
   brza-doctor [--json]
-      ERRO  identidade: git var GIT_AUTHOR_IDENT ou GIT_COMMITTER_IDENT não é o noreply do brz-anderson
-      ERRO  medição: o .claude/settings.json do brza-workspace sem o measure.py, ou BRZA_WORKSPACE fora do ambiente
-      ERRO  links: algum brza-* de scripts/brza/ sem o link certo em ~/.local/bin (o link_state do brza-install)
+      ERRO  identidade: git var GIT_AUTHOR_IDENT ou GIT_COMMITTER_IDENT não é o `[author].email` do manifesto do workspace
+            (ou, sem ele, o `git config user.email`)
+      ERRO  medição: o .claude/settings.json do workspace sem o measure.py, ou BRZA_WORKSPACE fora do ambiente
+      ERRO  links: algum brza-* do checkout do brza-workflow (bin/ e packages/client/bin/) ou do scripts/brza/ do workspace
+            sem o link certo em ~/.local/bin, ou link brza-* sem alvo (o link_state do brza-install)
+      ERRO  registro: o workspace do cwd com `[code].path` e sem entrada no ~/.config/brza/workspaces.toml, o registro
+            ilegível, ou um código ligado a dois workspaces
       ERRO  chat: o agentCmdOverrides.claude do app não é o ~/.local/bin/claude-brza, ou o link dele falta
       AVISO chat: o app não respondeu, e o override ficou sem conferir
+      AVISO identidade e registro: sem manifesto, sem `[author].email` nem user.email, ou entrada do registro que sumiu
       AVISO pnpm fora do PATH; o perfil brza-dev sem estado; o app instalado mais velho que a origin/master
 
 Saídas: 1 com algum ERRO, 0 sem. Cada linha diz o que conferiu e, no erro e no aviso, o comando que conserta. --json
 devolve a lista das conferências, com level, check, message e fix.
 
 A identidade e a medição vêm do ambiente que a função `claude` do ~/.zshrc e o claude-brza põem na sessão; num terminal
-aberto sem eles, as duas saem em erro. O app velho compara o commit da versão instalada com a origin/master do último
+aberto sem eles, as duas saem em erro. O workspace é o do cwd (runtime.WORKSPACE, pelo `brza_root.find`) e o checkout do
+brza-workflow é o da BRZA_WORKFLOW, ou o deste arquivo. O app velho compara o commit da versão instalada com a origin/master do último
 `git fetch` no brza-studio, sem buscar de novo.
 """
 import argparse
@@ -34,20 +40,21 @@ import brza_runtime as runtime  # noqa: E402
 
 INSTALL = runpy.run_path(str(HERE.parents[2] / 'bin' / 'brza-install'))
 link_state, commands, override = INSTALL['link_state'], INSTALL['commands'], INSTALL['override']
+core_dir, client_dir = INSTALL['core_dir'], INSTALL['client_dir']
+brza_root = runtime.brza_root
 
-NOREPLY = '240569289+brz-anderson@users.noreply.github.com'
 APP = Path('/Applications/BrzA Studio.app')
 # O perfil de onde o dev build semeia, antes do perfil do app (getDefaultSeedSource, em config/scripts/dev-profile-seed.mjs).
 DEV_PROFILE = runtime.DEFAULT_USER_DATA.parent / 'brza-dev'
 # Os arquivos que dizem que o perfil tem estado (profileHasState, no mesmo arquivo).
 PROFILE_STATE = ('orca-profile-index.json', 'profiles', 'orca-data.json')
 SESSION_FIX = ('abra a sessão pela função claude do ~/.zshrc, ou no app com o claude-brza (brza install --chat-command):'
-               ' os dois põem o env do .claude/settings.json do brza-workspace')
+               ' os dois põem o env do .claude/settings.json do workspace')
 which = shutil.which
 
 
 def git_ident(kind: str) -> str:
-    """O `git var GIT_<kind>_IDENT` no brza-workspace, como o commit o veria."""
+    """O `git var GIT_<kind>_IDENT` no workspace, como o commit o veria."""
     r = subprocess.run(['git', '-C', str(runtime.WORKSPACE), 'var', f'GIT_{kind}_IDENT'], capture_output=True,
                        text=True)
     if r.returncode != 0:
@@ -55,19 +62,42 @@ def git_ident(kind: str) -> str:
     return r.stdout.strip()
 
 
+def git_config_email() -> str | None:
+    """O `git config user.email` no workspace, ou None sem ele."""
+    r = subprocess.run(['git', '-C', str(runtime.WORKSPACE), 'config', 'user.email'], capture_output=True, text=True)
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
 def result(level: str, check: str, message: str, fix: str | None = None) -> dict:
     return {'level': level, 'check': check, 'message': message, 'fix': fix}
 
 
+def author_email() -> tuple[str, str] | None:
+    """(o e-mail esperado, de onde vem): o `[author].email` do manifesto do workspace ou, sem ele, o `git config
+    user.email`; None sem nenhum dos dois."""
+    manifest = brza_root.read_manifest(runtime.WORKSPACE) or {}
+    author = manifest.get('author')
+    email = author.get('email') if isinstance(author, dict) else None
+    if isinstance(email, str) and email:
+        return email, '[author].email do manifesto'
+    email = git_config_email()
+    return (email, 'git config user.email') if email else None
+
+
 def identity() -> dict:
+    expected = author_email()
+    if expected is None:
+        return result('AVISO', 'identidade', 'o workspace não tem [author].email no manifesto nem git config user.email;'
+                      ' não conferi a identidade', 'grave o [author].email em .brza/workspace.toml')
+    email, origin = expected
     wrong = []
     for kind in ('AUTHOR', 'COMMITTER'):
         ident = git_ident(kind)
-        if f'<{NOREPLY}>' not in ident:
+        if f'<{email}>' not in ident:
             wrong.append(f'GIT_{kind}_IDENT é {re.sub(r" [0-9]+ [+-][0-9]{4}$", "", ident)}')
     if wrong:
-        return result('ERRO', 'identidade', f'{"; ".join(wrong)}, e não o noreply do brz-anderson', SESSION_FIX)
-    return result('ok', 'identidade', f'autor e committer são o {NOREPLY}')
+        return result('ERRO', 'identidade', f'{"; ".join(wrong)}, e não o {email} ({origin})', SESSION_FIX)
+    return result('ok', 'identidade', f'autor e committer são o {email} ({origin})')
 
 
 def measurement() -> dict:
@@ -85,15 +115,86 @@ def measurement() -> dict:
     return result('ok', 'medição', f'o measure.py está no settings.json, e BRZA_WORKSPACE={os.environ["BRZA_WORKSPACE"]}')
 
 
+def dangling() -> list[str]:
+    """Os brza-* de ~/.local/bin que são link sem alvo."""
+    return sorted(p.name for p in runtime.LOCAL_BIN.glob('brza-*') if p.is_symlink() and not p.exists())
+
+
 def links() -> dict:
-    bad = {name: state for name in commands() if (state := link_state(name)) != 'ok'}
-    if not bad:
-        return result('ok', 'links', f'{len(commands())} brza-* ligados em {runtime.LOCAL_BIN}')
+    """Os links do núcleo (--all), do cliente (--client) e do scripts/brza/ do workspace (--local), cada nome com o
+    comando que o conserta. O nome do núcleo ou do cliente vale mais que o do mesmo nome no scripts/brza/ do workspace."""
+    groups = [('--all', core_dir()), ('--client', client_dir())]
+    local = runtime.WORKSPACE / 'scripts' / 'brza'
+    if local.is_dir():
+        groups.append((f'--local {runtime.WORKSPACE}', local))
+    bad: dict[str, str] = {}
+    flags: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for flag, folder in groups:
+        if not folder.is_dir():
+            continue
+        for name in commands(folder):
+            if name in seen:
+                continue
+            seen.add(name)
+            total += 1
+            if (state := link_state(name, folder / name)) != 'ok':
+                bad[name] = state
+                if flag not in flags:
+                    flags.append(flag)
+    broken = [name for name in dangling() if name not in bad]
+    if not bad and not broken:
+        return result('ok', 'links', f'{total} brza-* ligados em {runtime.LOCAL_BIN}')
     alien = [name for name, state in bad.items() if state != 'ausente']
-    fix = 'brza install --all'
-    if alien:
-        fix = f'rm {" ".join(str(runtime.LOCAL_BIN / n) for n in alien)}, depois de conferir, e {fix}'
-    return result('ERRO', 'links', '; '.join(f'{n} {s}' for n, s in bad.items()), fix)
+    message = [f'{n} {s}' for n, s in bad.items()] + [f'{n} sem alvo' for n in broken]
+    fix = []
+    if flags:
+        fix.append(f'brza install {" ".join(flags)}{" --relink" if alien else ""}')
+    if broken:
+        fix.insert(0, f'rm {" ".join(str(runtime.LOCAL_BIN / n) for n in broken)}, depois de conferir')
+    return result('ERRO', 'links', '; '.join(message), ', e '.join(fix))
+
+
+def missing(entry: dict) -> list[str]:
+    """Os caminhos de uma entrada do registro que não existem: o código, a raiz, ou a raiz sem manifesto."""
+    gone = [entry['code']] if not Path(entry['code']).is_dir() else []
+    if not (Path(entry['root']) / brza_root.MANIFEST).is_file():
+        gone.append(entry['root'])
+    return gone
+
+
+def registry() -> dict:
+    """O registro da máquina: o workspace do cwd ligado ao código dele, e nenhum código em dois workspaces."""
+    root = runtime.WORKSPACE
+    path = brza_root.registry_path()
+    try:
+        entries = brza_root.read_registry()
+    except (OSError, ValueError) as e:
+        return result('ERRO', 'registro', f'o registro {path} está ilegível ({e})', f'conserte {path} à mão')
+    by_code: dict[str, list[str]] = {}
+    for entry in entries:
+        by_code.setdefault(brza_root.key(entry['code']), []).append(entry['root'])
+    twice = {code: roots for code, roots in by_code.items() if len({brza_root.key(r) for r in roots}) > 1}
+    if twice:
+        text = '; '.join(f'o código {code} está ligado a dois workspaces ({", ".join(roots)})'
+                         for code, roots in twice.items())
+        return result('ERRO', 'registro', text, f'apague de {path} a entrada que não vale')
+    manifest = brza_root.read_manifest(root)
+    if manifest is None:
+        return result('AVISO', 'registro', f'{root} não tem um {brza_root.MANIFEST} legível; o workspace do cwd não é'
+                      ' reconhecido', f'brza init, ou o manifesto no checkout principal de {root}')
+    mine = [e for e in entries if brza_root.key(e['root']) == brza_root.key(root)]
+    if not mine:
+        if brza_root.manifest_code_path(manifest):
+            return result('ERRO', 'registro', f'{root} não está em {path}; do repositório de código, o brza where e o'
+                          ' claude-brza não o acham', f'brza register {root}')
+        return result('ok', 'registro', f'{root} não declara código; nada a ligar')
+    stale = sorted({p for e in entries for p in missing(e)})
+    if stale:
+        return result('AVISO', 'registro', f'entrada do registro com caminho que sumiu ou sem manifesto: '
+                      f'{", ".join(stale)}', f'apague a entrada de {path}, ou refaça com brza register')
+    return result('ok', 'registro', f'{root} -> {mine[0]["code"]} em {path}')
 
 
 def chat() -> dict:
@@ -103,7 +204,7 @@ def chat() -> dict:
     except runtime.BrzaError as e:
         return result('AVISO', 'chat', f'o app não respondeu, e o agentCmdOverrides.claude ficou sem conferir ({e})',
                       'abra o BrzA Studio e rode de novo')
-    state = link_state('claude-brza')
+    state = link_state('claude-brza', client_dir() / 'claude-brza')
     if current != target or state != 'ok':
         found = f'o agentCmdOverrides.claude é {current or "(vazio)"}'
         if state != 'ok':
@@ -159,8 +260,8 @@ def app_age() -> dict:
     return result('AVISO', 'app', f'{version} está {behind} commits atrás da origin/master ({tip[:12]})', fix)
 
 
-CHECKS = (identity, measurement, links, chat, pnpm, dev_profile, app_age)
-NAMES = {'identity': 'identidade', 'measurement': 'medição', 'links': 'links', 'chat': 'chat', 'pnpm': 'pnpm',
+CHECKS = (identity, measurement, links, registry, chat, pnpm, dev_profile, app_age)
+NAMES = {'identity': 'identidade', 'measurement': 'medição', 'links': 'links', 'registry': 'registro', 'chat': 'chat', 'pnpm': 'pnpm',
          'dev_profile': 'perfil', 'app_age': 'app'}
 
 

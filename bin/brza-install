@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
-"""Instala os comandos de `scripts/brza/` para o BrzA Studio: os links em ~/.local/bin e o override do chat.
+"""Instala os comandos `brza-*` em ~/.local/bin, como links para o checkout do brza-workflow, e o override do chat.
 
-  brza install                  mostra o estado: cada link brza-* e o agentCmdOverrides.claude do app
-  brza install --all            liga em ~/.local/bin todo brza-* executável de scripts/brza/, inclusive o
-                                brza-install; o primeiro roda pelo caminho inteiro, scripts/brza/brza-install --all,
-                                porque o link dele ainda não existe
+  brza install                  mostra o estado: cada link do núcleo e do pacote do cliente, e o agentCmdOverrides.claude
+  brza install --all            liga todo brza-* executável de bin/ do checkout, inclusive o brza-install; o primeiro
+                                roda pelo caminho inteiro, <checkout>/bin/brza-install --all, porque o link dele ainda
+                                não existe
+  brza install --client         liga todo brza-* executável de packages/client/bin/ (doctor, print, run, sessions); o
+                                claude-brza fica de fora, e segue só pelo --chat-command
+  brza install --local <dir>    liga os brza-* executáveis de um diretório local: o scripts/brza/ de um workspace (dê a
+                                raiz dele ou a própria pasta), que guarda os comandos do código do projeto — app, dev,
+                                test, tree, shot —, e não do brza-workflow
   brza install --chat-command   liga ~/.local/bin/claude-brza e o põe em agentCmdOverrides.claude, para o chat do
-                                Claude subir com o --settings do brza-workspace também nos checkouts do brza-studio
+                                Claude subir com o --settings do workspace também nos checkouts do código
   brza install --run            liga só o ~/.local/bin/brza-run, o comando que a aba do ▶ acha pelo zsh de login
   brza install --sessions       liga só o ~/.local/bin/brza-sessions, o abridor de sessões em modo chat
+  --relink                      troca o link que aponta para outro lugar, ou que ficou sem alvo; nunca apaga arquivo
+                                que não é link
   --dry-run                     diz o que faria, sem fazer
 
-Os links apontam para o checkout principal do brza-workspace, e não para um worktree, para não quebrar quando o
-worktree some. O claude-brza fica fora do --all e segue só pelo --chat-command, porque mexe no override. O override
-vale para o app inteiro, e o `claude-brza` cai no claude puro fora do brza-workspace e do brza-studio. Para desfazer:
-apague o link e esvazie o comando do Claude em Configurações › Agentes do app.
+O checkout é o da BRZA_WORKFLOW, ou o deste arquivo. Um por máquina, e o principal: o link para um worktree quebra
+quando ele some, e o comando avisa. Antes de ligar, confere tudo e recusa de uma vez o que já existe e aponta para outro
+lugar, sem ligar nada. O mesmo nome vindo de dois lugares na mesma chamada também é recusa.
+
+Os scripts locais acham o brza_runtime pelo checkout, com este cabeçalho no lugar do `sys.path.insert(0, HERE)`:
+
+    import os, shutil, sys
+    from pathlib import Path
+    _flow = os.environ.get('BRZA_WORKFLOW')
+    _bin = Path(_flow) / 'bin' if _flow else Path(os.path.realpath(shutil.which('brza-note') or '')).parent
+    sys.path.insert(0, str(_bin))
+    import brza_runtime as runtime
+
+O override vale para o app inteiro, e o `claude-brza` cai no claude puro fora de um workspace e do código ligado a ele.
+Para desfazer: apague o link e esvazie o comando do Claude em Configurações › Agentes do app.
 """
 import argparse
 import os
@@ -28,40 +46,106 @@ import brza_runtime as runtime  # noqa: E402
 CHAT_COMMAND = 'claude-brza'
 RUN = 'brza-run'
 SESSIONS = 'brza-sessions'
+NOT_A_LINK = 'não é um link'
 
 
-def source_of(name: str) -> Path:
-    return runtime.WORKSPACE / 'scripts' / 'brza' / name
+def workflow_root() -> Path:
+    """O checkout do brza-workflow: a BRZA_WORKFLOW, ou o pai do `bin/` deste arquivo."""
+    return Path(os.environ.get('BRZA_WORKFLOW') or SELF.parent.parent).expanduser()
 
 
-def commands() -> list[str]:
-    """Todo brza-* executável de scripts/brza/ no checkout principal."""
-    scripts = runtime.WORKSPACE / 'scripts' / 'brza'
-    return sorted(p.name for p in scripts.glob('brza-*') if p.is_file() and os.access(p, os.X_OK))
+def core_dir() -> Path:
+    return workflow_root() / 'bin'
 
 
-def link_state(name: str) -> str:
-    link, source = runtime.LOCAL_BIN / name, source_of(name)
+def client_dir() -> Path:
+    return workflow_root() / 'packages' / 'client' / 'bin'
+
+
+def commands(folder: Path) -> list[str]:
+    """Todo brza-* executável de `folder`."""
+    return sorted(p.name for p in folder.glob('brza-*') if p.is_file() and os.access(p, os.X_OK))
+
+
+def expected_links() -> list[tuple[str, Path]]:
+    """(nome, fonte) de todo link que uma máquina com o núcleo e o cliente tem: o bin/, o packages/client/bin/ e o
+    claude-brza. Pasta que não existe não tem link."""
+    out = []
+    for folder in (core_dir(), client_dir()):
+        if folder.is_dir():
+            out += [(name, folder / name) for name in commands(folder)]
+    if (client_dir() / CHAT_COMMAND).is_file():
+        out.append((CHAT_COMMAND, client_dir() / CHAT_COMMAND))
+    return out
+
+
+def link_state(name: str, source: Path) -> str:
+    """'ok' (aponta para `source`), 'ausente', 'aponta para <onde>' ou 'não é um link'."""
+    link = runtime.LOCAL_BIN / name
     if link.is_symlink() and link.resolve() == source.resolve():
         return 'ok'
-    if link.exists() or link.is_symlink():
+    if link.is_symlink():
         return f'aponta para {os.path.realpath(link)}'
+    if link.exists():
+        return NOT_A_LINK
     return 'ausente'
 
 
-def link_command(name: str, dry_run: bool):
-    """Liga ~/.local/bin/<nome> ao script de mesmo nome no checkout principal do brza-workspace."""
-    link, source = runtime.LOCAL_BIN / name, source_of(name)
-    if not source.is_file():
-        sys.exit(f'{source} não existe; o {name} precisa estar no checkout principal')
-    state = link_state(name)
-    if state == 'ok':
-        print(f'link:     {link} já aponta para {source}')
-    elif state != 'ausente':
-        sys.exit(f'{link} já existe e {state}; confira à mão')
-    else:
-        print(f'link:     {link} -> {source}')
+def folder_commands(folder: Path, label: str) -> list[tuple[str, Path]]:
+    if not folder.is_dir():
+        sys.exit(f'{folder} não existe; {label}')
+    return [(name, folder / name) for name in commands(folder)]
+
+
+def local_folder(given: Path) -> Path:
+    """A pasta dos comandos locais: <dir>/scripts/brza quando existe, ou o próprio <dir>."""
+    given = given.expanduser().resolve()
+    folder = given / 'scripts' / 'brza' if (given / 'scripts' / 'brza').is_dir() else given
+    if not folder.is_dir() or not commands(folder):
+        sys.exit(f'{given} não tem brza-* executável (nem em scripts/brza/); o --local pede o workspace ou a pasta')
+    return folder
+
+
+def plan_links(wanted: list[tuple[str, Path]], relink: bool) -> list[tuple[str, Path, str]]:
+    """(nome, fonte, estado) de cada link a fazer, ou sai com a recusa inteira: o nome de dois lugares, a fonte que não
+    existe, o link que aponta para outro lugar sem o --relink e o arquivo que não é link."""
+    seen: dict[str, Path] = {}
+    refusals, plan = [], []
+    for name, source in wanted:
+        link = runtime.LOCAL_BIN / name
+        if name in seen:
+            if seen[name] != source:
+                refusals.append(f'{name} vem de dois lugares ({seen[name]} e {source})')
+            continue
+        seen[name] = source
+        if not source.is_file():
+            refusals.append(f'{source} não existe; o {name} precisa estar no checkout')
+            continue
+        state = link_state(name, source)
+        if state == NOT_A_LINK:
+            refusals.append(f'{link} existe e {NOT_A_LINK}; confira à mão')
+        elif state.startswith('aponta') and not relink:
+            refusals.append(f'{link} já existe e {state}; troque com --relink')
+        plan.append((name, source, state))
+    if refusals:
+        sys.exit('recusado, nada foi ligado:\n  ' + '\n  '.join(refusals))
+    return plan
+
+
+def link_all(wanted: list[tuple[str, Path]], dry_run: bool, relink: bool = False):
+    """Liga cada (nome, fonte) em ~/.local/bin, depois de conferir todos."""
+    for name, source, state in plan_links(wanted, relink):
+        link = runtime.LOCAL_BIN / name
+        if state == 'ok':
+            print(f'link:     {link} já aponta para {source}')
+            continue
+        if state == 'ausente':
+            print(f'link:     {link} -> {source}')
+        else:
+            print(f'relink:   {link} -> {source} ({state})')
         if not dry_run:
+            if state != 'ausente':
+                link.unlink()
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(source)
 
@@ -70,48 +154,61 @@ def override() -> str:
     return runtime.rpc('settings.getAgentLaunch')['settings'].get('agentCmdOverrides', {}).get('claude') or ''
 
 
-def install_chat_command(dry_run: bool):
-    link_command(CHAT_COMMAND, dry_run)
+def set_override(dry_run: bool):
+    """Aponta o agentCmdOverrides.claude do app para o link do claude-brza."""
     target = str(runtime.LOCAL_BIN / CHAT_COMMAND)
     print(f'app:      agentCmdOverrides.claude = {target}')
     if not dry_run:
         runtime.rpc('settings.mutateAgentLaunch', {'type': 'command', 'agent': 'claude', 'value': target})
 
 
-def install_all(dry_run: bool):
-    for name in commands():
-        link_command(name, dry_run)
-
-
 def show():
-    for name in (CHAT_COMMAND, *commands()):
-        print(f'link:     {runtime.LOCAL_BIN / name}: {link_state(name)}')
+    for name, source in expected_links():
+        print(f'link:     {runtime.LOCAL_BIN / name}: {link_state(name, source)}')
     try:
         print(f'app:      agentCmdOverrides.claude = {override() or "(vazio: o chat roda o claude puro)"}')
     except runtime.BrzaError as e:
         print(f'app:      não li a configuração ({e})')
 
 
-def main():
-    ap = argparse.ArgumentParser(description='Instala os comandos de scripts/brza/ para o BrzA Studio.')
-    ap.add_argument('--all', action='store_true', help='liga todo brza-* de scripts/brza/, inclusive o brza-install')
+def warn_if_worktree():
+    if (workflow_root() / '.git').is_file():
+        print(f'aviso: {workflow_root()} é um worktree; o link para ele quebra quando o worktree some. Rode do checkout '
+              'principal do brza-workflow', file=sys.stderr)
+
+
+def main(argv: list[str] | None = None):
+    ap = argparse.ArgumentParser(prog='brza install',
+                                 description='Liga os brza-* do brza-workflow em ~/.local/bin e o claude-brza no app.')
+    ap.add_argument('--all', action='store_true', help='liga todo brza-* de bin/, inclusive o brza-install')
+    ap.add_argument('--client', action='store_true', help='liga todo brza-* de packages/client/bin/')
+    ap.add_argument('--local', type=Path, metavar='dir', help='liga os brza-* do scripts/brza/ de um workspace')
     ap.add_argument('--chat-command', action='store_true', help=f'liga {CHAT_COMMAND} e o põe no override do chat')
     ap.add_argument('--run', action='store_true', help=f'liga {RUN}')
     ap.add_argument('--sessions', action='store_true', help=f'liga {SESSIONS}')
+    ap.add_argument('--relink', action='store_true', help='troca o link que aponta para outro lugar')
     ap.add_argument('--dry-run', action='store_true')
-    a = ap.parse_args()
-    if not (a.all or a.chat_command or a.run or a.sessions):
+    a = ap.parse_args(argv)
+    if not (a.all or a.client or a.local or a.chat_command or a.run or a.sessions):
         show()
         return
+    warn_if_worktree()
+    wanted: list[tuple[str, Path]] = []
     if a.all:
-        install_all(a.dry_run)
-    if a.run and not a.all:
-        link_command(RUN, a.dry_run)
-    if a.sessions and not a.all:
-        link_command(SESSIONS, a.dry_run)
+        wanted += folder_commands(core_dir(), 'o bin/ do checkout do brza-workflow')
+    if a.client:
+        wanted += folder_commands(client_dir(), 'o pacote do cliente do checkout do brza-workflow')
+    else:
+        wanted += [(name, client_dir() / name) for name, flag in ((RUN, a.run), (SESSIONS, a.sessions)) if flag]
+    if a.local:
+        folder = local_folder(a.local)
+        wanted += [(name, folder / name) for name in commands(folder)]
+    if a.chat_command:
+        wanted.append((CHAT_COMMAND, client_dir() / CHAT_COMMAND))
+    link_all(wanted, a.dry_run, a.relink)
     if a.chat_command:
         try:
-            install_chat_command(a.dry_run)
+            set_override(a.dry_run)
         except runtime.BrzaError as e:
             sys.exit(f'o app não respondeu; abra o BrzA Studio e tente de novo ({e})')
 
