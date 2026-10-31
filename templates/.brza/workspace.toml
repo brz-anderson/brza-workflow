@@ -1,0 +1,30 @@
+# .brza/workspace.toml — o manifesto do workspace. O init o escreve; depois é local: o sync nunca o toca.
+schema = 1
+
+[workspace]
+name = "meu-workspace"  # {{workspace.name}}
+title = "Meu Projeto"   # {{workspace.title}}
+owner = "Fulana"        # {{workspace.owner}}, quem decide
+branch = "master"       # {{workspace.branch}}; ausente = master
+remote = "origin"       # {{workspace.remote}}; ausente = origin
+born = "2026-11-01"     # o dia em que o workspace nasceu; o checador cobra as notas daí em diante
+
+[author]
+name = "Fulana de Tal"
+email = "fulana@example.com"
+login = "fulana"
+
+[code]
+name = "meu-projeto"                    # {{code.name}}
+path = "~/Projects/meu-projeto"         # {{code.path}}; o padrão do registro, não a verdade da máquina
+github = "fulana/meu-projeto"           # {{code.github}}
+branch = "master"
+remote = "origin"
+plan_branch = "[a-z]+/pln-(\\d+)(-|$)"  # tira o número do plano da branch do código
+
+[core]
+ref = "master"         # a branch do brza-workflow que o sync segue
+packages = ["client"]  # pacotes opcionais do brza-workflow
+
+[checker]
+worklogs_link_from = "2026-11-01"  # o dia a partir do qual a linha de worklog do plano leva o link

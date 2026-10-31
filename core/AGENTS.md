@@ -1,8 +1,8 @@
-# AGENTS.md — brza-workspace
+# AGENTS.md — {{workspace.name}}
 
-Este repositório é o workspace pessoal de Anderson para o **BrzA Studio**. Aqui ficam os planos, o registro do que foi
-feito, as decisões, a norma de agente e a configuração das sessões. O código do app fica em `~/Projects/brza-studio`
-(`brz-anderson/brza-studio`), ao lado deste clone. Os termos em itálico estão no [Glossário](#glossário).
+Este repositório é o workspace pessoal de {{workspace.owner}} para o **{{workspace.title}}**. Aqui ficam os planos, o registro do que foi
+feito, as decisões, a norma de agente e a configuração das sessões. O código do app fica em `{{code.path}}`
+(`{{code.github}}`), ao lado deste clone. Os termos em itálico estão no [Glossário](#glossário).
 
 Toda prosa para quem pediu — resposta, pergunta, opção, plano, revisão, documento — é em português do Brasil, também na
 delegação a _subagente_. Identificador, comando, caminho e chave de configuração ficam na forma original. **Nome de
@@ -10,7 +10,7 @@ agente, de _subagente por papel_ e de skill nasce em inglês**, em kebab-case, c
 descrição e o corpo seguem em português.
 
 **Comando para quem pediu rodar vai em bloco cercado com a linguagem de shell** — ` ```bash `, um comando por bloco
-quando cada um roda sozinho —, nunca em cerca sem linguagem. O chat do BrzA Studio só mostra o ▶, que roda o bloco
+quando cada um roda sozinho —, nunca em cerca sem linguagem. O chat do {{workspace.title}} só mostra o ▶, que roda o bloco
 num terminal do worktree do chat, nas cercas `sh`, `bash`, `zsh`, `shell` e `console`.
 
 **Arquivo gravado na norma, em `plans/`, `wiki/`, `work/` ou `memory/` aparece na resposta**, criado ou editado, com o
@@ -22,22 +22,22 @@ caminho. A chamada de ferramenta pode ficar recolhida, e o que vai ao git precis
 - **Separador:** um `---` fora dos blocos, entre um arquivo e o seguinte e depois do último quando a resposta segue,
   para que o texto não cole no bloco recolhido.
 
-## Cada workstream mora numa branch, e a `master` guarda só a norma
+## Cada workstream mora numa branch, e a `{{workspace.branch}}` guarda só a norma
 
 Os planos ficam em `plans/`, uma pasta por plano, com a norma no [`plans/README.md`](plans/README.md). O resto do estado
 de trabalho fica em `work/`, uma pasta por gênero de nota, e os guias em `wiki/guides/`. **A pasta diz o gênero; o estado
 está no campo `status` do frontmatter.** A norma de escrita de cada pasta está no [`work/README.md`](work/README.md).
 
-**Essas notas não moram na `master`.** Cada _workstream_ — uma frente de trabalho — é uma branch `workstream/<nome>`,
-nascida da `master`, com um worktree em `.worktrees/<nome>`:
-- **Na `master`:** a norma — este arquivo, o `CLAUDE.md`, o `README.md`, o `plans/README.md`, o `work/README.md`, o
+**Essas notas não moram na `{{workspace.branch}}`.** Cada _workstream_ — uma frente de trabalho — é uma branch `workstream/<nome>`,
+nascida da `{{workspace.branch}}`, com um worktree em `.worktrees/<nome>`:
+- **Na `{{workspace.branch}}`:** a norma — este arquivo, o `CLAUDE.md`, o `README.md`, o `plans/README.md`, o `work/README.md`, o
   `.claude/`, o `scripts/`, o `.gitignore` e o `.gitattributes` — e o índice `.brza/index.jsonl`, a única exceção:
   uma linha por plano, issue ou decisão criada ou alterada, em qualquer workstream, para que quem coordena veja todas
   as frentes num arquivo só. Só o `brza note` acrescenta, e ninguém edita.
-- **No workstream:** a norma, que chega pelo `git merge` da `master`, e as notas da frente, com os planos dela, abertos
-  e fechados, e a memória dela, em `memory/` e `.claude/agent-memory/`. A branch nunca volta à `master`.
-- **Os de agora:** o `studio`, o app; o `tools-kit`, o `brza`, os scripts e os plugins; o `workspace`, a própria norma.
-  **Workstream novo só nasce por pedido de Anderson**, pelo `brza note workstream <nome>`.
+- **No workstream:** a norma, que chega pelo `git merge` da `{{workspace.branch}}`, e as notas da frente, com os planos dela, abertos
+  e fechados, e a memória dela, em `memory/` e `.claude/agent-memory/`. A branch nunca volta à `{{workspace.branch}}`.
+- **Os de agora** estão no `README.md`. **Workstream novo só nasce por pedido de {{workspace.owner}}**, pelo `brza note
+  workstream <nome>`.
 - **Workstream encerrado** perde o worktree e fica com a branch.
 
 Antes de começar qualquer trabalho aqui, leia as notas com **`blocks`** preenchido e `status` diferente de `done` e
@@ -55,38 +55,36 @@ de outro workstream.
 - **Nome acompanha o foco:** quando o foco de uma nota ou de um plano muda, o nome do arquivo, o H1 e os links mudam
   junto, com `move_note.py <origem> <destino> --title "<H1 novo>"`.
 
-**Nota se grava na branch do workstream, pelo `brza note commit`**, que recusa a `master` e dá o push no workstream;
-quando o frontmatter de um plano, issue ou decisão muda, ele acrescenta a linha do índice na `master`, sem checkout.
+**Nota se grava na branch do workstream, pelo `brza note commit`**, que recusa a `{{workspace.branch}}` e dá o push no workstream;
+quando o frontmatter de um plano, issue ou decisão muda, ele acrescenta a linha do índice na `{{workspace.branch}}`, sem checkout.
 O número do plano novo sai do `brza note plan-open`.
-**Norma se grava na `master`**, com `git add` por caminho e `git pull --rebase` quando outro push corre junto, e chega
-aos workstreams pelo `brza note sync`, que faz o `git merge` da `master` em cada worktree.
+**Norma se grava na `{{workspace.branch}}`**, com `git add` por caminho e `git pull --rebase` quando outro push corre junto, e chega
+aos workstreams pelo `brza note sync`, que faz o `git merge` da `{{workspace.branch}}` em cada worktree.
 
-## Quem commita é o brz-anderson
+## Quem commita é o {{author.login}}
 
-Os commits deste repositório e do `brza-studio` saem com o noreply do `brz-anderson`
-(`240569289+brz-anderson@users.noreply.github.com`) e vão ao GitHub pela chave `personal`. A identidade vem do ambiente
-da sessão, como diz o adaptador do runtime, e não depende do `.git/config`. O push vai direto, sem PR: daqui, a norma
-na `master` e as notas na branch do workstream; do `brza-studio`, na `master`.
+Os commits deste repositório e do `{{code.name}}` saem com o noreply do `{{author.login}}`
+(`{{author.email}}`) e vão ao GitHub, com a chave de acesso que o `README.md` documenta. A identidade vem do
+ambiente da sessão, como diz o adaptador do runtime, e não depende do `.git/config`. O push vai direto, sem PR: daqui, a norma
+na `{{workspace.branch}}` e as notas na branch do workstream; do `{{code.name}}`, na `{{code.branch}}`.
 
 ## O uso é medido
 
 Cada turno, subagente, skill, comando digitado e chamada MCP vira uma linha com tempo e custo em
 `.measurements/measurements.jsonl`, fora do git, pelo hook de medição que o adaptador do runtime liga. O resumo sai do
 `python3 scripts/summarize_measurements.py`. A medição vale para toda sessão aberta neste repositório ou no
-`brza-studio` pela função do shell; **a sessão aberta sem ela não é medida**, e por isso falta de linha não quer dizer
+`{{code.name}}` pela função do shell; **a sessão aberta sem ela não é medida**, e por isso falta de linha não quer dizer
 falta de uso.
 
 ## O ferramental vive no escopo do projeto ou do workstream
 
 Plugins e servidores MCP são habilitados só na configuração deste repositório, nunca na de usuário:
-- **Para todos os workstreams:** na configuração de projeto. O único plugin é o `context7`, e não há servidor MCP
-  próprio.
-- **Para um workstream só:** na configuração local do worktree dele, fora do git. Hoje, o `skill-creator`, no
-  `workspace`.
+- **Para todos os workstreams:** na configuração de projeto. A lista está em `.claude/rules/workspace.md`.
+- **Para um workstream só:** na configuração local do worktree dele, fora do git. A lista também está lá.
 
 ## O que muda fora do workspace vai para o worklog
 
-Arquivo criado ou alterado fora deste repositório e do `brza-studio` — o `~/.zshrc`, a configuração de usuário do
+Arquivo criado ou alterado fora deste repositório e do `{{code.name}}` — o `~/.zshrc`, a configuração de usuário do
 runtime… — entra no worklog do dia, na seção `## Fora do workspace`, na forma do [`work/README.md`](work/README.md). O
 mesmo vale para comando que muda estado fora deles: daemon, login, `kill`, app instalado. Leitura pura fica de fora.
 
@@ -119,7 +117,7 @@ só vai quando o pedido diz "me avise".
 
 **A memória é do workstream, e mora na branch dele**, para que o aprendizado de cada frente se acompanhe no git e na
 medição:
-- **A sessão** grava em `memory/`, na raiz do worktree. A sessão de código num worktree do `brza-studio` grava na
+- **A sessão** grava em `memory/`, na raiz do worktree. A sessão de código num worktree do `{{code.name}}` grava na
   memória do workstream do plano da branch.
 - **Os _subagentes por papel_** gravam em `.claude/agent-memory/<papel>/`, no worktree do workstream.
 - **A memória que muda vai ao commit do worklog que fecha a tarefa**, pelo `brza note commit`, que avisa quando sobra
@@ -235,5 +233,5 @@ O vocabulário deste arquivo. A tradução para cada runtime está no adaptador 
 - _compactação_ — o resumo que o runtime faz da conversa, no lugar dela, para a sessão seguir com menos contexto.
 - _subagente por papel_ — subagente definido em `.claude/agents/` (`collector`, `implementer`, `reviewer`, `designer`),
   com modelo e memória próprios.
-- _workstream_ — a frente de trabalho, como o `studio` ou o `tools-kit`, com os planos e as notas dela. Mora numa branch
+- _workstream_ — a frente de trabalho, como o `app` ou o `ferramental`, com os planos e as notas dela. Mora numa branch
   `workstream/<nome>` e num worktree em `.worktrees/<nome>`.

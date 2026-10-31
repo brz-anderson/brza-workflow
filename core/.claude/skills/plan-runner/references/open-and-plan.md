@@ -12,7 +12,7 @@ entram junto com o plano aceito, na seção datada que o abre. No `PLN`, cada et
 
 1. **Confirme que é plano e onde ele mora**, pelos Passos 1 e 2 da `SKILL.md`.
 2. **Resolva o nome.** No `PLN`, `brza note plan-open <assunto-em-kebab> --title "<H1 sem o PLN-NNN>" --description
-   "<uma frase>"` reserva o número no índice da `master`, mesmo com outra sessão abrindo plano junto, e imprime o
+   "<uma frase>"` reserva o número no índice da `{{workspace.branch}}`, mesmo com outra sessão abrindo plano junto, e imprime o
    `PLN-NNN` e o caminho; o plano se grava no worktree do workstream da sessão. No worklog,
    `AAAA-MM-DD-assunto-em-kebab.md`.
 3. **Escreva o frontmatter, o `Retomar`, o `## Pedido` e o `## Worklogs`** pelo molde, com o pedido nas palavras de quem
@@ -29,12 +29,12 @@ A entrevista fecha as lacunas antes de alguém escrever. **Até cinco rodadas po
 recurso, não o primeiro. As rodadas seguem "Como perguntar", na `SKILL.md`.
 
 - **Levante antes de perguntar.** O que o repositório e as notas já respondem não se pergunta: leia o código do
-  `brza-studio`, as decisões de `work/decisions/` e os planos vizinhos, e leve a inferência ao texto, com a fonte, como
+  `{{code.name}}`, as decisões de `work/decisions/` e os planos vizinhos, e leve a inferência ao texto, com a fonte, como
   primeira opção a confirmar. Levantamento pesado vai a um subagente (o laço da `SKILL.md`).
 - **O que costuma faltar** num pedido de app: o comportamento nos dois sistemas (macOS e Windows) quando importa, o que
   acontece sem rede ou com o agente parado, a referência visual, o padrão ligado ou desligado, e o que fica de fora.
 - **Critério de aceite que falta é derivado aqui como proposta**: o critério é uma frase que se confere — o que se vê ou
-  o que o teste afirma —, e Anderson confirma antes de ele entrar na Cobertura.
+  o que o teste afirma —, e {{workspace.owner}} confirma antes de ele entrar na Cobertura.
 - **Cada rodada vai ao plano ao fechar**, com o "Apresentado antes", cada opção com o custo e quando se paga, e a
   resposta. Resposta em texto livre vai entre aspas, com a leitura que você fez dela e o que acontece em seguida.
 
@@ -53,8 +53,8 @@ do pedido, e o plano segue para Planejar.
    defensáveis ativa os consultores em paralelo, com foco; cada alternativa volta com custo e momento em que se paga.
 3. **Leve as alternativas a uma rodada na mensagem, em texto**, no formato sem a ferramenta, lado a lado sobre os
    mesmos casos, com a tabela e a recomendação marcada: a caixa da pergunta com opções esconde o artefato que precisa
-   estar à vista para escolher. Quem escolhe é Anderson. Opção que muda o que se vê vem com a comparação à vista:
-   - **No chat do BrzA Studio, cada alternativa de interface é um artboard**: um `.html` no `ORCA_CHAT_SCRATCH_DIR`,
+   estar à vista para escolher. Quem escolhe é {{workspace.owner}}. Opção que muda o que se vê vem com a comparação à vista:
+   - **No chat do {{workspace.title}}, cada alternativa de interface é um artboard**: um `.html` no `ORCA_CHAT_SCRATCH_DIR`,
      na forma da skill `orca-chat-visuals` do app, e uma linha `::orca-visual{file="<arquivo>.html" title="A — <rótulo>"}`
      por alternativa, com a letra da opção no `title`. Até 8 por resposta.
    - **Antes da rodada, a sessão confere cada artboard pelo PNG**, porque ela não vê o chat:
@@ -68,14 +68,14 @@ do pedido, e o plano segue para Planejar.
    `brza shot <artboard>.html plans/PLN-NNN-…/PLN-NNN-<assunto>.png`, e o item `D` linka a imagem. **A escolhida que vai a
    uma issue**, e não a um plano, deixa o PNG ao lado dela, `work/issues/<nome-da-issue>.png`, e o corpo da issue linka
    a imagem.
-5. **Aplique o reverso**: item que vira regra durável do `brza-studio` sai para a norma dele, e o plano cita. Sem isso o
+5. **Aplique o reverso**: item que vira regra durável do `{{code.name}}` sai para a norma dele, e o plano cita. Sem isso o
    Desenho vira uma segunda norma.
 
 **Consultor**, o subagente devolve o Terreno e os itens `D` no molde — a origem de cada item, as alternativas com custo
 e quando se paga, cada ponto sem lastro marcado no lugar em que aparece —, e nada vai ao plano.
 
 **O `PLN` pode parar aqui** — a proposta que espera decisão: `phase: design`,
-`ready: não — aguarda decisão de <quem> sobre D2`. Sai do Desenho ao virar decisão, passos ou norma do `brza-studio`, ou
+`ready: não — aguarda decisão de <quem> sobre D2`. Sai do Desenho ao virar decisão, passos ou norma do `{{code.name}}`, ou
 ao ser rejeitado, com `status: dropped`, `phase: dropped` e a linha do porquê em `## Worklogs`. O plano de worklog não
 para no Desenho: ou é aceito, ou não entra em `work/`.
 
@@ -86,9 +86,9 @@ para no Desenho: ou é aceito, ou não entra em `work/`.
    subpassos com o teste que falha antes, o comando e o commit, a linha de evidência —; curta quando é uma rodada ou um
    registro. **Código no passo é instrução, não fonte**: o trecho que o passo pede — a assinatura, o teste que falha
    antes, o corpo quando o `D` o fixou — vale até o commit que o fecha, e dali em diante o disco é a verdade.
-3. **Nomeie o executor**: a sessão que conduz, para o que é nota e rodada; **a sessão do `brza-studio`**, para o passo de
-   código — aberta em `~/Projects/brza-studio`, num worktree em `.worktrees/`, na branch `<tipo>/pln-NNN-<slug>`, uma
-   sessão por entrega (`plans/README.md`, "Branch"); um subagente, para leitura e rascunho; **Anderson**, para o que só
+3. **Nomeie o executor**: a sessão que conduz, para o que é nota e rodada; **a sessão do `{{code.name}}`**, para o passo de
+   código — aberta em `{{code.path}}`, num worktree em `.worktrees/`, na branch `<tipo>/pln-NNN-<slug>`, uma
+   sessão por entrega (`plans/README.md`, "Branch"); um subagente, para leitura e rascunho; **{{workspace.owner}}**, para o que só
    se prova no aparelho dele.
 4. **Feche a Cobertura**: toda linha com passo e teste, no nível que prova o critério — unidade, ou conferência manual no
    app. Linha da Origem leva o item do pedido (`Pedido 5`) ou a rodada (`R3.2`).

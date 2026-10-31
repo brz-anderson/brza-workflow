@@ -38,24 +38,24 @@ pasta** → **sob demanda** (skill, `README.md`). Cada coisa fica no nível mais
   não aponte.
 - **O que o arquivo diz hoje**, e as seções vizinhas: a regra nova costuma reescrever uma que já existe, e não ganhar
   seção própria. Procure os termos dela em todos os arquivos da tabela antes de escrever.
-- **A norma mora na `master`.** Leia e edite no checkout da raiz (`~/Projects/brza-workspace`), não no worktree do
+- **A norma mora na `{{workspace.branch}}`.** Leia e edite no checkout da raiz, não no worktree do
   workstream, que só recebe a norma pelo merge.
 
 ## Escrever
 
-- **A forma da casa:** H2 que afirma ("Quem commita é o brz-anderson"), a frase-chave em negrito no começo do
+- **A forma da casa:** H2 que afirma ("Quem commita é o {{author.login}}"), a frase-chave em negrito no começo do
   parágrafo, lista curta com rótulo em negrito, linhas de até 120 colunas, prosa em português e identificador na forma
   original.
 - **O estado presente.** Narrativa de como se chegou à regra, a versão anterior e "antes era assim" ficam no worklog. A
   data entra quando é a fonte de uma medição que sustenta a regra ("na medição de 2026-10-27 a 2026-10-29…") ou a de
-  uma citação de Anderson.
+  uma citação de {{workspace.owner}}.
 - **Regra com o porquê**, em uma frase: a regra sem motivo é seguida à letra e quebrada no caso que ela não previu.
 - **Ponto sem lastro é pergunta** — texto que você preencheu sem fonte vira rodada antes de gravar, como manda o
   `AGENTS.md`, "Decisões pendentes vão em rodadas de perguntas".
 
 ## Gravar
 
-1. Grave na `master`, com `git add` por caminho — nunca `git add -A`, porque o checkout da raiz pode ter arquivo de outra
+1. Grave na `{{workspace.branch}}`, com `git add` por caminho — nunca `git add -A`, porque o checkout da raiz pode ter arquivo de outra
    sessão — e `git pull --rebase` antes do push.
 2. Leve aos workstreams com `brza note sync`.
 3. Mostre cada arquivo na resposta, na forma do `AGENTS.md` ("Arquivo gravado na norma… aparece na resposta").
@@ -78,7 +78,7 @@ vai segui-lo**: a frase que não fecha, a regra que depende de algo que ninguém
 numa das branches são achados tão bons quanto os da régua abaixo, que é o mínimo, e não o roteiro.
 
 - **Siga o ponteiro até onde ele leva**, também para fora do repositório — `~/.claude/settings.json`, `~/.zshrc`, o
-  `brza-studio` —, só lendo. "Não conferi" é a última saída, e vem com o porquê.
+  `{{code.name}}` —, só lendo. "Não conferi" é a última saída, e vem com o porquê.
 - **Diga o que quebra**: para cada achado, o que o agente faz de errado por causa dele, e se falha em silêncio.
 - **A resposta segue as perguntas do pedido**, uma seção por pergunta, em lista com o `arquivo:linha`. Tabela só com
   célula curta; o argumento longo não cabe numa célula que o chat corta.
@@ -99,6 +99,6 @@ A régua:
 
 - **Todo ponteiro existe e todo comando roda**, conferidos em disco antes de entregar, com o que rodou dito na resposta.
 - **O que carrega sempre paga em toda sessão**: cada linha do `AGENTS.md` e do `CLAUDE.md` precisa ganhar o lugar.
-- **A norma não decide sozinha**: o que entra já foi decidido por Anderson, na conversa ou numa nota de
+- **A norma não decide sozinha**: o que entra já foi decidido por {{workspace.owner}}, na conversa ou numa nota de
   `work/decisions/`. Quando o pedido contraria uma escolha registrada antes — numa memória, numa decisão, num worklog
   —, cite a escolha anterior na resposta, com a data, para que a troca seja vista.

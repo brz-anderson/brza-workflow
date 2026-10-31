@@ -638,9 +638,8 @@ class RunTest(Base):
 
 
 class SettingsTest(unittest.TestCase):
-    @unittest.skip("P3: lê o settings.json do workspace, que não vem; o settings.hooks.json nasce no P3")
     def test_subagent_stop_has_measure_then_fact_audit(self):
-        path = os.path.join(os.path.dirname(os.path.dirname(HERE)), "settings.json")
+        path = os.path.join(HOOKS, "..", "settings.hooks.json")
         with open(path, encoding="utf-8") as f:
             settings = json.load(f)
         (group,) = settings["hooks"]["SubagentStop"]

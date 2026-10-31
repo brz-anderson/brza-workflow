@@ -11,13 +11,13 @@ description: >-
 
 Um plano responde a uma pergunta só: **como estou fazendo este trabalho**. Ele guarda o que foi perguntado e decidido,
 como fica o que vai ser construído, o que fazer em que ordem e com que prova, e se o entregue cumpre. Mora em `plans/`,
-na raiz do brza-workspace, e lá fica: o `PLN` fechado ganha `status: done` e continua citável por `PLN-NNN/R2.1`, depois
-que o durável saiu para a casa dona — a decisão em `work/decisions/`, a norma do `brza-studio` — e o resumo foi ao commit
+na raiz do {{workspace.name}}, e lá fica: o `PLN` fechado ganha `status: done` e continua citável por `PLN-NNN/R2.1`, depois
+que o durável saiu para a casa dona — a decisão em `work/decisions/`, a norma do `{{code.name}}` — e o resumo foi ao commit
 ou ao pull request.
 
 Esta skill decide o conteúdo do plano e roda na sessão que conduz o trabalho, onde está a ferramenta de pergunta. É essa
-sessão que grava o plano em `plans/`, só nos caminhos da tarefa dela. **O código do `brza-studio` não é gravado por
-aqui**: cada passo nomeia o executor, e o passo de código roda numa sessão aberta no `brza-studio`.
+sessão que grava o plano em `plans/`, só nos caminhos da tarefa dela. **O código do `{{code.name}}` não é gravado por
+aqui**: cada passo nomeia o executor, e o passo de código roda numa sessão aberta no `{{code.name}}`.
 
 **A norma é a do [`plans/README.md`](../../../plans/README.md)** — o número pelo `brza note plan-open`, o mapa de
 `phase` e `status`, as origens, o que fecha — e a do [`work/README.md`](../../../work/README.md), para as propriedades comuns, os
@@ -31,7 +31,7 @@ e grava é a sessão principal". Esta skill segue essas seções e não repete o
 
 ## Passo 0 — situar o trabalho
 
-- **Ache a raiz do workspace**: `git rev-parse --show-toplevel`, de dentro do `brza-workspace`. Todo caminho desta skill
+- **Ache a raiz do workspace**: `git rev-parse --show-toplevel`, de dentro do `{{workspace.name}}`. Todo caminho desta skill
   — `plans/...`, `work/...` — é relativo a ela. Sem `plans/` ali, não abra plano em caminho inventado: diga que falta a
   pasta e pare.
 - **Leia a norma de planos** — o `plans/README.md`: o mapa de `phase` e `status`, o que fecha —, a seção de `work/worklogs/` do `work/README.md` e o molde, `references/plan-template.md`. **O molde mora só
@@ -45,7 +45,7 @@ e grava é a sessão principal". Esta skill segue essas seções e não repete o
   grep -rl '^blocks:' work plans wiki | xargs grep -LE '^status: (done|dropped)'
   ```
 
-- **Se o trabalho toca o código**, leia a norma do `brza-studio` (`~/Projects/brza-studio`, o `AGENTS.md` ou o `CLAUDE.md`
+- **Se o trabalho toca o código**, leia a norma do `{{code.name}}` (`{{code.path}}`, o `AGENTS.md` ou o `CLAUDE.md`
   dele) antes de desenhar: é dela que saem as restrições e as dívidas que o plano não deve reabrir.
 - **Plano que já existe** — "retomar o PLN-NNN", "onde isso parou?" — pula os Passos 1 e 2 e vai a
   `references/conduct.md`, "Retomar".
@@ -81,7 +81,7 @@ filtro: vai ao Passo 2.
 | Atravessa sessões — não fecha no dia, ou espera resposta ou entrega de fora desta sessão | Num `PLN` em `plans/`, com o `## Worklogs` citando o worklog de cada sessão                    |
 
 O destino vai à primeira rodada, com a sua leitura como primeira opção: é a resposta que decide onde todo o resto é
-gravado. Plano que chega já aceito — aprovado por Anderson na conversa, fora das rodadas desta skill — vai ao destino
+gravado. Plano que chega já aceito — aprovado por {{workspace.owner}} na conversa, fora das rodadas desta skill — vai ao destino
 como foi aceito, com a data do aceite: a frase de aprovação, citada, conta como a seleção na rodada do corte. Plano de
 worklog que passa a atravessar sessões é promovido a `PLN`: o `PLN` nasce da seção datada, copiada com os mesmos IDs, e
 o worklog ganha a linha "promovido a `PLN-NNN`". Worklog sem plano continua válido e não é desta skill: ela só abre o
@@ -91,18 +91,18 @@ worklog que nasce de um plano aceito.
 
 **Só esta skill decide o conteúdo do plano; quem grava e commita em `plans/` e `work/` é a sessão que conduz**, só nos
 caminhos da tarefa, como o `work/README.md` manda em "Commit": na branch do workstream da sessão, pelo `brza note
-commit`, sem PR, com a identidade do `brz-anderson`.
+commit`, sem PR, com a identidade do `{{author.login}}`.
 
 1. **Grave só os caminhos da tarefa**: o plano dela e o worklog dela. Ao abrir `PLN`, o número sai do `brza note
-   plan-open`, que o reserva no índice da `master` antes de o plano ser gravado. O `phase` e o `status` saem do mapa
+   plan-open`, que o reserva no índice da `{{workspace.branch}}` antes de o plano ser gravado. O `phase` e o `status` saem do mapa
    do `plans/README.md`. Confira com o checador, de
    qualquer diretório do workspace — `python3 ${CLAUDE_SKILL_DIR}/../notes-checker/scripts/check_notes.py` — antes de
    commitar.
 2. **O que é de outra tarefa, esta sessão não executa** — outro plano, o trabalho de outra issue, o passo de código que
-   roda no `brza-studio`. Grava só o pedido, numa issue ou numa linha no `Retomar` do plano dono, e a outra tarefa abre
+   roda no `{{code.name}}`. Grava só o pedido, numa issue ou numa linha no `Retomar` do plano dono, e a outra tarefa abre
    sessão nova. O pedido leva o passo, os arquivos, o `D` e o que as rodadas decidiram, citado como foi respondido.
 3. **A rodada vai com a resposta** nas palavras de quem respondeu, a data e a sessão em que foi respondida; respondida em
-   outra sessão, entra no plano sem perguntar de novo. Só a nota de `work/decisions/` passa pela confirmação de Anderson,
+   outra sessão, entra no plano sem perguntar de novo. Só a nota de `work/decisions/` passa pela confirmação de {{workspace.owner}},
    na sessão que a grava.
 
 Quando gravar está em cada operação: a rodada ao fechar, a evidência com o commit que fecha os passos, e o worklog da
@@ -141,7 +141,7 @@ a origem nova.
 ## O laço consultor
 
 Leitura pesada e rascunho vão a um subagente (`Agent`), para não encher o contexto da sessão: o levantamento do Terreno,
-a leitura do código do `brza-studio`, o rascunho de um item `D`. O consultor devolve e não grava, e o laço é sempre o
+a leitura do código do `{{code.name}}`, o rascunho de um item `D`. O consultor devolve e não grava, e o laço é sempre o
 mesmo:
 
 1. **Chame o subagente** com o pedido — a operação, o repositório alvo, o que as rodadas já decidiram, citado como foi
@@ -158,7 +158,7 @@ mesmo:
 
 **Consultores em paralelo, com foco**, quando o gatilho vale: bifurcação com três ou mais alternativas defensáveis vai a
 dois ou três subagentes — mudança mínima, arquitetura limpa, equilíbrio —, cada um devolvendo uma alternativa com custo
-e quando se paga. Você junta; **quem escolhe é Anderson**, numa rodada com as alternativas lado a lado e a recomendação
+e quando se paga. Você junta; **quem escolhe é {{workspace.owner}}**, numa rodada com as alternativas lado a lado e a recomendação
 marcada.
 
 ## Operações
@@ -179,7 +179,7 @@ grava". Duas mãos decidindo o mesmo plano produzem dois estados dele.
 
 **`[x]` sem evidência não conta.** Evidência é o que outra pessoa refaz: o commit, o comando e o resultado,
 `arquivo:linha`. "Os testes passam" não é evidência; `<comando que roda os testes> → 42 passed` é, e o commit vem com o
-repositório: `brza-studio@a1b2c3d`. **O passo que tem `Estimado` fecha também com o `Executado`**, e `executed_h` e
+repositório: `{{code.name}}@a1b2c3d`. **O passo que tem `Estimado` fecha também com o `Executado`**, e `executed_h` e
 `remaining_h` do frontmatter são reescritos no mesmo ato.
 
 **A Entrevista só cresce; o Desenho é reescrito no lugar** — no `PLN`. A crítica e a resposta vão para a Entrevista, e o
@@ -191,10 +191,10 @@ entre os dois é um desvio `X`, registrado. O plano carrega o trecho que o passo
 antes, o corpo quando o `D` o fixou —, e como ele fica em `plans/` depois de fechar, o passo fechado cita o commit: quem
 lê o plano depois lê o código por ele.
 
-**Passo só executa a pedido explícito de Anderson, passo a passo.** Plano revisado ou aceito não autoriza execução.
+**Passo só executa a pedido explícito de {{workspace.owner}}, passo a passo.** Plano revisado ou aceito não autoriza execução.
 
 **Quem recomenda não decide.** Nem esta skill nem o consultor escolhem entre alternativas: recomendam, com o custo e
-quando se paga de cada uma, e Anderson escolhe.
+quando se paga de cada uma, e {{workspace.owner}} escolhe.
 
 **O plano fecha, não se apaga.** A numeração `PLN` é sequencial e não reusada; o plano fechado fica com `status: done`,
 e o abandonado, com `dropped` e a linha do porquê.

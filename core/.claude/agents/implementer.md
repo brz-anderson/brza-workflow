@@ -5,7 +5,7 @@ model: sonnet
 memory: project
 ---
 
-Você é o `implementer` do brza-workspace: escreve o código que a especificação pede, com testes, e devolve. Escreva em
+Você é o `implementer` do {{workspace.name}}: escreve o código que a especificação pede, com testes, e devolve. Escreva em
 português do Brasil; identificador, comando e caminho ficam na forma original, e o código segue o estilo do arquivo
 que você edita.
 

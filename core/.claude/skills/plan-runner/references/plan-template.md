@@ -18,7 +18,7 @@
 > | `phase`                                                                     | `interview` · `design` · `execution` · `review` · `blocked` · `closed` · `dropped`       | sempre                            |
 > | `origin`                                                                    | `issue` · `decision` · `plan` · `request`                                                | sempre                            |
 > | `origin_ref`                                                                | o nome da issue ou da decisão sem `.md`; `PLN-NNN` ou `PLN-NNN/A<n>`                     | sempre, menos com `request`       |
-> | `description`                                                               | uma frase, o que o plano entrega; vai ao índice da master                                | sempre                            |
+> | `description`                                                               | uma frase, o que o plano entrega; vai ao índice da {{workspace.branch}}                                | sempre                            |
 > | `ready`                                                                     | `sim`, ou `não — o que falta, e o que isso trava`; entre aspas quando o texto tem `: `   | sempre                            |
 > | `estimate_h` · `executed_h` · `remaining_h`                                 | número, ponto decimal, sem unidade                                                       | quando algum passo tem `Estimado` |
 > | `scope` · `opened` · `owner` · `tags` · `blocks` · `deadline` · `completed` | como em toda nota                                                                        | como em toda nota                 |
@@ -54,9 +54,9 @@
 > executed_h: 3
 > remaining_h: 9.5
 > scope:
->   - brza-studio
+>   - {{code.name}}
 > opened: AAAA-MM-DD
-> owner: Anderson
+> owner: {{workspace.owner}}
 > ---
 > ```
 
@@ -69,7 +69,7 @@
 > `## Worklogs`. **`Dividido`** só existe quando há `-interview` ou `-design`.
 >
 > **Plano parado no Desenho** — a proposta que espera decisão — fica com `phase: design` e
-> `ready: não — aguarda decisão de Anderson sobre D2`. Não há fase própria para isso.
+> `ready: não — aguarda decisão de {{workspace.owner}} sobre D2`. Não há fase própria para isso.
 
 ## Pedido
 
@@ -84,7 +84,7 @@
 ### Cobertura
 
 > Uma linha por item do pedido. É o que prova que o plano cobre o que foi pedido. O nível do teste é a unidade, ou a
-> conferência manual no app, com Anderson.
+> conferência manual no app, com {{workspace.owner}}.
 
 | Origem     | Critério de aceite     | Passo | Teste (nível)                                    |
 | :--------- | :--------------------- | :---- | :----------------------------------------------- |
@@ -109,7 +109,7 @@
 
 ## Restrições
 
-> **Gatilho:** restrições particulares deste trabalho. As do `brza-studio` estão na norma dele; repeti-las aqui cria a
+> **Gatilho:** restrições particulares deste trabalho. As do `{{code.name}}` estão na norma dele; repeti-las aqui cria a
 > cópia que envelhece.
 
 - **A restrição.** O que ela proíbe, numa linha.
@@ -196,12 +196,12 @@ Respondida em AAAA-MM-DD.
 > planejar, e fica em parágrafo próprio, logo abaixo da linha `Executa`. `Executado` é preenchido ao fechar o passo,
 > junto da evidência. Passo de rodada ou "a pedido" não leva a linha.
 >
-> **O executor** é a sessão que conduz, a sessão do `brza-studio`, um subagente ou Anderson. Cada passo só executa a
-> pedido explícito de Anderson.
+> **O executor** é a sessão que conduz, a sessão do `{{code.name}}`, um subagente ou {{workspace.owner}}. Cada passo só executa a
+> pedido explícito de {{workspace.owner}}.
 
 ### P1 — Título do passo
 
-Executa D1 · executor: sessão do `brza-studio`
+Executa D1 · executor: sessão do `{{code.name}}`
 
 Estimado: 3 h · Executado: — h
 
@@ -210,7 +210,7 @@ Estimado: 3 h · Executado: — h
 - [ ] **3. Rodar e ver passar** — o comando
 - [ ] **4. Commit**
 
-**Evidência:** `brza-studio@a1b2c3d` · `<comando dos testes>` → 42 passed
+**Evidência:** `{{code.name}}@a1b2c3d` · `<comando dos testes>` → 42 passed
 
 ## Regressão
 
@@ -262,7 +262,7 @@ Estimado: 3 h · Executado: — h
 > que leu.
 
 - [Título do guia](../../wiki/guides/<guia>.md) — criado em P3.
-- `brza-studio/AGENTS.md`, "Seção" — emendado em P5, pela sessão do `brza-studio`.
+- `{{code.name}}/AGENTS.md`, "Seção" — emendado em P5, pela sessão do `{{code.name}}`.
 
 ## Casos manuais
 
@@ -281,9 +281,9 @@ Estimado: 3 h · Executado: — h
 
 - [ ] Todo passo `[x]` com evidência, ou `[-]` com motivo.
 - [ ] Todo achado com destino que existe.
-- [ ] Um resumo por commit ou PR do `brza-studio` da entrega, com o link do plano: os achados e o destino de cada um.
+- [ ] Um resumo por commit ou PR do `{{code.name}}` da entrega, com o link do plano: os achados e o destino de cada um.
       Trabalho só em notas de `work/` e `plans/` não tem resumo.
 - [ ] O durável saiu para a casa dona e está em `## Decisões` e `## Documentação`: a decisão em `work/decisions/`, a
-      norma do `brza-studio`, o guia.
+      norma do `{{code.name}}`, o guia.
 - [ ] As decisões que o plano respondeu estão `done`, citando a rodada.
 - [ ] `status: done`, `phase: closed` e `completed` no frontmatter.

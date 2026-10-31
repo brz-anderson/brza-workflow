@@ -1,8 +1,7 @@
 # work/ e wiki/
 
-**A norma de escrita das notas do brza-workspace** — o que está em andamento, o que trava, o que foi decidido e como
-Anderson usa as ferramentas —, para quem escreve em `work/` ou em `wiki/`, pessoa ou agente. Adaptada da norma do
-workspace da Fixfy, sem o que é só de lá.
+**A norma de escrita das notas do {{workspace.name}}** — o que está em andamento, o que trava, o que foi decidido e como
+{{workspace.owner}} usa as ferramentas —, para quem escreve em `work/` ou em `wiki/`, pessoa ou agente.
 
 > [!IMPORTANT]
 >
@@ -12,7 +11,7 @@ workspace da Fixfy, sem o que é só de lá.
 > estado vive no frontmatter, e por isso **nada migra de pasta**: a issue nasce e morre em `work/issues/`, a decisão
 > vai de `open` a `done` sem sair de `work/decisions/`.
 
-Este é o único arquivo de norma das duas zonas. Norma do código fica no repositório dele, o `brza-studio`.
+Este é o único arquivo de norma das duas zonas. Norma do código fica no repositório dele, o `{{code.name}}`.
 
 ---
 
@@ -41,7 +40,7 @@ Este é o único arquivo de norma das duas zonas. Norma do código fica no repos
 
 | Zona | O que guarda |
 | :--- | :----------- |
-| `work/` | O trabalho no BrzA Studio e as decisões de contexto de trabalho |
+| `work/` | O trabalho no {{workspace.title}} e as decisões de contexto de trabalho |
 | `wiki/` | O conhecimento consolidado, que não tem fim previsto |
 
 **Os planos moram em `plans/`, ao lado de `work/`**, com norma própria no [`plans/README.md`](../plans/README.md).
@@ -142,7 +141,7 @@ python3 .claude/skills/notes-checker/scripts/move_note.py <origem> <destino> --t
 ---
 status: open
 scope:
-  - brza-studio
+  - {{code.name}}
 opened: 2026-10-27
 ---
 ```
@@ -174,7 +173,7 @@ que apontam para ela —, pelo `move_note.py`.
 **Link entre notas é Markdown relativo, com o H1 da nota de destino como rótulo:**
 `[Título da nota](../issues/assunto.md)`. `[[wikilink]]` não existe. Todo caminho é relativo **ao arquivo que contém o
 link**, e só quando o arquivo existe em disco; nome de arquivo solto em prosa fica em crase — é citação, não link. O
-que mora em outro repositório — o código do `brza-studio`, ou uma nota do workspace da Fixfy — se cita em crase, com o
+que mora em outro repositório — o código do `{{code.name}}` — se cita em crase, com o
 caminho, e não vira link. `README.md` de repositório nunca vira link de rótulo genérico: diga de qual repositório.
 
 **Callout** — os cinco tipos do GitHub (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), com a marca sozinha
@@ -183,16 +182,16 @@ por um formatador que junta linhas.
 
 ### Commit
 
-`work/`, `plans/` e `wiki/` são deste repositório, mas **não moram na `master`**: cada nota mora na branch do
+`work/`, `plans/` e `wiki/` são deste repositório, mas **não moram na `{{workspace.branch}}`**: cada nota mora na branch do
 workstream dela, `workstream/<nome>`, no worktree `.worktrees/<nome>`, como diz o `AGENTS.md`. **A nota nasce no
 workstream da sessão que a escreve.** **O commit é pelo `brza note commit`**, que roda o checador, commita só os
-caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `master`; quando o frontmatter, o H1 ou o
-caminho de um plano, issue ou decisão muda, ele acrescenta a linha do índice `.brza/index.jsonl` na `master`, sem
+caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `{{workspace.branch}}`; quando o frontmatter, o H1 ou o
+caminho de um plano, issue ou decisão muda, ele acrescenta a linha do índice `.brza/index.jsonl` na `{{workspace.branch}}`, sem
 checkout. O commit é com a identidade do
-`brz-anderson`, que vem do `env` da sessão, e o push vai pela chave `personal` do `origin`
-(`git@personal:brz-anderson/brza-workspace.git`).
+`{{author.login}}`, que vem do `env` da sessão, e o push vai pelo `origin`, com a chave de acesso que o
+`README.md` documenta.
 
-O `brza-studio` é outro repositório, com branch `master` e a norma dele: o plano daqui só aponta para ele.
+O `{{code.name}}` é outro repositório, com branch `{{workspace.branch}}` e a norma dele: o plano daqui só aponta para ele.
 
 ---
 
@@ -206,8 +205,8 @@ O `brza-studio` é outro repositório, com branch `master` e a norma dele: o pla
 | :---------- | :----------- |
 | `type` | **Ausente**, quer dizer o gênero da pasta. Escrito só quando refina o caminho: `unknown`, para investigação em `issues/` |
 | `status` | `open` existe e ninguém pegou · `in_progress` alguém está fazendo · `in_review` feito, esperando parecer · `done` encerrado **com** desfecho · `dropped` encerrado **sem** desfecho, por escolha. **Omitido** nos gêneros sem ciclo de vida: `guide`, `worklog` e `note` |
-| `scope` | A que a nota se refere. Sempre **lista**: `brza-studio`, `workspace`, ou o que mais vier |
-| `description` | Uma frase: o que a nota entrega ou pede. Obrigatória em plano (`-plan.md`), issue e decisão criados a partir de 2026-11-01, e vai ao índice da `master`; nas anteriores, o índice usa o H1. O checador cobra `description-missing` |
+| `scope` | A que a nota se refere. Sempre **lista**: `{{code.name}}`, `workspace`, ou o que mais vier |
+| `description` | Uma frase: o que a nota entrega ou pede. Obrigatória em plano (`-plan.md`), issue e decisão criados a partir de 2026-11-01, e vai ao índice da `{{workspace.branch}}`; nas anteriores, o índice usa o H1. O checador cobra `description-missing` |
 | `priority` | Só em `issues/`: `high` · `medium` · `low`. Opcional e sem default |
 | `opened` | Quando o assunto foi aberto |
 | `decided` / `decided_by` | Data da decisão e quem decidiu — par indivisível |
@@ -292,7 +291,7 @@ transcrição.
 - **Plano que atravessa mais de uma sessão** é copiado para `plans/`, com os mesmos IDs, e o worklog ganha
   "promovido a PLN-NNN".
 - **O que muda estado fora do workspace tem seção própria**, `## Fora do workspace`, no worklog do dia: arquivo criado
-  ou alterado fora de `~/Projects/brza-workspace` e do `brza-studio`, cujo commit já é o registro, e comando que muda
+  ou alterado fora deste repositório e do `{{code.name}}`, cujo commit já é o registro, e comando que muda
   estado fora deles; leitura pura não entra. Um item por coisa, com quatro campos — **o quê e onde**; **o risco**, o
   que pode dar errado e para quem; **estado**, se segue ativo; **como desfazer**.
 
@@ -322,9 +321,9 @@ deixou de importar — com a linha dizendo por que morreu.
 | A decisão, numa frase, no título e no corpo | Enunciado, não histórico do debate |
 | "Decidido por … em …", e `decided` e `decided_by` | Quem e quando |
 | Fundamento curto, com a alternativa recusada e o motivo | Impede a reabertura por esquecimento |
-| Onde mais está registrada — o commit, o PR do `brza-studio` | "Só aqui" é dívida |
+| Onde mais está registrada — o commit, o PR do `{{code.name}}` | "Só aqui" é dívida |
 
-- **A decisão nasce como proposta.** Quem fecha é Anderson, por frase explícita — "decidido", "fechado", "pode
+- **A decisão nasce como proposta.** Quem fecha é {{workspace.owner}}, por frase explícita — "decidido", "fechado", "pode
   aplicar".
 - **Trabalho não entra.** Diagnóstico, passos e ponteiro a corrigir vão para `work/issues/`, e os dois arquivos se
   apontam.
@@ -370,8 +369,7 @@ carrega a ferramenta.
 
 | Não entra | Onde vive |
 | :-------- | :-------- |
-| Norma do código do BrzA Studio | No `brza-studio`, no `AGENTS.md` dele |
-| O código, o build e os testes | No `brza-studio` |
+| Norma do código do {{workspace.title}} | No `{{code.name}}`, no `AGENTS.md` dele |
+| O código, o build e os testes | No `{{code.name}}` |
 | Procedimento que se repete | Skill |
 | Material de terceiros copiado | Em lugar nenhum daqui: a nota cita a fonte e guarda só o achado |
-| Nota, plano ou decisão do workspace da Fixfy | No workspace da Fixfy; daqui se cita em crase, com o caminho, e não se linka |

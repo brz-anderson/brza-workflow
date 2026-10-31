@@ -14,9 +14,15 @@ de `X | None` em execução e nada de `tomllib`. O parser é próprio, de um sub
 inteiro, booleano, lista, comentário —, conferido contra o `tomllib` nos testes. O que sai do subconjunto (float, data,
 tabela em linha, string de várias linhas, chave pontilhada) é recusado com `TomlError`, e não adivinhado.
 
-Só a stdlib. O `render` dos placeholders do manifesto entra neste arquivo no passo seguinte do plano.
+Também mora aqui o que lê e escreve o manifesto e o lock (`validate_manifest`, `dump_manifest`, `dump_lock`) e o
+`render` dos placeholders `{{tabela.chave}}` das normas em Markdown e do molde do `settings.json`, que o `brza init`
+e o `brza sync` usam.
+
+Só a stdlib.
 """
 
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -499,4 +505,236 @@ def register(root, code):
     return True
 
 
-# O `render` dos placeholders do manifesto ({{tabela.chave}}, D4 do PLN-006) entra aqui, no P3, no mesmo arquivo.
+# O esquema do manifesto (.brza/workspace.toml)
+
+SCHEMA = 1
+REQUIRED = object()  # a chave que o manifesto tem de trazer; as outras têm padrão
+
+# tabela -> chave -> padrão (REQUIRED, ou o valor que a R3.3 e o D2 dão à chave ausente). A ordem é a do arquivo.
+MANIFEST_SCHEMA = {
+    "workspace": {"name": REQUIRED, "title": REQUIRED, "owner": REQUIRED, "branch": "master", "remote": "origin",
+                  "born": REQUIRED},
+    "author": {"name": REQUIRED, "email": REQUIRED, "login": REQUIRED},
+    "code": {"name": REQUIRED, "path": REQUIRED, "github": REQUIRED, "branch": "master", "remote": "origin",
+             "plan_branch": DEFAULT_PLAN_BRANCH},
+    "core": {"ref": "master", "packages": []},
+    "checker": {"worklogs_link_from": None},  # None: o dia de `workspace.born`
+}
+# O comentário que o `dump_manifest` põe depois do valor
+MANIFEST_COMMENTS = {
+    ("workspace", "name"): "{{workspace.name}}",
+    ("workspace", "title"): "{{workspace.title}}",
+    ("workspace", "owner"): "{{workspace.owner}}, quem decide",
+    ("workspace", "branch"): "{{workspace.branch}}; ausente = master",
+    ("workspace", "remote"): "{{workspace.remote}}; ausente = origin",
+    ("workspace", "born"): "o dia em que o workspace nasceu; o checador cobra as notas daí em diante",
+    ("code", "name"): "{{code.name}}",
+    ("code", "path"): "{{code.path}}; o padrão do registro, não a verdade da máquina",
+    ("code", "github"): "{{code.github}}",
+    ("code", "plan_branch"): "tira o número do plano da branch do código",
+    ("core", "ref"): "a branch do brza-workflow que o sync segue",
+    ("core", "packages"): "pacotes opcionais do brza-workflow",
+    ("checker", "worklogs_link_from"): "o dia a partir do qual a linha de worklog do plano leva o link",
+}
+MANIFEST_HEADER = ("# .brza/workspace.toml — o manifesto do workspace. O init o escreve; depois é local: o sync nunca o "
+                   "toca.\n")
+LOCK = ".brza/core.lock"
+LOCK_HEADER = "# .brza/core.lock — gerado pelo brza sync; não edite\n"
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def with_defaults(manifest):
+    """Uma cópia do manifesto com o padrão de cada chave opcional ausente (R3.3: `master`, `origin`). Chave que o
+    esquema não conhece segue como está; a obrigatória que falta não é inventada."""
+    out = {name: (dict(table) if isinstance(table, dict) else table) for name, table in (manifest or {}).items()}
+    for name, keys in MANIFEST_SCHEMA.items():
+        table = out.get(name)
+        if table is None:
+            table = out[name] = {}
+        if not isinstance(table, dict):
+            continue
+        for key_name, default in keys.items():
+            if key_name not in table and default is not REQUIRED and default is not None:
+                table[key_name] = list(default) if isinstance(default, list) else default
+    ws, checker = out.get("workspace"), out.get("checker")
+    if isinstance(checker, dict) and "worklogs_link_from" not in checker and isinstance(ws, dict) and "born" in ws:
+        checker["worklogs_link_from"] = ws["born"]
+    return out
+
+
+def validate_manifest(manifest):
+    """Os problemas do manifesto, um texto por problema, na ordem do esquema; [] quando está em ordem."""
+    if not isinstance(manifest, dict):
+        return ["o manifesto não é uma tabela"]
+    problems = []
+    if manifest.get("schema") != SCHEMA:
+        problems.append("schema = %r, e este brza só lê o schema = %d" % (manifest.get("schema"), SCHEMA))
+    for name, keys in MANIFEST_SCHEMA.items():
+        table = manifest.get(name)
+        if table is None:
+            if any(default is REQUIRED for default in keys.values()):
+                problems.append("falta a tabela [%s]" % name)
+            continue
+        if not isinstance(table, dict):
+            problems.append("[%s] não é uma tabela" % name)
+            continue
+        for key_name, default in keys.items():
+            where = "%s.%s" % (name, key_name)
+            if key_name not in table:
+                if default is REQUIRED:
+                    problems.append("falta %s" % where)
+                continue
+            value = table[key_name]
+            if key_name == "packages":
+                if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
+                    problems.append("%s não é uma lista de textos" % where)
+            elif not (isinstance(value, str) and value):
+                problems.append("%s não é um texto" % where)
+            elif key_name in ("born", "worklogs_link_from") and not _DATE.fullmatch(value):
+                problems.append("%s = %r não é uma data AAAA-MM-DD" % (where, value))
+            elif key_name == "plan_branch":
+                try:
+                    re.compile(value)
+                except re.error as e:
+                    problems.append("%s não é uma expressão regular: %s" % (where, e))
+    return problems
+
+
+def _toml_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    return quote(str(value))
+
+
+def dump_manifest(manifest):
+    """O texto do manifesto no layout do D2, na ordem do esquema, com o comentário de cada chave: só as chaves que
+    `manifest` traz, e `parse_toml(dump_manifest(m)) == m`. O `brza init` o escreve; molde em templates/.brza/."""
+    lines = [MANIFEST_HEADER, "schema = %d\n" % SCHEMA]
+    for name, keys in MANIFEST_SCHEMA.items():
+        table = manifest.get(name)
+        if not isinstance(table, dict) or not any(k in table for k in keys):
+            continue
+        rows = [(k, _toml_value(table[k])) for k in keys if k in table]
+        width = max(len(k) + 3 + len(v) for k, v in rows)
+        lines.append("\n[%s]\n" % name)
+        for k, v in rows:
+            row = "%s = %s" % (k, v)
+            comment = MANIFEST_COMMENTS.get((name, k))
+            lines.append(row + (" " * (width - len(row) + 2) + "# " + comment if comment else "") + "\n")
+    return "".join(lines)
+
+
+# O lock (.brza/core.lock)
+
+class LockError(ValueError):
+    """O lock existe e não se lê; o sync não pode tratá-lo como ausente, porque então sobrescreveria edição local."""
+
+
+def digest(data):
+    """`sha256:<hex>` do texto (UTF-8) ou dos bytes: a forma que o lock guarda."""
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def hooks_digest(hooks):
+    """O digest da chave `hooks` do settings.json, que o sync guarda como `.claude/settings.json#hooks`: o JSON canônico,
+    sem depender da ordem das chaves."""
+    return digest(json.dumps(hooks, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def validate_lock(lock):
+    """Os problemas do lock já lido, um texto por problema; [] quando está em ordem."""
+    if not isinstance(lock, dict):
+        return ["o lock não é uma tabela"]
+    problems = []
+    for name in ("commit", "ref", "synced"):
+        if not (isinstance(lock.get(name), str) and lock[name]):
+            problems.append("falta %s, ou não é um texto" % name)
+    if isinstance(lock.get("synced"), str) and not _DATE.fullmatch(lock["synced"]):
+        problems.append("synced = %r não é uma data AAAA-MM-DD" % lock["synced"])
+    files = lock.get("files")
+    if not isinstance(files, dict):
+        problems.append("falta [files]")
+    else:
+        for path, value in files.items():
+            if not (isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)):
+                problems.append("files[%r] não é um sha256:<64 hex>" % path)
+    return problems
+
+
+def dump_lock(commit, ref, synced, files):
+    """O texto do lock: o commit do brza-workflow, a ref seguida, o dia do sync e o digest de cada caminho escrito,
+    em ordem alfabética. `parse_toml(dump_lock(...))` o lê de volta."""
+    lines = [LOCK_HEADER, "commit = %s\n" % quote(commit), "ref = %s\n" % quote(ref), "synced = %s\n" % quote(synced),
+             "\n[files]\n"]
+    for path in sorted(files):
+        lines.append("%s = %s\n" % (quote(path), quote(files[path])))
+    return "".join(lines)
+
+
+def read_lock(root):
+    """O lock do workspace em `root` como dict, ou None quando o arquivo não existe. Arquivo ilegível ou fora do
+    esquema levanta LockError."""
+    path = os.path.join(str(root), LOCK)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lock = parse_toml(f.read())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise LockError("%s ilegível: %s" % (path, e))
+    problems = validate_lock(lock)
+    if problems:
+        raise LockError("%s fora do esquema: %s" % (path, "; ".join(problems)))
+    return lock
+
+
+# O render dos placeholders
+
+PLACEHOLDER = re.compile(r"\{\{\s*([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)\s*\}\}")
+
+
+class RenderError(ValueError):
+    """Um placeholder sem valor no manifesto; a mensagem diz o caminho, a linha e a chave."""
+
+
+def render(text, manifest, path="<texto>", escape=None):
+    """Troca cada `{{tabela.chave}}` do `text` pelo valor do manifesto, com os padrões da R3.3 já aplicados. Sem
+    condicional, laço nem escape de `{{`. Chave que falta, ou cujo valor não é texto, levanta RenderError com o
+    `path` e a linha. `escape='json'` escapa o valor para dentro de uma string JSON (o molde do settings.json)."""
+    values = with_defaults(manifest)
+
+    def value(match):
+        node = values
+        for part in match.group(1).split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, str):
+            line = text.count("\n", 0, match.start()) + 1
+            why = "sem valor no manifesto" if node is None else "não é um texto no manifesto"
+            raise RenderError("%s:%d: o placeholder {{%s}} %s" % (path, line, match.group(1), why))
+        return json.dumps(node, ensure_ascii=False)[1:-1] if escape == "json" else node
+
+    return PLACEHOLDER.sub(value, text)
+
+
+def render_settings(template, manifest, path="settings.json"):
+    """O molde do `.claude/settings.json` renderizado, com o valor escapado para JSON."""
+    return render(template, manifest, path, escape="json")
+
+
+def merge_hooks(settings_text, hooks_text):
+    """O `settings.json` com a chave `hooks` trocada pela de `settings.hooks.json` — o sync é dono só dela —, e as
+    outras chaves, na ordem, como estavam. `settings_text` vazio ou None parte de `{}`. Devolve o texto, 2 espaços e
+    uma quebra no fim."""
+    settings = json.loads(settings_text) if settings_text and settings_text.strip() else {}
+    doc = json.loads(hooks_text)
+    if not isinstance(settings, dict):
+        raise ValueError("o settings.json não é um objeto")
+    if not (isinstance(doc, dict) and isinstance(doc.get("hooks"), dict)):
+        raise ValueError("o settings.hooks.json não traz a chave `hooks`")
+    settings["hooks"] = doc["hooks"]
+    return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"

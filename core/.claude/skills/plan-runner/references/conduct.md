@@ -15,7 +15,7 @@ nascem de executar e registrar serem atos separados. O passo só está feito qua
 3. **Confira os pré-requisitos de novo.** Assinatura que existia na sessão passada pode ter mudado; faltando, pare e
    diga o que falta.
 4. **Ache o primeiro passo sem `[x]`** e confira que o anterior tem evidência. Passo marcado sem evidência volta a ser
-   pendente: diga isso a Anderson, e grave a correção no plano.
+   pendente: diga isso a {{workspace.owner}}, e grave a correção no plano.
 5. **Diga em uma linha onde o trabalho está** e qual passo vem, antes de executá-lo.
 
 Retomar um plano de worklog numa sessão nova é o sinal de que ele atravessa sessões: promova-o a `PLN` antes de seguir:
@@ -23,20 +23,20 @@ a seção datada é copiada, com os mesmos IDs, e o worklog ganha a linha "promo
 
 ## Executar um passo
 
-**O passo só executa a pedido explícito de Anderson, passo a passo**: plano aceito não autoriza execução.
+**O passo só executa a pedido explícito de {{workspace.owner}}, passo a passo**: plano aceito não autoriza execução.
 
 1. **Pré-requisito do passo, antes de começar.** Se não existe, é gatilho de parada: não improvise o que falta.
 2. **Pelo executor que o passo nomeia:**
    - **a sessão que conduz** — a rodada, a nota, o registro; se o passo entrevista, as rodadas acontecem aqui;
-   - **a sessão do `brza-studio`** — o passo de código, numa sessão nova aberta em `~/Projects/brza-studio`, num worktree
-     em `.worktrees/`, na branch `<tipo>/pln-NNN-<slug>`, e nunca na sessão em que Anderson conduz o plano. O pedido
+   - **a sessão do `{{code.name}}`** — o passo de código, numa sessão nova aberta em `{{code.path}}`, num worktree
+     em `.worktrees/`, na branch `<tipo>/pln-NNN-<slug>`, e nunca na sessão em que {{workspace.owner}} conduz o plano. O pedido
      leva o passo, os arquivos, o `D` e o que as rodadas decidiram, citado como foi respondido, e vai como arquivo, no
      `Retomar` do plano ou numa issue. A sessão de lá grava a evidência no passo, o `Retomar` e o worklog dela; a
      devolução fica no commit ou no PR e no plano, e o aviso à sessão que pediu só vai quando o pedido diz "me avise";
    - **um subagente** — leitura, levantamento e rascunho, pelo laço da `SKILL.md`; ele devolve os arquivos tocados, os
      comandos com o resultado e cada desvio local como `X` proposto, e desvio que muda o contrato do `D` o faz parar e
      devolver, sem aplicar;
-   - **Anderson** — o que só se prova no aparelho dele (o Windows, o instalador): o plano escreve os `C` e ele grava o
+   - **{{workspace.owner}}** — o que só se prova no aparelho dele (o Windows, o instalador): o plano escreve os `C` e ele grava o
      Observado e o veredito.
 3. **Registre a evidência** na linha do passo, e só então marque `[x]`. O `Executado` do passo vai junto, e `executed_h`
    e `remaining_h` são reescritos no lugar: o executado soma o do passo fechado, e o restante deixa de contar o estimado
@@ -45,7 +45,7 @@ a seção datada é copiada, com os mesmos IDs, e o worklog ganha a linha "promo
    `PLN`, o `D` é reescrito no lugar, com a origem nova; no worklog, o plano aceito não muda, e o desvio e a rodada vão
    abaixo dele.
 5. **Proponha o commit** quando um ou mais passos fecharem com o repositório verde — os testes do que foi tocado —, na
-   mensagem que a norma do `brza-studio` pede. **Commite só com confirmação de Anderson.** O commit vira evidência dos
+   mensagem que a norma do `{{code.name}}` pede. **Commite só com confirmação de {{workspace.owner}}.** O commit vira evidência dos
    passos que fecha, gravada no plano logo depois dele.
 
 ## Fim de sessão
@@ -74,11 +74,11 @@ Com todo passo `[x]` ou `[-]`: `phase: review`, `status: in_review`.
    Cobertura, e as evidências contra o disco; revisa isolado, e não corrige: quem executou não revisa o que executou.
 2. **Confira e faça a rodada dos achados**: refaça a evidência de cada achado antes de levá-lo. O que não se sustenta
    vai à rodada com `→ falso` como opção recomendada, o porquê e a evidência que o derruba — quem executou o passo não
-   derruba sozinho achado sobre o próprio trabalho. Cada achado ganha o destino, escolhido por Anderson, com as opções
+   derruba sozinho achado sobre o próprio trabalho. Cada achado ganha o destino, escolhido por {{workspace.owner}}, com as opções
    e o custo.
 3. **Grave o parecer** numa nota `work/reviews/pln-NNN-<assunto>.md`, com H1 `REV: …`, e a linha dela em `## Revisões`
    do `PLN`; no worklog, na revisão abaixo do plano aceito. Achado com destino `corrigido aqui` vira passo novo; o resto
-   vai para a casa dona — uma issue, uma decisão, a norma do `brza-studio`.
+   vai para a casa dona — uma issue, uma decisão, a norma do `{{code.name}}`.
 4. **Casos manuais**, quando algum critério só se prova em aparelho: escreva os `C` a partir do critério, peça a quem
    tem o aparelho, e grave o Observado numa linha com o veredito.
 
