@@ -1,7 +1,9 @@
 # brza: o workspace do cwd — pelo .brza/workspace.toml, ou, no código, pelo ~/.config/brza/workspaces.toml.
-# Bloco do pacote do cliente do brza-workflow (packages/client/shell/brza.zsh): cole no ~/.zshrc, e se ele mudar, mude
-# aqui. Pede o brza-where e o brza-agents no PATH (brza install --all) e a fixfy_claude, ou outra função `claude` para
-# o que não é workspace. A BRZA_WORKSPACE exportada é override: aponta a raiz, e o papel ainda vem do cwd.
+# Fonte única do bloco do shell, no pacote do cliente do brza-workflow (packages/client/shell/brza.zsh): o ~/.zshrc o
+# carrega por `source <checkout do brza-workflow>/packages/client/shell/brza.zsh`, e nenhuma outra cópia existe.
+# Pede o brza-where e o brza-agents no PATH (brza install --all). Fora de workspace, a função `claude` chama a função
+# `brza_claude_fallback`, se o ~/.zshrc a define, e senão o `claude` de verdade. A BRZA_WORKSPACE exportada é override:
+# aponta a raiz, e o papel ainda vem do cwd.
 #
 # brza_claude <raiz> <papel> [argumentos do claude]: a BRZA_WORKSPACE e o --settings do workspace (hooks de medição e a
 # identidade), e, no papel `code`, o --agents com os subagentes por papel do workspace (brza-agents), se houver e se a
@@ -19,5 +21,8 @@ brza_claude() {
 # O brza-where imprime "<raiz> notes|code" ou nada; a raiz pode ter espaço, e o papel é a última palavra.
 claude() {
   local w; w=$(brza-where 2>/dev/null)
-  if [ -n "$w" ]; then brza_claude "${w% *}" "${w##* }" "$@"; else fixfy_claude "$@"; fi
+  if [ -n "$w" ]; then brza_claude "${w% *}" "${w##* }" "$@"
+  elif (( $+functions[brza_claude_fallback] )); then brza_claude_fallback "$@"
+  else command claude "$@"
+  fi
 }

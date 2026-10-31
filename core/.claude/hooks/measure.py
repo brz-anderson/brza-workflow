@@ -132,7 +132,7 @@ def price_of(model):
 
 
 def plugin_version(name, cwd):
-    """Versão instalada do plugin de um nome com escopo (`fixfy:architect` → a do `fixfy`), ou None.
+    """Versão instalada do plugin de um nome com escopo (`acme:architect` → a do `acme`), ou None.
 
     Lê o installed_plugins.json da conta: a instalação de projeto cujo caminho contém o cwd ganha da de usuário. Sessão
     aberta com --plugin-dir carrega outra cópia, que este registro não enxerga."""

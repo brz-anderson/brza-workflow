@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Monta um workspace do zero: a norma, as pastas de notas, os hooks e o manifesto, num diretório vazio.
+
+    brza init <dir> --name <nome> --code <caminho> [--title <projeto>] [--owner <quem decide>]
+              [--author-name <nome>] [--author-email <e-mail>] [--author-login <login>]
+              [--branch master] [--remote origin] [--code-branch <branch>] [--code-github <dono/repo>]
+              [--package client]… [--dry-run]
+
+Os passos, na ordem do D8 do PLN-006:
+  1. recusa o `<dir>` que não está vazio, o `--code` que não é repositório git e o `--code` já ligado a outro workspace
+     no registro (`~/.config/brza/workspaces.toml`);
+  2. o autor vem das flags, e, sem elas, do `git config --global user.*`; sem os dois, recusa. O `login` vem do
+     `--author-login`, ou do noreply (`<id>+<login>@users.noreply.github.com`); sem nenhum dos dois, recusa;
+  3. `git init -b <branch>`;
+  4. o manifesto `.brza/workspace.toml`, pelo `brza_root.dump_manifest`: `born` é hoje, `[code].path` é o checkout
+     principal do `--code`, com `~` quando cabe, e `core.ref` é a branch do checkout do brza-workflow;
+  5. os `templates/` do brza-workflow: `README.md`, `.claude/settings.json`, `.claude/rules/workspace.md`, o índice vazio
+     e o esqueleto `wiki/guides/` e `work/<gênero>/`;
+  6. a camada 1 do `brza sync` (`sync_core`, sem git): a norma, os hooks, as skills, os agentes, a chave `hooks`, o
+     `.gitattributes` e o lock;
+  8. confere: o `check_notes.py` do próprio workspace verde, e nada de `brza-workspace`, `brza-studio`, `Anderson`,
+     `brz-anderson` ou `Fixfy` que não tenha vindo do manifesto;
+  9. commita `chore: brza init (brza-workflow@<sha7>)`, com o autor do manifesto, e **não dá o push**;
+  7. por último, registra `{root, code}` no registro e imprime `registro: <caminho>`: é o único arquivo fora do
+     diretório novo, e cada escrita dele vai ao worklog, em "## Fora do workspace".
+Depois do commit, a saída diz os próximos passos: o remote, o push, o primeiro workstream e o bloco do shell.
+
+`--package` liga o pacote opcional ao manifesto (`core.packages`); sem a flag, o workspace nasce só com o núcleo. O
+`--dry-run` faz tudo num diretório temporário, apaga-o, e não registra nem commita: serve para ver os arquivos e rodar a
+conferência. A falha antes da conferência devolve o diretório como estava; a falha da conferência o deixa, para olhar.
+
+O brza-workflow é o da BRZA_WORKFLOW, ou o pai do `bin/` deste arquivo. Roda no Python 3.9: o brza_root, o brza-sync e a
+stdlib.
+"""
+import argparse
+import datetime
+import os
+import re
+import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / 'core' / '.claude' / 'hooks'))
+import brza_root  # noqa: E402
+
+SYNC = runpy.run_path(str(HERE / 'brza-sync'))
+sync_core, SyncError, flow_dir = SYNC['sync_core'], SYNC['SyncError'], SYNC['flow_dir']
+
+SETTINGS = '.claude/settings.json'
+# O molde do manifesto é só a amostra do `dump_manifest` (X19); o manifesto sai do dump, e o molde não é copiado
+MANIFEST_TEMPLATE = '.brza/workspace.toml'
+# O que veio de outro workspace: não pode sobrar no que o init escreve, a menos que o manifesto o traga (R1.2, R8.2)
+FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'Fixfy')
+CHECKER = ('.claude', 'skills', 'notes-checker', 'scripts', 'check_notes.py')
+NOREPLY = re.compile(r'^(?:\d+\+)?([A-Za-z0-9][A-Za-z0-9-]*)@users\.noreply\.github\.com$')
+GITHUB = re.compile(r'(?:github\.com|personal)[:/]([^/\s:]+/[^/\s]+?)(?:\.git)?/?$')
+
+
+class InitError(Exception):
+    """O init não segue, e a mensagem diz por quê; o `main` a imprime como `recusado:` e sai com 1."""
+
+
+class CheckError(InitError):
+    """A conferência do passo 8 falhou; o diretório fica para olhar, e o `main` a imprime como `falhou:`."""
+
+
+class Result(NamedTuple):
+    root: Path
+    files: List[str]            # os arquivos do workspace novo, por caminho relativo
+    commit: str                 # o commit do brza-workflow que o sync seguiu
+    committed: Optional[str]    # o sha do commit do init, ou None no --dry-run
+    registered: bool
+
+
+# O git
+
+def run_git(cwd: Path, *args: str, env: Optional[Dict[str, str]] = None) -> str:
+    try:
+        done = subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, text=True,
+                              env=dict(os.environ, **env) if env else None)
+    except OSError as e:
+        raise InitError('git não roda: %s' % e)
+    if done.returncode != 0:
+        raise InitError('git %s falhou em %s: %s' % (' '.join(args[:2]), cwd, done.stderr.strip()))
+    return done.stdout.strip()
+
+
+def global_config(name: str) -> Optional[str]:
+    """O `git config --global <name>`, ou None sem valor. Respeita a GIT_CONFIG_GLOBAL e o HOME do ambiente."""
+    try:
+        done = subprocess.run(['git', 'config', '--global', '--get', name], capture_output=True, text=True)
+    except OSError:
+        return None
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+# O que o pedido diz
+
+def home_form(path: Path) -> str:
+    """O caminho com `~` quando está sob o HOME, e inteiro quando não."""
+    home = Path(os.path.realpath(os.path.expanduser('~')))
+    try:
+        return '~/' + str(path.relative_to(home))
+    except ValueError:
+        return str(path)
+
+
+def resolve_author(name: Optional[str], email: Optional[str], login: Optional[str]) -> Dict[str, str]:
+    """O `[author]` do manifesto: as flags, depois o git config global, e o login do noreply (R3.4, R14.1)."""
+    name, email = name or global_config('user.name'), email or global_config('user.email')
+    missing = [flag for flag, value in (('--author-name', name), ('--author-email', email)) if not value]
+    if missing:
+        raise InitError('sem autor: passe %s, ou ponha user.name e user.email no `git config --global`'
+                        % ' e '.join(missing))
+    if not login:
+        found = NOREPLY.match(email)
+        if not found:
+            raise InitError('não derivo o login de %s, que não é um noreply do GitHub: passe --author-login' % email)
+        login = found.group(1)
+    return {'name': name, 'email': email, 'login': login}
+
+
+def code_checkout(code: Path) -> Path:
+    """O checkout principal do repositório de código, em caminho físico; recusa o que não é repositório git."""
+    dirs = brza_root._dirs(code) if code.is_dir() else None
+    if not dirs:
+        raise InitError('%s não é um repositório git' % code)
+    return dirs[1]
+
+
+def github_of(main: Path, remote: str, fallback: str) -> str:
+    """`dono/repo` do remote do código, quando é do GitHub (https, ssh ou o alias `personal`); senão o `fallback`."""
+    found = GITHUB.search(brza_root.git('remote', 'get-url', remote, cwd=str(main)) or '')
+    return found.group(1) if found else fallback
+
+
+def check_registry(root: Path, code: Path):
+    """As recusas do `brza_root.register`, sem escrever: o código já ligado a outro workspace, o workspace já ligado a
+    outro código e o registro ilegível. O par igual passa."""
+    try:
+        entries = brza_root.read_registry()
+    except (OSError, ValueError) as e:
+        raise InitError('o registro %s está ilegível (%s); conserte à mão' % (brza_root.registry_path(), e))
+    for entry in entries:
+        same_root, same_code = brza_root.key(entry['root']) == brza_root.key(root), \
+            brza_root.key(entry['code']) == brza_root.key(code)
+        if same_code and not same_root:
+            raise InitError('o código %s já está ligado ao workspace %s' % (entry['code'], entry['root']))
+        if same_root and not same_code:
+            raise InitError('o workspace %s já está ligado ao código %s' % (entry['root'], entry['code']))
+
+
+def check_empty(root: Path):
+    if root.exists() and not root.is_dir():
+        raise InitError('%s existe e não é um diretório' % root)
+    if root.is_dir() and any(root.iterdir()):
+        raise InitError('%s não está vazio; o init monta o workspace num diretório vazio ou que não existe' % root)
+
+
+# A montagem
+
+def build_manifest(name: str, title: str, owner: str, branch: str, remote: str, born: str, author: Dict[str, str],
+                   code: Path, code_branch: str, github: str, core_ref: str, packages: Sequence[str]) -> dict:
+    manifest = {
+        'schema': brza_root.SCHEMA,
+        'workspace': {'name': name, 'title': title, 'owner': owner, 'branch': branch, 'remote': remote, 'born': born},
+        'author': dict(author),
+        'code': {'name': code.name, 'path': home_form(code), 'github': github, 'branch': code_branch},
+        'core': {'ref': core_ref, 'packages': list(packages)},
+    }
+    manifest = brza_root.with_defaults(manifest)
+    problems = brza_root.validate_manifest(manifest)
+    if problems:
+        raise InitError('o manifesto sairia fora do esquema: %s' % '; '.join(problems))
+    return manifest
+
+
+def write_templates(flow: Path, root: Path, manifest: dict):
+    """O que o init escreve uma vez, a partir de `templates/`: o `.md` renderizado, o settings com o valor escapado
+    para JSON, e o resto copiado."""
+    base = flow / 'templates'
+    if not base.is_dir():
+        raise InitError('o brza-workflow em %s não tem templates/' % flow)
+    for source in sorted(p for p in base.rglob('*') if p.is_file()):
+        rel = source.relative_to(base).as_posix()
+        if rel == MANIFEST_TEMPLATE:
+            continue
+        data = source.read_bytes()
+        if rel == SETTINGS:
+            data = brza_root.render_settings(data.decode('utf-8'), manifest, rel).encode('utf-8')
+        elif rel.endswith('.md'):
+            data = brza_root.render(data.decode('utf-8'), manifest, rel).encode('utf-8')
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        target.chmod(source.stat().st_mode & 0o777)
+
+
+def manifest_strings(node) -> List[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in manifest_strings(v)]
+    if isinstance(node, list):
+        return [s for v in node for s in manifest_strings(v)]
+    return []
+
+
+def foreign_terms(root: Path, manifest: dict) -> Dict[str, List[str]]:
+    """Os arquivos do workspace com um termo de outro workspace, fora do que o manifesto traz."""
+    own = manifest_strings(manifest)
+    terms = [t for t in FOREIGN if not any(t in value for value in own)]
+    found = {}  # type: Dict[str, List[str]]
+    for folder, dirs, names in os.walk(str(root)):
+        dirs[:] = [d for d in dirs if d != '.git']
+        for name in names:
+            path = Path(folder) / name
+            text = path.read_bytes().decode('utf-8', 'ignore')
+            hit = [t for t in terms if t in text]
+            if hit:
+                found[path.relative_to(root).as_posix()] = hit
+    return found
+
+
+def run_checker(root: Path):
+    script = root.joinpath(*CHECKER)
+    done = subprocess.run([sys.executable, str(script), '--root', str(root)], capture_output=True, text=True,
+                          env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+    if done.returncode != 0:
+        raise CheckError('o check_notes.py não ficou verde em %s (saída %d):\n%s'
+                         % (root, done.returncode, (done.stdout + done.stderr).strip()))
+
+
+def check_workspace(root: Path, manifest: dict):
+    """O passo 8: o notes-checker verde, e nenhum termo de outro workspace."""
+    found = foreign_terms(root, manifest)
+    if found:
+        raise CheckError('sobrou nome de outro workspace no que foi escrito: %s' % '; '.join(
+            '%s (%s)' % (path, ', '.join(terms)) for path, terms in sorted(found.items())))
+    run_checker(root)
+
+
+def list_files(root: Path) -> List[str]:
+    out = []
+    for folder, dirs, names in os.walk(str(root)):
+        dirs[:] = [d for d in dirs if d != '.git']
+        out += [(Path(folder) / n).relative_to(root).as_posix() for n in names]
+    return sorted(out)
+
+
+def undo(root: Path, existed: bool):
+    """Devolve o diretório como estava antes do init: vazio, se já existia, e ausente, se não."""
+    if not root.exists():
+        return
+    if not existed:
+        shutil.rmtree(str(root), ignore_errors=True)
+        return
+    for child in root.iterdir():
+        shutil.rmtree(str(child), ignore_errors=True) if child.is_dir() and not child.is_symlink() else child.unlink()
+
+
+def build(root: Path, flow: Path, manifest: dict, out: Callable[[str], None]):
+    """Os passos 3 a 6: o git, o manifesto, os templates e a camada 1 do sync. Levanta InitError."""
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        run_git(root, 'init', '-q', '-b', manifest['workspace']['branch'])
+        (root / brza_root.MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+        (root / brza_root.MANIFEST).write_text(brza_root.dump_manifest(manifest), encoding='utf-8')
+        write_templates(flow, root, manifest)
+        return sync_core(root, flow=flow, with_git=False, out=out)
+    except (SyncError, brza_root.RenderError, OSError, UnicodeDecodeError) as e:
+        raise InitError(str(e))
+
+
+def commit_workspace(root: Path, manifest: dict, short: str) -> str:
+    author = manifest['author']
+    ident = {'GIT_AUTHOR_NAME': author['name'], 'GIT_AUTHOR_EMAIL': author['email'],
+             'GIT_COMMITTER_NAME': author['name'], 'GIT_COMMITTER_EMAIL': author['email']}
+    run_git(root, 'add', '-A')
+    run_git(root, 'commit', '-q', '-m', 'chore: brza init (brza-workflow@%s)' % short, env=ident)
+    return run_git(root, 'rev-parse', 'HEAD')
+
+
+def next_steps(root: Path, manifest: dict) -> List[str]:
+    ws, author = manifest['workspace'], manifest['author']
+    repo = '%s/%s' % (author['login'], ws['name'])
+    return [
+        'próximos passos, no diretório %s:' % root,
+        '  gh repo create %s --private --source . --remote %s' % (repo, ws['remote']),
+        '    ou, com o repositório criado no GitHub: git remote add %s git@github.com:%s.git' % (ws['remote'], repo),
+        '  git push -u %s %s' % (ws['remote'], ws['branch']),
+        '  brza note workstream <nome>   (o primeiro workstream; sem remote o brza note recusa o plan-open)',
+        '  o bloco do shell: o `source` do packages/client/shell/brza.zsh no ~/.zshrc (README.md, "Funções do shell")',
+    ]
+
+
+def init_workspace(root, name: str, code, title: Optional[str] = None, owner: Optional[str] = None,
+                   author_name: Optional[str] = None, author_email: Optional[str] = None,
+                   author_login: Optional[str] = None, branch: str = 'master', remote: str = 'origin',
+                   code_branch: Optional[str] = None, code_github: Optional[str] = None,
+                   packages: Sequence[str] = (), dry_run: bool = False, flow=None, today: Optional[str] = None,
+                   out: Callable[[str], None] = print) -> Result:
+    """O `brza init`: os nove passos do D8. Levanta InitError quando recusa ou falha; CheckError quando a conferência
+    do passo 8 falha (o diretório fica). Com `dry_run`, monta num diretório temporário e o apaga."""
+    root = Path(os.path.abspath(os.path.expanduser(str(root))))
+    flow = Path(flow) if flow else flow_dir()
+    # 1. as recusas
+    check_empty(root)
+    main_code = code_checkout(Path(os.path.expanduser(str(code))))
+    check_registry(Path(os.path.realpath(str(root))), main_code)
+    # 2. o autor
+    author = resolve_author(author_name, author_email, author_login)
+    github = code_github or github_of(main_code, 'origin', '%s/%s' % (author['login'], main_code.name))
+    core_ref = brza_root.branch_of(flow) or 'master'
+    manifest = build_manifest(name, title or name, owner or author['name'], branch, remote,
+                              today or datetime.date.today().isoformat(), author, main_code,
+                              code_branch or brza_root.branch_of(main_code) or 'master', github, core_ref, packages)
+    existed = root.exists()
+    target, scratch = root, None
+    if dry_run:
+        scratch = Path(tempfile.mkdtemp(prefix='brza-init-'))
+        target = scratch / root.name
+    try:
+        # 3 a 6
+        synced = build(target, flow, manifest, out)
+        files = list_files(target)
+        # 8. a conferência
+        check_workspace(target, manifest)
+    except CheckError:
+        if scratch is not None:
+            shutil.rmtree(str(scratch), ignore_errors=True)
+        raise
+    except BaseException:
+        undo(target, existed and not dry_run)
+        if scratch is not None:
+            shutil.rmtree(str(scratch), ignore_errors=True)
+        raise
+    if dry_run:
+        out('dry-run: o init criaria %d arquivos em %s, e nada foi escrito; sem registro e sem commit' % (len(files), root))
+        for path in files:
+            out('  %s' % path)
+        shutil.rmtree(str(scratch), ignore_errors=True)
+        return Result(root, files, synced.commit, None, False)
+    # 9. o commit, sem push
+    committed = commit_workspace(root, manifest, synced.commit[:7])
+    out('commit:   %s chore: brza init (brza-workflow@%s), sem push' % (committed[:7], synced.commit[:7]))
+    # 7. o registro, por último: é o único arquivo fora do diretório novo
+    try:
+        added = brza_root.register(root, main_code)
+    except brza_root.RegisterError as e:
+        raise InitError('o workspace foi criado e commitado em %s, mas o registro recusou: %s' % (root, e))
+    out('%s: %s -> %s' % ('registrado' if added else 'já registrado', root, main_code))
+    out('registro: %s' % brza_root.registry_path())
+    for line in next_steps(root, manifest):
+        out(line)
+    return Result(root, files, synced.commit, committed, added)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog='brza init', description='Monta um workspace do zero num diretório vazio.')
+    ap.add_argument('dir', help='o diretório do workspace: vazio, ou que não existe')
+    ap.add_argument('--name', required=True, help='o nome do workspace, o {{workspace.name}}')
+    ap.add_argument('--code', required=True, metavar='caminho', help='o repositório de código do workspace')
+    ap.add_argument('--title', help='o nome do projeto, o {{workspace.title}}; padrão o --name')
+    ap.add_argument('--owner', help='quem decide, o {{workspace.owner}}; padrão o nome do autor')
+    ap.add_argument('--author-name', help='o autor dos commits; padrão o git config --global user.name')
+    ap.add_argument('--author-email', help='o e-mail dos commits; padrão o git config --global user.email')
+    ap.add_argument('--author-login', help='o login do GitHub; padrão o do noreply do e-mail')
+    ap.add_argument('--branch', default='master', help='a branch do workspace (padrão master)')
+    ap.add_argument('--remote', default='origin', help='o remote do workspace (padrão origin)')
+    ap.add_argument('--code-branch', help='a branch do código; padrão a do checkout dele, ou master')
+    ap.add_argument('--code-github', help='dono/repo do código no GitHub; padrão o do origin dele')
+    ap.add_argument('--package', action='append', default=[], metavar='nome',
+                    help='pacote opcional do brza-workflow, como client; repetível')
+    ap.add_argument('--dry-run', action='store_true', help='monta num diretório temporário e o apaga')
+    args = ap.parse_args(argv)
+    try:
+        init_workspace(args.dir, name=args.name, code=args.code, title=args.title, owner=args.owner,
+                       author_name=args.author_name, author_email=args.author_email, author_login=args.author_login,
+                       branch=args.branch, remote=args.remote, code_branch=args.code_branch,
+                       code_github=args.code_github, packages=args.package, dry_run=args.dry_run)
+    except CheckError as e:
+        print('falhou: %s' % e)
+        return 1
+    except InitError as e:
+        print('recusado: %s' % e)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

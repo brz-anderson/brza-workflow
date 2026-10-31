@@ -1,5 +1,6 @@
 """Teste do bloco do shell do pacote do cliente (packages/client/shell/brza.zsh, D10 do PLN-006): o zsh de verdade,
 sem ~/.zshrc, com o brza-where e o brza-agents reais, o registro num diretório temporário e um `claude` de mentira.
+Fora de workspace, a função cai na `brza_claude_fallback` do usuário, se existir, e senão no `claude` de verdade.
 
     python3 -m unittest discover -s tests/cli
 """
@@ -44,7 +45,7 @@ class ShellBlockTest(unittest.TestCase):
         (agents / 'reviewer.md').write_text('---\ndescription: Revisa\nmodel: opus\n---\nRevise.\n')
         registry = self.base / 'registro.toml'
         registry.write_text(f'[[workspace]]\nroot = "{self.workspace}"\ncode = "{self.code}"\n')
-        self.other = self.base / 'fixfy'
+        self.other = self.base / 'outro'
         init_repo(self.other)
 
         links, real, py = self.base / 'links', self.base / 'real', self.base / 'py'
@@ -58,8 +59,9 @@ class ShellBlockTest(unittest.TestCase):
         self.env = {'HOME': str(self.base), 'PATH': f'{links}:{real}:{py}:/usr/bin:/bin', 'ZDOTDIR': str(self.base),
                     'BRZA_REGISTRY': str(registry), 'PYTHONDONTWRITEBYTECODE': '1'}
 
-    def claude(self, cwd: Path, *argv: str, env: dict | None = None):
-        script = f'source "{BLOCK}"; fixfy_claude() {{ echo "FIXFY $*"; }}; claude "$@"'
+    def claude(self, cwd: Path, *argv: str, env: dict | None = None, fallback: bool = True):
+        hook = 'brza_claude_fallback() { echo "FALLBACK $*"; }; ' if fallback else ''
+        script = f'source "{BLOCK}"; {hook}claude "$@"'
         r = subprocess.run(['zsh', '-f', '-c', script, 'zsh', *argv], capture_output=True, text=True, cwd=str(cwd),
                            env={**self.env, **(env or {})})
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -83,9 +85,18 @@ class ShellBlockTest(unittest.TestCase):
             argv, _ = json.loads(self.claude(self.code, *given, '-p', 'oi'))
             self.assertEqual(argv, [*self.settings(), *given, '-p', 'oi'])
 
-    def test_a_repository_that_is_neither_goes_to_the_other_function(self):
-        self.assertEqual(self.claude(self.other, '-p', 'oi'), 'FIXFY -p oi')
-        self.assertEqual(self.claude(self.base, '-p', 'oi'), 'FIXFY -p oi')
+    def test_a_repository_that_is_neither_goes_to_the_fallback_hook_of_the_user(self):
+        self.assertEqual(self.claude(self.other, '-p', 'oi'), 'FALLBACK -p oi')
+        self.assertEqual(self.claude(self.base, '-p', 'oi'), 'FALLBACK -p oi')
+
+    def test_without_the_hook_it_goes_to_the_real_claude_with_no_settings_and_no_root(self):
+        for cwd in (self.other, self.base):
+            argv, root = json.loads(self.claude(cwd, '-p', 'oi', fallback=False))
+            self.assertEqual((argv, root), (['-p', 'oi'], None))
+
+    def test_the_hook_does_not_run_inside_a_workspace_or_its_code(self):
+        for cwd in (self.workspace, self.code):
+            self.assertNotIn('FALLBACK', self.claude(cwd, '-p', 'oi'))
 
     def test_the_exported_variable_is_an_override_of_the_root(self):
         out = json.loads(self.claude(self.code, '-p', 'oi', env={'BRZA_WORKSPACE': str(self.workspace)}))
@@ -95,6 +106,9 @@ class ShellBlockTest(unittest.TestCase):
         text = BLOCK.read_text()
         for fixed in ('brza-workspace', 'brza-studio', 'BRZA_STUDIO', 'Projects/', 'brza_where'):
             self.assertNotIn(fixed, text)
+
+    def test_the_block_calls_nothing_of_fixfy(self):
+        self.assertNotIn('fixfy', BLOCK.read_text().lower())
 
 
 if __name__ == '__main__':

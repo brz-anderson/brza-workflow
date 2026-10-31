@@ -51,23 +51,20 @@ workstream. O `gh` usa o perfil padrão, com a conta `{{author.login}}` ativa (`
 
 ## Funções do shell
 
-O `.claude/settings.json` daqui não é herdado pelo `{{code.name}}`, que fica ao lado deste repositório. Este bloco do
-`~/.zshrc` acha o workspace do cwd — pelo `.brza/workspace.toml`, ou, no repositório de código, pelo
-`~/.config/brza/workspaces.toml` — e passa a configuração às sessões abertas nos dois. Se ele mudar, mude aqui e copie
-para lá. Fora do workspace, a função chama o `claude` que já existia.
+Só vale com `packages = ["client"]` no [`.brza/workspace.toml`](.brza/workspace.toml); sem o pacote do cliente, esta seção
+não se aplica.
+
+O `.claude/settings.json` daqui não é herdado pelo `{{code.name}}`, que fica ao lado deste repositório. Quem acha o
+workspace do cwd — pelo `.brza/workspace.toml`, ou, no repositório de código, pelo `~/.config/brza/workspaces.toml` — e
+passa a configuração às sessões abertas nos dois é o bloco do shell do `brza-workflow`, que **não é copiado para cá**: a
+fonte única é o `packages/client/shell/brza.zsh` do checkout do `brza-workflow`, e uma cópia em outro lugar fica velha.
+
+Para ligá-lo, ponha no `~/.zshrc` a linha abaixo, com o caminho do seu checkout, e abra um terminal novo. O bloco pede o
+`brza-where` e o `brza-agents` no PATH, que o `brza install --all` liga.
 
 ```zsh
-# brza: o workspace do cwd — pelo .brza/workspace.toml, ou, no código, pelo ~/.config/brza/workspaces.toml.
-# O bloco "Funções do shell" do README do workspace. A BRZA_WORKSPACE exportada é override.
-brza_claude() {
-  local ws=$1 role=$2 json; shift 2
-  local -a agents=()
-  if [ "$role" = code ] && [[ " $* " != *" --agents"* ]]; then
-    json=$(brza-agents --workspace "$ws" 2>/dev/null)
-    [ -n "$json" ] && agents=(--agents "$json")
-  fi
-  BRZA_WORKSPACE="$ws" command claude --settings "$ws/.claude/settings.json" "${agents[@]}" "$@"
-}
-
-claude() { local w; w=$(brza-where 2>/dev/null); if [ -n "$w" ]; then brza_claude ${=w} "$@"; else command claude "$@"; fi; }
+source "<checkout do brza-workflow>/packages/client/shell/brza.zsh"
 ```
+
+Fora do workspace e do código dele, a função `claude` chama a função `brza_claude_fallback`, se o `~/.zshrc` a define
+(para o `claude` de outro ambiente), e senão o `claude` de verdade.
