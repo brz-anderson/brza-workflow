@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Abre, lista, manda mensagem, dá título e fecha as sessões do Claude Code em modo chat no BrzA Studio, pelo nome.
+
+O open abre o chat e dá à aba o título do --title, ou o <nome> sem ele, pelo `agentSession.rename` do app; o prompt da
+tarefa entra na abertura. O --rename manda antes o `/rename <nome>`, que dá o nome à sessão do Claude, e o prompt entra
+depois pelo `agentSession.send`, com `delivery: 'queue-if-active'`: ele espera na fila até o /rename terminar. Passe o
+--rename quando a sessão for mandar ou receber correio: sem ele, ela entra no correio com um nome automático, como
+`brza-workspace-5b`, que ninguém sabe antes de abrir.
+
+O chat não passa pelo zsh de login, e a função `claude` do ~/.zshrc não roda. No brza-workspace isso não falta: o chat
+lê o `.claude/settings.json` do projeto pelo `--setting-sources`. Num checkout do brza-studio, os hooks e a identidade só
+chegam pelo `agentCmdOverrides.claude` apontado para o claude-brza; sem ele, o script avisa numa linha CHECK e abre
+assim mesmo.
+
+O mapa de sessões é o .sessions/sessions.jsonl do brza-workspace, fora do git, uma linha por evento: `open`, `session`
+(o id da sessão do Claude, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
+aberto no app, ou que roda com o /rename (<config>/sessions/<pid>.json; o config é o ~/.claude ou o de uma conta do app,
+em <dados do app>/claude-profiles/<id>/home).
+
+O list, o send, o title e o close acham o chat pelo nome: o do mapa e, sem entrada, o último /rename gravado no
+transcript da sessão do Claude (<config>/projects/*/<id>.jsonl), cujo id vem do `agentSession.history`. O título da aba
+é outro: é o nome do chat no app. Chat sem nenhum dos dois não tem nome e não é achado.
+
+Uso:
+  brza sessions <nome>                                  # abre o chat no brza-workspace; o `open` é opcional
+  brza sessions <nome> --title "PLN-001: Coordenador"   # com o título na aba; sem ele, o <nome>
+  brza sessions <nome> --rename                         # e dá o nome à sessão do Claude, para o correio
+  brza sessions <nome> --prompt "<tarefa>"              # e manda a tarefa
+  brza sessions <nome> --prompt-file <arquivo>          # a tarefa lida de um arquivo
+  brza sessions <nome> --checkout <caminho>             # noutro checkout, como um worktree do brza-studio; o relativo
+                                                        # parte da raiz do brza-workspace, não do cwd
+  brza sessions <nome> --wait                           # só anuncia com a sessão do Claude no ar; com --rename, nomeada
+  brza sessions <nome> --dry-run                        # só mostra o que faria
+  brza sessions list [--json]                           # os chats do app: nome, estado, chat, worktree, título
+  brza sessions send <nome> <texto> [--json]            # manda ao chat, na fila se ele estiver num turno
+  brza sessions title <nome> <título> [--json]          # troca o título da aba
+  brza sessions close <nome> [--force] [--json]         # fecha o chat e a aba; o chat num turno pede --force
+
+As linhas de saída do open são `open:     <nome>  (chat, <caminho>, <sessionId>)`, `running:  <nome>` e `CHECK:    …`.
+Saídas: 0 feito; 1 nome ausente ou repetido, chat num turno sem --force, o --wait vencido, ou o app sem resposta. O
+--json do list, do send, do title e do close é o contrato do roteador do PLN-003; o arquivo do mapa não é:
+  list   {"sessions": [{"name", "title", "chat", "claude_session", "worktree", "state", "source", "opened"}]}
+         source: "map", "transcript" ou null; opened: o horário do open no mapa, ou null
+  send   {"sent": true, "name", "chat"}
+  title  {"titled": true, "name", "chat", "title"}
+  close  {"closed": true, "name", "chat"}; num turno, {"closed": false, "name", "chat", "state"}
+  erro   {"error": "<motivo>"}
+"""
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
+from brza_runtime import (WORKSPACE, BrzaError, brza, canonicalize, git, rpc, send_to_chat,  # noqa: E402,F401
+                          user_data)
+
+CHAT_COMMAND = 'claude-brza'
+VERBS = ('open', 'list', 'send', 'title', 'close')
+SESSION_MAP = WORKSPACE / '.sessions' / 'sessions.jsonl'
+WAIT_SECONDS = 60.0
+
+
+def record(event: str, **fields):
+    """Acrescenta uma linha ao mapa de sessões."""
+    SESSION_MAP.parent.mkdir(parents=True, exist_ok=True)
+    row = {'event': event, 'at': datetime.now().astimezone().isoformat(timespec='seconds'), **fields}
+    with SESSION_MAP.open('a') as f:
+        f.write(json.dumps(row, ensure_ascii=False) + '\n')
+
+
+def session_map() -> dict[str, dict]:
+    """O mapa dobrado, por chat: o `open` liga o nome ao chat, o `title` e o `session` atualizam, o `close` desliga."""
+    entries: dict[str, dict] = {}
+    try:
+        lines = SESSION_MAP.read_text().splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        try:
+            row = json.loads(line)
+            event, chat = row['event'], row['chat']
+        except (ValueError, KeyError, TypeError):
+            continue
+        if event == 'open':
+            entries[chat] = {'name': row.get('name'), 'title': row.get('title'), 'opened': row.get('at'),
+                             'claude_session': None}
+        elif event == 'close':
+            entries.pop(chat, None)
+        elif chat in entries and event == 'title':
+            entries[chat]['title'] = row.get('title')
+        elif chat in entries and event == 'session':
+            entries[chat]['claude_session'] = row.get('claude_session')
+    return entries
+
+
+def open_tabs() -> list[tuple[str, dict]]:
+    """As abas de chat do app, com o worktree de cada uma."""
+    return [(snapshot['worktree'].split('::', 1)[-1], tab) for snapshot in rpc('session.tabs.listAll')['snapshots']
+            for tab in snapshot.get('tabs', []) if tab.get('type') == 'agent-session']
+
+
+def mapped_and_open(name: str) -> bool:
+    """O mapa tem o nome com o chat ainda aberto no app."""
+    chats_by_name = {chat for chat, entry in session_map().items() if entry['name'] == name}
+    if not chats_by_name:
+        return False
+    try:
+        return any(tab['sessionId'] in chats_by_name for _, tab in open_tabs())
+    except BrzaError:
+        return False  # o app sem resposta; o launch logo depois diz por quê
+
+
+def config_dirs() -> list[Path]:
+    return [Path.home() / '.claude', *sorted((user_data() / 'claude-profiles').glob('*/home'))]
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def running(name: str) -> bool:
+    for config in config_dirs():
+        for file in (config / 'sessions').glob('*.json'):
+            try:
+                data = json.loads(file.read_text())
+                pid = int(data.get('pid') or file.stem)
+            except (OSError, ValueError):
+                continue
+            if data.get('name') == name and alive(pid):
+                return True
+    return False
+
+
+def workspace_root(cwd: Path | None = None) -> Path:
+    """A raiz do brza-workspace: a do git common dir do cwd, quando ele é um checkout do brza-workspace, ou a WORKSPACE.
+
+    O checkout do brza-workspace se reconhece por trazer este comando em scripts/brza/. Num worktree em `.worktrees/`, o
+    common dir é o `.git` da raiz; num checkout do brza-studio, ou fora de um repositório, vale a WORKSPACE."""
+    try:
+        common = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=cwd or Path.cwd()).strip()
+    except BrzaError:
+        return WORKSPACE
+    root = Path(common).resolve().parent
+    return root if (root / 'scripts' / 'brza' / 'brza-sessions').is_file() else WORKSPACE
+
+
+def resolve_checkout(checkout: Path, cwd: Path | None = None) -> Path:
+    """O --checkout absoluto como veio; o relativo a partir da raiz do brza-workspace, e não do cwd."""
+    checkout = checkout.expanduser()
+    return (checkout if checkout.is_absolute() else workspace_root(cwd) / checkout).resolve()
+
+
+def chat_blocker(checkout: Path) -> str | None:
+    """Por que o chat nesse checkout sobe sem os hooks do workspace, ou None quando sobe com eles."""
+    if checkout == WORKSPACE or WORKSPACE in checkout.parents:
+        return None
+    try:
+        override = rpc('settings.getAgentLaunch')['settings'].get('agentCmdOverrides', {}).get('claude')
+    except (BrzaError, KeyError) as e:
+        return f'não li a configuração do app ({e})'
+    if not override:
+        return f'agentCmdOverrides.claude está vazio, e o chat em {checkout} sobe sem os hooks do workspace'
+    if Path(override).name != CHAT_COMMAND:
+        return f'agentCmdOverrides.claude é {override}, não o {CHAT_COMMAND}'
+    return None
+
+
+def wait_for_name(name: str) -> bool:
+    deadline = time.monotonic() + WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if running(name):
+            return True
+        time.sleep(1)
+    return False
+
+
+def wait_for_session(chat: str) -> str | None:
+    """Espera o app dar o id da sessão do Claude por trás do chat."""
+    deadline = time.monotonic() + WAIT_SECONDS
+    while True:
+        if claude_session := provider_session(chat):
+            return claude_session
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(1)
+
+
+def provider_session(chat: str) -> str | None:
+    """O id da sessão do Claude por trás do chat, ou None quando o app não o dá."""
+    try:
+        found = rpc('agentSession.history', {'sessionId': chat, 'direction': 'tail', 'limit': 1})
+    except BrzaError:
+        return None
+    return (found.get('providerSession') or {}).get('id')
+
+
+def chat_name(claude_session: str) -> str | None:
+    """O último /rename da sessão, gravado no transcript como `custom-title`."""
+    name = None
+    for config in config_dirs():
+        for transcript in (config / 'projects').glob(f'*/{claude_session}.jsonl'):
+            try:
+                with transcript.open('rb') as f:
+                    for line in f:
+                        if b'"custom-title"' not in line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        if row.get('type') == 'custom-title' and row.get('customTitle'):
+                            name = row['customTitle']
+            except OSError:
+                continue
+    return name
+
+
+def chats() -> list[dict]:
+    """Os chats abertos no app, na ordem das abas, com o nome do mapa ou do /rename; `tab` fica fora do --json."""
+    mapped = session_map()
+    found = []
+    for worktree, tab in open_tabs():
+        chat = tab['sessionId']
+        claude_session = provider_session(chat)
+        entry = mapped.get(chat)
+        name = entry['name'] if entry else (chat_name(claude_session) if claude_session else None)
+        found.append({'name': name, 'title': tab.get('title'), 'chat': chat, 'claude_session': claude_session,
+                      'worktree': worktree, 'state': (tab.get('chatStatus') or {}).get('state'),
+                      'source': 'map' if entry else ('transcript' if name else None),
+                      'opened': entry['opened'] if entry else None, 'tab': tab['id']})
+    return found
+
+
+def public(chat: dict) -> dict:
+    return {k: v for k, v in chat.items() if k != 'tab'}
+
+
+def find(name: str) -> dict:
+    matches = [chat for chat in chats() if chat['name'] == name]
+    if not matches:
+        raise BrzaError(f'nenhum chat aberto se chama {name}; veja `brza sessions list`')
+    if len(matches) > 1:
+        raise BrzaError(f'{len(matches)} chats se chamam {name}: ' + ', '.join(c['chat'] for c in matches))
+    return matches[0]
+
+
+def emit(as_json: bool, data: dict, line: str):
+    print(json.dumps(data, ensure_ascii=False) if as_json else line)
+
+
+def list_command(args) -> int:
+    found = chats()
+    if args.json:
+        print(json.dumps({'sessions': [public(chat) for chat in found]}, ensure_ascii=False))
+        return 0
+    for chat in found:
+        print(f'{chat["name"] or "-":<24} {chat["state"] or "-":<9} {chat["chat"]}  {chat["worktree"]}  '
+              f'{chat["title"]}')
+    return 0
+
+
+def send_command(args) -> int:
+    chat = find(args.name)
+    send_to_chat(chat['chat'], args.text)
+    emit(args.json, {'sent': True, 'name': chat['name'], 'chat': chat['chat']},
+         f'sent:     {chat["name"]}  ({chat["chat"]})')
+    return 0
+
+
+def title_command(args) -> int:
+    chat = find(args.name)
+    rpc('agentSession.rename', {'sessionId': chat['chat'], 'name': args.title})
+    record('title', name=chat['name'], chat=chat['chat'], title=args.title)
+    emit(args.json, {'titled': True, 'name': chat['name'], 'chat': chat['chat'], 'title': args.title},
+         f'titled:   {chat["name"]}  ({chat["chat"]}, {args.title})')
+    return 0
+
+
+def close_command(args) -> int:
+    chat = find(args.name)
+    if chat['state'] == 'working' and not args.force:
+        emit(args.json, {'closed': False, 'name': chat['name'], 'chat': chat['chat'], 'state': chat['state']},
+             f'CHECK:    {chat["name"]} está no meio de um turno; repita com --force para fechar assim mesmo')
+        return 1
+    # O agentSession.close encerra o processo e deixa a aba; o session.tabs.close tira a aba. Nunca --resume.
+    rpc('agentSession.close', {'sessionId': chat['chat']})
+    rpc('session.tabs.close', {'worktree': f'path:{chat["worktree"]}', 'tabId': chat['tab'], 'reason': 'user'})
+    record('close', name=chat['name'], chat=chat['chat'])
+    emit(args.json, {'closed': True, 'name': chat['name'], 'chat': chat['chat']},
+         f'closed:   {chat["name"]}  ({chat["chat"]})')
+    return 0
+
+
+def by_name(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog='brza sessions',
+                                 description='Lista, manda mensagem, dá título e fecha chats pelo nome.')
+    verbs = ap.add_subparsers(dest='verb', required=True)
+    listing = verbs.add_parser('list', help='os chats do app')
+    listing.add_argument('--json', action='store_true')
+    send = verbs.add_parser('send', help='manda o texto ao chat')
+    send.add_argument('name')
+    send.add_argument('text')
+    send.add_argument('--json', action='store_true')
+    title = verbs.add_parser('title', help='troca o título da aba')
+    title.add_argument('name')
+    title.add_argument('title')
+    title.add_argument('--json', action='store_true')
+    close = verbs.add_parser('close', help='fecha o chat e a aba, sem --resume')
+    close.add_argument('name')
+    close.add_argument('--force', action='store_true', help='fecha também o chat no meio de um turno')
+    close.add_argument('--json', action='store_true')
+    args = ap.parse_args(argv)
+    try:
+        return {'list': list_command, 'send': send_command, 'title': title_command,
+                'close': close_command}[args.verb](args)
+    except BrzaError as e:
+        emit(args.json, {'error': str(e)}, f'CHECK:    {e}')
+        return 1
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in VERBS[1:]:
+        return by_name(argv)
+    if argv and argv[0] == 'open':
+        argv = argv[1:]
+    ap = argparse.ArgumentParser(prog='brza sessions', description=__doc__.split('\n\n')[0],
+                                 epilog='Os outros verbos: brza sessions list|send|title|close --help.')
+    ap.add_argument('name')
+    ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
+    ap.add_argument('--rename', action='store_true', help='manda o /rename <nome>, para o correio achar a sessão')
+    ap.add_argument('--checkout', type=Path, default=WORKSPACE,
+                    help='o checkout do chat; o relativo parte da raiz do brza-workspace, não do cwd')
+    group = ap.add_mutually_exclusive_group()
+    group.add_argument('--prompt')
+    group.add_argument('--prompt-file', type=Path)
+    ap.add_argument('--wait', action='store_true',
+                    help='espera a sessão do Claude no ar, e com --rename o nome, antes de anunciar')
+    ap.add_argument('--dry-run', action='store_true')
+    args = ap.parse_args(argv)
+
+    checkout = resolve_checkout(args.checkout)
+    prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
+    title = args.title or args.name
+    if running(args.name) or mapped_and_open(args.name):
+        print(f'running:  {args.name}')
+        return 0
+    if blocker := chat_blocker(checkout):
+        print(f'CHECK:    {args.name}: {blocker}')
+    if args.dry_run:
+        extras = [f'título "{title}"', *(['com /rename'] if args.rename else []), *(['com prompt'] if prompt else [])]
+        print(f'abriria:  {args.name}  (chat, {checkout}), {", ".join(extras)}')
+        return 0
+
+    first = f'/rename {args.name}' if args.rename else prompt
+    try:
+        launched = brza('agent', 'launch', '--agent', 'claude', '--surface', 'chat', '--worktree', f'path:{checkout}',
+                        *(['--prompt', first] if first else []))
+    except BrzaError as e:
+        print(f'CHECK:    {args.name} não abriu: {e}')
+        return 1
+    outcome = launched.get('outcome') or {}
+    if outcome.get('kind') != 'structured' or not outcome.get('sessionId'):
+        detail = (launched.get('receipt') or {}).get('detail') or 'sem motivo'
+        print(f'CHECK:    {args.name} abriu como {outcome.get("kind")}, não como chat: {detail}')
+        return 1
+    session_id = outcome['sessionId']
+    try:
+        rpc('agentSession.rename', {'sessionId': session_id, 'name': title})
+    except BrzaError as e:
+        print(f'CHECK:    {args.name} abriu, mas a aba não ganhou o título: {e}')
+    record('open', name=args.name, title=title, chat=session_id, checkout=str(checkout), renamed=args.rename)
+    if args.rename and prompt:
+        try:
+            send_to_chat(session_id, prompt)
+        except BrzaError as e:
+            print(f'CHECK:    {args.name} abriu, mas o prompt não entrou: {e}')
+            return 1
+    if args.wait:
+        claude_session = wait_for_session(session_id)
+        if not claude_session:
+            print(f'CHECK:    {args.name} não deu a sessão do Claude em {WAIT_SECONDS:g} s; confira a aba')
+            return 1
+        record('session', name=args.name, chat=session_id, claude_session=claude_session)
+        if args.rename and not wait_for_name(args.name):
+            print(f'CHECK:    {args.name} não registrou o nome em {WAIT_SECONDS:g} s; confira o /rename na aba')
+            return 1
+    print(f'open:     {args.name}  (chat, {checkout}, {session_id})')
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())

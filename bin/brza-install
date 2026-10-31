@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Instala os comandos de `scripts/brza/` para o BrzA Studio: os links em ~/.local/bin e o override do chat.
+
+  brza install                  mostra o estado: cada link brza-* e o agentCmdOverrides.claude do app
+  brza install --all            liga em ~/.local/bin todo brza-* executável de scripts/brza/, inclusive o
+                                brza-install; o primeiro roda pelo caminho inteiro, scripts/brza/brza-install --all,
+                                porque o link dele ainda não existe
+  brza install --chat-command   liga ~/.local/bin/claude-brza e o põe em agentCmdOverrides.claude, para o chat do
+                                Claude subir com o --settings do brza-workspace também nos checkouts do brza-studio
+  brza install --run            liga só o ~/.local/bin/brza-run, o comando que a aba do ▶ acha pelo zsh de login
+  brza install --sessions       liga só o ~/.local/bin/brza-sessions, o abridor de sessões em modo chat
+  --dry-run                     diz o que faria, sem fazer
+
+Os links apontam para o checkout principal do brza-workspace, e não para um worktree, para não quebrar quando o
+worktree some. O claude-brza fica fora do --all e segue só pelo --chat-command, porque mexe no override. O override
+vale para o app inteiro, e o `claude-brza` cai no claude puro fora do brza-workspace e do brza-studio. Para desfazer:
+apague o link e esvazie o comando do Claude em Configurações › Agentes do app.
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+SELF = Path(__file__).resolve()
+sys.path.insert(0, str(SELF.parent))
+import brza_runtime as runtime  # noqa: E402
+
+CHAT_COMMAND = 'claude-brza'
+RUN = 'brza-run'
+SESSIONS = 'brza-sessions'
+
+
+def source_of(name: str) -> Path:
+    return runtime.WORKSPACE / 'scripts' / 'brza' / name
+
+
+def commands() -> list[str]:
+    """Todo brza-* executável de scripts/brza/ no checkout principal."""
+    scripts = runtime.WORKSPACE / 'scripts' / 'brza'
+    return sorted(p.name for p in scripts.glob('brza-*') if p.is_file() and os.access(p, os.X_OK))
+
+
+def link_state(name: str) -> str:
+    link, source = runtime.LOCAL_BIN / name, source_of(name)
+    if link.is_symlink() and link.resolve() == source.resolve():
+        return 'ok'
+    if link.exists() or link.is_symlink():
+        return f'aponta para {os.path.realpath(link)}'
+    return 'ausente'
+
+
+def link_command(name: str, dry_run: bool):
+    """Liga ~/.local/bin/<nome> ao script de mesmo nome no checkout principal do brza-workspace."""
+    link, source = runtime.LOCAL_BIN / name, source_of(name)
+    if not source.is_file():
+        sys.exit(f'{source} não existe; o {name} precisa estar no checkout principal')
+    state = link_state(name)
+    if state == 'ok':
+        print(f'link:     {link} já aponta para {source}')
+    elif state != 'ausente':
+        sys.exit(f'{link} já existe e {state}; confira à mão')
+    else:
+        print(f'link:     {link} -> {source}')
+        if not dry_run:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(source)
+
+
+def override() -> str:
+    return runtime.rpc('settings.getAgentLaunch')['settings'].get('agentCmdOverrides', {}).get('claude') or ''
+
+
+def install_chat_command(dry_run: bool):
+    link_command(CHAT_COMMAND, dry_run)
+    target = str(runtime.LOCAL_BIN / CHAT_COMMAND)
+    print(f'app:      agentCmdOverrides.claude = {target}')
+    if not dry_run:
+        runtime.rpc('settings.mutateAgentLaunch', {'type': 'command', 'agent': 'claude', 'value': target})
+
+
+def install_all(dry_run: bool):
+    for name in commands():
+        link_command(name, dry_run)
+
+
+def show():
+    for name in (CHAT_COMMAND, *commands()):
+        print(f'link:     {runtime.LOCAL_BIN / name}: {link_state(name)}')
+    try:
+        print(f'app:      agentCmdOverrides.claude = {override() or "(vazio: o chat roda o claude puro)"}')
+    except runtime.BrzaError as e:
+        print(f'app:      não li a configuração ({e})')
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Instala os comandos de scripts/brza/ para o BrzA Studio.')
+    ap.add_argument('--all', action='store_true', help='liga todo brza-* de scripts/brza/, inclusive o brza-install')
+    ap.add_argument('--chat-command', action='store_true', help=f'liga {CHAT_COMMAND} e o põe no override do chat')
+    ap.add_argument('--run', action='store_true', help=f'liga {RUN}')
+    ap.add_argument('--sessions', action='store_true', help=f'liga {SESSIONS}')
+    ap.add_argument('--dry-run', action='store_true')
+    a = ap.parse_args()
+    if not (a.all or a.chat_command or a.run or a.sessions):
+        show()
+        return
+    if a.all:
+        install_all(a.dry_run)
+    if a.run and not a.all:
+        link_command(RUN, a.dry_run)
+    if a.sessions and not a.all:
+        link_command(SESSIONS, a.dry_run)
+    if a.chat_command:
+        try:
+            install_chat_command(a.dry_run)
+        except runtime.BrzaError as e:
+            sys.exit(f'o app não respondeu; abra o BrzA Studio e tente de novo ({e})')
+
+
+if __name__ == '__main__':
+    main()

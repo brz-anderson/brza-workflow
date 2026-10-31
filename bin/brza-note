@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""Cria o esqueleto de uma nota do brza-workspace e commita notas por caminho, com o checador antes.
+
+  brza-note new worklog <assunto> [--scope workspace,brza-studio] [--workstream <nome>]
+      cria work/worklogs/AAAA-MM-DD-<assunto>.md com o esqueleto do worklog e imprime o caminho; recusa se existe.
+  brza-note new issue <assunto> [--scope …] [--priority low|medium|high] [--workstream <nome>]
+      cria work/issues/<assunto>.md, com status: open e opened de hoje.
+  brza-note commit <caminho>… -m <mensagem> [--no-push] [--workstream <nome>]
+      roda o check_notes.py (sai se há erro), git add dos caminhos, commit só deles, git fetch e push na branch do
+      workstream, com o git pull --rebase --autostash antes só quando a origin andou; --no-push para no commit. Sem
+      upstream, o push é o git push -u origin workstream/<nome>. A memória (memory/ e .claude/agent-memory/) vai ao
+      commit só quando o caminho é dado; o que sobra sujo ali depois do commit sai em `aviso: memória suja fora do
+      commit: <caminhos>`, e a saída do resto não muda.
+  brza-note workstream <nome>
+      cria a branch workstream/<nome> da origin/master (depois de git fetch) e o worktree em
+      <workspace>/.worktrees/<nome>, com push -u. Recusa se a branch local ou o worktree já existem; se a branch só
+      existe na origin, o worktree sai dela, para reabrir um workstream sem worktree. Depois do worktree, liga a
+      memória da sessão: cria <worktree>/memory/, vazio e sem commit, e grava no <worktree>/.claude/settings.local.json
+      o autoMemoryDirectory absoluto para ele, com merge das outras chaves.
+  brza-note memory-setup
+      faz essa ligação em todo worktree de workstream que já existe; idempotente, uma linha por workstream.
+  brza-note sync [--no-push]
+      git fetch; em cada worktree do workspace numa branch workstream/*, git merge --no-edit origin/master, e o push
+      dos que mudaram. O conflito aborta o merge daquele worktree, relata e segue para o próximo; sai com 1 no fim.
+      Uma linha por workstream.
+
+A master guarda só a norma, e a nota vive na branch do workstream, que nunca volta à master; a norma chega ao
+workstream pelo sync. A raiz onde a nota vai, a raiz-alvo, sai assim, na ordem:
+  1. --workstream <nome>, em new e commit: <workspace>/.worktrees/<nome>, de onde quer que se rode;
+  2. o cwd num worktree do workspace cuja branch é workstream/*: esse worktree;
+  3. o cwd no brza-studio, ou num worktree dele: a branch <tipo>/pln-NNN-<slug> dá o plano PLN-NNN, e o workstream é
+     o que tem plans/PLN-NNN-*, nas branches workstream/* locais e, sem achar, nas de origin/workstream/*. Um
+     workstream é uma frente de trabalho e guarda vários planos; achar nenhum ou mais de um recusa e pede o
+     --workstream;
+  4. nenhuma das três, ou a master: recusado, e a saída diz para usar --workstream. O workstream sem worktree
+     recusa com o `brza note workstream <nome>` que o cria.
+O checador roda com --root na raiz-alvo.
+
+O assunto é kebab-case, sem a data, e o --scope padrão é workspace. O worklog leva a sessão do $CLAUDE_SESSION_NAME,
+ou "<a escrever>" sem ele, e o H1 e o pedido ficam a escrever. O ## Fora do workspace sai vazio e é apagado quando não
+há o que registrar; os quatro campos estão no work/README.md.
+
+O caminho relativo parte do diretório atual quando ele está na raiz-alvo, e da raiz-alvo quando não está, como numa
+sessão do brza-studio. O commit leva só os caminhos dados, mesmo com outro arquivo no índice, porque outra sessão
+pode estar no mesmo checkout; o --autostash guarda e devolve o que estiver sujo ao lado durante o pull, que só roda
+quando a origin andou, para não tirar da árvore à toa o trabalho das outras sessões.
+
+O nome da sessão no esqueleto do worklog é o CLAUDE_SESSION_NAME ou, num chat do BrzA Studio, o do chat do
+ORCA_AGENT_SESSION_ID: o do mapa de sessões e, sem entrada, o último /rename, como no brza-sessions.
+
+Saídas: 0 feito; 1 recusado (a nota existe, o checador achou erro, nada a commitar, a master ou o workstream sem
+worktree, o conflito do sync) ou o git falhou; 2 uso errado.
+"""
+import argparse
+import datetime
+import os
+import re
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import brza_runtime as runtime  # noqa: E402
+
+SUBJECT = re.compile(r'[a-z0-9]+(-[a-z0-9]+)*')
+# O que decide o workstream de um plano mora no brza_runtime, que o brza-tree também usa.
+STUDIO_BRANCH, WORKSTREAM_PREFIX = runtime.STUDIO_BRANCH, runtime.WORKSTREAM_PREFIX
+Refused, workstream_root, workstream_of_plan = runtime.Refused, runtime.workstream_root, runtime.workstream_of_plan
+MEMORY_PATHS = ('memory', '.claude/agent-memory')
+DATED = re.compile(r'\d{4}-\d{2}-\d{2}-')
+PRIORITIES = ('low', 'medium', 'high')
+CHECKER = Path('.claude') / 'skills' / 'notes-checker' / 'scripts' / 'check_notes.py'
+
+WORKLOG = """---
+scope:
+{scope}
+---
+
+# <H1 a escrever>
+
+O pedido de Anderson, em {today}, na sessão `{session}`: "<o pedido>".
+
+## O que se fez
+
+## O que ficou
+
+## Fora do workspace
+"""
+
+ISSUE = """---
+status: open
+scope:
+{scope}
+opened: {today}
+{priority}---
+
+# <H1 a escrever>
+
+## O pedido
+"""
+
+
+def today() -> datetime.date:
+    return datetime.date.today()
+
+
+def sessions_module() -> dict:
+    return runpy.run_path(str(HERE.parent / 'packages' / 'client' / 'bin' / 'brza-sessions'))
+
+
+def session_name() -> str | None:
+    """O nome da sessão: o CLAUDE_SESSION_NAME ou, num chat do app, o do mapa de sessões e, sem entrada, o /rename."""
+    if name := os.environ.get('CLAUDE_SESSION_NAME'):
+        return name
+    chat = os.environ.get('ORCA_AGENT_SESSION_ID')
+    if not chat:
+        return None
+    sessions = sessions_module()
+    if entry := sessions['session_map']().get(chat):
+        return entry['name']
+    claude_session = sessions['provider_session'](chat)
+    return sessions['chat_name'](claude_session) if claude_session else None
+
+
+def common_dir(cwd: Path) -> tuple[Path, Path] | None:
+    """(a raiz do worktree, o git common dir) do repositório do `cwd`, ou None fora de um repositório git."""
+    try:
+        top = Path(runtime.git('rev-parse', '--show-toplevel', cwd=cwd).strip()).resolve()
+        common = runtime.git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=cwd).strip()
+    except runtime.BrzaError:
+        return None
+    return top, Path(common).resolve()
+
+
+def branch_of(root: Path) -> str | None:
+    """A branch do worktree em `root`, ou None detached."""
+    try:
+        return runtime.git('symbolic-ref', '--short', '-q', 'HEAD', cwd=root).strip() or None
+    except runtime.BrzaError:
+        return None
+
+
+def target_root(workstream: str | None) -> Path:
+    """A raiz-alvo das notas: o --workstream; o worktree do workspace numa branch workstream/*; o workstream que a
+    branch <tipo>/pln-NNN-<slug> do brza-studio leva ao plano, e o workstream é o que o tem. A master e o cwd sem
+    workstream recusam: a master guarda só a norma."""
+    if workstream:
+        return workstream_root(workstream)
+    found = common_dir(Path.cwd())
+    if found:
+        top, common = found
+        if common == (runtime.WORKSPACE / '.git').resolve():
+            branch = branch_of(top)
+            if branch and branch.startswith(WORKSTREAM_PREFIX):
+                return top
+            raise Refused(f'a master guarda só a norma, e o worktree {top} está em {branch or "detached"}, não num '
+                          f'workstream; rode num worktree de .worktrees/<nome> ou passe --workstream <nome>')
+        if common == (runtime.STUDIO / '.git').resolve():
+            branch = branch_of(top) or ''
+            if m := STUDIO_BRANCH.match(branch):
+                return workstream_root(workstream_of_plan(m.group(1)))
+            raise Refused(f'a branch {branch or "detached"} do brza-studio não traz o plano '
+                          f'(<tipo>/pln-NNN-<slug>), e não há workstream a deduzir; passe --workstream <nome>')
+    raise Refused(f'sem workstream: a master guarda só a norma, e {Path.cwd()} não é worktree de workstream nem do '
+                  f'brza-studio; passe --workstream <nome>')
+
+
+def new(root: Path, kind: str, subject: str, scope: list[str], priority: str | None) -> int:
+    fields = {'scope': '\n'.join(f'  - {s}' for s in scope), 'today': today().isoformat()}
+    if kind == 'worklog':
+        path = root / 'work' / 'worklogs' / f'{fields["today"]}-{subject}.md'
+        text = WORKLOG.format(**fields, session=session_name() or '<a escrever>')
+    else:
+        path = root / 'work' / 'issues' / f'{subject}.md'
+        text = ISSUE.format(**fields, priority=f'priority: {priority}\n' if priority else '')
+    if path.exists():
+        print(f'recusado: {path} já existe')
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    print(path)
+    return 0
+
+
+def check(root: Path) -> int:
+    """Roda o checador da raiz-alvo e devolve a saída dele; a saída dele vai à tela."""
+    r = subprocess.run([sys.executable, str(root / CHECKER), '--root', str(root)], capture_output=True, text=True)
+    print((r.stdout + r.stderr).rstrip())
+    return r.returncode
+
+
+def upstream(root: Path) -> str | None:
+    """O upstream da branch do worktree, ou None sem ele."""
+    try:
+        return runtime.git('rev-parse', '--abbrev-ref', '@{upstream}', cwd=root).strip()
+    except runtime.BrzaError:
+        return None
+
+
+def push(root: Path, branch: str):
+    """O push da branch: o -u na primeira vez, sem upstream; com ele, o plain push."""
+    if upstream(root):
+        runtime.git('push', '-q', cwd=root)
+    else:
+        runtime.git('push', '-q', '-u', 'origin', branch, cwd=root)
+
+
+def dirty_memory(root: Path, given: list[str]) -> list[str]:
+    """Os arquivos sujos de memory/ e .claude/agent-memory/ na raiz `root` que não estão entre os `given`, nem sob um
+    deles; um arquivo por caminho, com o untracked também por arquivo."""
+    out = runtime.git('status', '--porcelain', '-z', '--untracked-files=all', '--', *MEMORY_PATHS, cwd=root)
+    fields, dirty = out.split('\0'), []
+    while fields:
+        entry = fields.pop(0)
+        if len(entry) < 4:
+            continue
+        if entry[0] in 'RC':
+            fields.pop(0)  # o caminho de origem do renome ou da cópia
+        path = entry[3:]
+        if not any(path == g.rstrip('/') or path.startswith(g.rstrip('/') + '/') for g in given):
+            dirty.append(path)
+    return sorted(dirty)
+
+
+def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
+    branch = branch_of(root)
+    if not branch or not branch.startswith(WORKSTREAM_PREFIX):
+        print(f'recusado: {root} está em {branch or "detached"}, e a nota só se commita numa branch workstream/*')
+        return 1
+    if check(root) != 0:
+        print('recusado: o checador achou erro; nada foi commitado')
+        return 1
+    runtime.git('add', '--', *paths, cwd=root)
+    if not runtime.git('diff', '--cached', '--name-only', '--', *paths, cwd=root).strip():
+        print('recusado: nada a commitar nos caminhos dados')
+        return 1
+    # Com caminhos, o commit leva só eles e deixa o resto do índice como está.
+    runtime.git('commit', '-q', '-m', message, '--', *paths, cwd=root)
+    print(runtime.git('log', '-1', '--format=%h %s', cwd=root).strip())
+    if dirty := dirty_memory(root, paths):
+        print(f'aviso: memória suja fora do commit: {", ".join(dirty)}')
+    if not do_push:
+        return 0
+    runtime.git('fetch', '-q', cwd=root)
+    if upstream(root) and runtime.git('rev-list', '--count', 'HEAD..@{upstream}', cwd=root).strip() != '0':
+        runtime.git('pull', '-q', '--rebase', '--autostash', cwd=root)
+    push(root, branch)
+    print(f'enviado:  {runtime.git("log", "-1", "--format=%h", cwd=root).strip()} na origin ({branch})')
+    return 0
+
+
+def ref_exists(ref: str, cwd: Path) -> bool:
+    try:
+        runtime.git('show-ref', '--verify', '--quiet', ref, cwd=cwd)
+    except runtime.BrzaError:
+        return False
+    return True
+
+
+def workstream(name: str) -> int:
+    """Cria o workstream `name`: a branch workstream/<nome> e o worktree em <workspace>/.worktrees/<nome>, com
+    push -u."""
+    ws, branch = runtime.WORKSPACE, f'{WORKSTREAM_PREFIX}{name}'
+    path = ws / '.worktrees' / name
+    if path.exists():
+        print(f'recusado: o worktree {path} já existe')
+        return 1
+    runtime.git('fetch', '-q', 'origin', cwd=ws)
+    if ref_exists(f'refs/heads/{branch}', ws):
+        print(f'recusado: a branch {branch} já existe; para abrir o worktree dela: git worktree add {path} {branch}')
+        return 1
+    if ref_exists(f'refs/remotes/origin/{branch}', ws):
+        # Workstream reaberto: a branch só existe na origin, e o worktree sai dela com o upstream dela
+        runtime.git('worktree', 'add', '-b', branch, str(path), f'origin/{branch}', cwd=ws)
+        runtime.git('branch', '-q', f'--set-upstream-to=origin/{branch}', cwd=path)
+        print(f'worktree: {path}  ({branch}, reaberta da origin)')
+        memory(path)
+        return 0
+    # O -u do push troca o upstream que o worktree add herda da origin/master
+    runtime.git('worktree', 'add', '-b', branch, str(path), 'origin/master', cwd=ws)
+    runtime.git('push', '-q', '-u', 'origin', branch, cwd=path)
+    print(f'worktree: {path}  ({branch}, da origin/master)')
+    memory(path)
+    return 0
+
+
+def memory(tree: Path) -> str:
+    """Liga a memória da sessão do worktree `tree` (memory/ e o autoMemoryDirectory) e diz o que fez: 'ligada' ou
+    'em dia'. O settings.local.json ilegível levanta BrzaError."""
+    state = 'ligada' if runtime.setup_memory(tree) else 'em dia'
+    print(f'memória:  {tree / "memory"}  ({state})')
+    return state
+
+
+def memory_setup() -> int:
+    """A memória da sessão em todo worktree de workstream que já existe; idempotente, uma linha por workstream."""
+    failed = False
+    for path, branch in sorted(workstream_worktrees().items()):
+        label = branch.removeprefix(WORKSTREAM_PREFIX)
+        try:
+            state = 'ligada' if runtime.setup_memory(path) else 'em dia'
+        except runtime.BrzaError as e:
+            state, failed = f'falhou: {e}', True
+        print(f'{label}: memória {state} em {path / "memory"}')
+    return 1 if failed else 0
+
+
+def workstream_worktrees() -> dict[Path, str]:
+    """Os worktrees do workspace numa branch workstream/*, cada caminho com a branch."""
+    trees, path = {}, None
+    for line in runtime.git('worktree', 'list', '--porcelain', cwd=runtime.WORKSPACE).splitlines():
+        if line.startswith('worktree '):
+            path = Path(line[len('worktree '):])
+        elif line.startswith(f'branch refs/heads/{WORKSTREAM_PREFIX}'):
+            trees[path] = line[len('branch refs/heads/'):]
+    return trees
+
+
+def merge_master(path: Path) -> str:
+    """O git merge --no-edit origin/master no worktree: 'em dia' ou 'mesclado'; o conflito aborta o merge e levanta
+    Refused, e outra falha do git sobe como BrzaError."""
+    head = runtime.git('rev-parse', 'HEAD', cwd=path).strip()
+    try:
+        runtime.git('merge', '-q', '--no-edit', 'origin/master', cwd=path)
+    except runtime.BrzaError as e:
+        try:
+            runtime.git('rev-parse', '-q', '--verify', 'MERGE_HEAD', cwd=path)
+        except runtime.BrzaError:
+            raise e from None
+        runtime.git('merge', '--abort', cwd=path)
+        raise Refused('o merge com a origin/master foi abortado; resolva à mão no worktree') from None
+    return 'em dia' if runtime.git('rev-parse', 'HEAD', cwd=path).strip() == head else 'mesclado'
+
+
+def sync(do_push: bool) -> int:
+    """O git merge origin/master em cada worktree de workstream, e o push dos que mudaram; uma linha por workstream."""
+    runtime.git('fetch', '-q', 'origin', cwd=runtime.WORKSPACE)
+    failed = False
+    for path, branch in sorted(workstream_worktrees().items()):
+        label = branch.removeprefix(WORKSTREAM_PREFIX)
+        try:
+            state = merge_master(path)
+            if state == 'mesclado' and do_push:
+                push(path, branch)
+                state = 'mesclado e enviado'
+            elif state == 'mesclado':
+                state = 'mesclado, sem push'
+        except Refused as e:
+            state, failed = f'conflito: {e}', True
+        except runtime.BrzaError as e:
+            state, failed = f'falhou: {e}', True
+        print(f'{label}: {state}')
+    return 1 if failed else 0
+
+
+def relative(ap: argparse.ArgumentParser, root: Path, raw: str) -> str:
+    """O caminho dado como caminho da raiz-alvo. O relativo parte do diretório atual quando ele está na raiz-alvo, e
+    dela quando não está; o que cai fora da raiz-alvo é uso errado."""
+    root, cwd = root.resolve(), Path.cwd().resolve()
+    start = cwd if cwd.is_relative_to(root) else root
+    try:
+        return str((start / raw).resolve().relative_to(root))
+    except ValueError:
+        ap.error(f'{raw} está fora da raiz das notas ({root})')
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog='brza note', description='Cria o esqueleto de nota e commita notas por caminho, '
+                                 'no workstream; mantém os workstreams.')
+    sub = ap.add_subparsers(dest='command', required=True)
+    workstream_help = 'o workstream da nota (<workspace>/.worktrees/<nome>); vence o worktree e o brza-studio do cwd'
+    ap_new = sub.add_parser('new', help='cria o esqueleto de um worklog ou de uma issue')
+    ap_new.add_argument('kind', choices=('worklog', 'issue'))
+    ap_new.add_argument('subject', metavar='assunto', help='em kebab-case, sem a data')
+    ap_new.add_argument('--scope', default='workspace', help='lista separada por vírgula; padrão workspace')
+    ap_new.add_argument('--priority', choices=PRIORITIES, help='só na issue')
+    ap_new.add_argument('--workstream', help=workstream_help)
+    ap_commit = sub.add_parser('commit', help='checa, commita os caminhos dados e faz o push na branch do workstream')
+    ap_commit.add_argument('paths', nargs='+', metavar='caminho')
+    ap_commit.add_argument('-m', dest='message', required=True, help='a mensagem do commit')
+    ap_commit.add_argument('--no-push', action='store_true', help='para no commit, sem pull nem push')
+    ap_commit.add_argument('--workstream', help=workstream_help)
+    ap_workstream = sub.add_parser('workstream', help='cria a branch workstream/<nome> e o worktree dela em '
+                                                      '.worktrees/<nome>')
+    ap_workstream.add_argument('name', metavar='nome', help='em kebab-case, como studio ou tools-kit')
+    sub.add_parser('memory-setup', help='liga a memória da sessão (memory/ e o autoMemoryDirectory) em todo '
+                                        'worktree de workstream')
+    ap_sync = sub.add_parser('sync', help='o merge da origin/master em cada worktree de workstream, com o push')
+    ap_sync.add_argument('--no-push', action='store_true', help='só o merge, sem push')
+    args = ap.parse_args(argv)
+
+    name = args.name if args.command == 'workstream' else getattr(args, 'workstream', None)
+    if name is not None and not SUBJECT.fullmatch(name):
+        ap.error(f'nome de workstream inválido: {name}; use kebab-case')
+    try:
+        if args.command == 'workstream':
+            return workstream(args.name)
+        if args.command == 'memory-setup':
+            return memory_setup()
+        if args.command == 'sync':
+            return sync(not args.no_push)
+        root = target_root(args.workstream)
+        if args.command == 'new':
+            if not SUBJECT.fullmatch(args.subject) or DATED.match(args.subject):
+                ap_new.error(f'assunto inválido: {args.subject}; use kebab-case, sem a data')
+            if args.priority and args.kind != 'issue':
+                ap_new.error('--priority vale só na issue')
+            scope = [s.strip() for s in args.scope.split(',') if s.strip()]
+            if not scope:
+                ap_new.error('--scope vazio')
+            return new(root, args.kind, args.subject, scope, args.priority)
+        return commit(root, [relative(ap_commit, root, p) for p in args.paths], args.message, not args.no_push)
+    except Refused as e:
+        print(f'recusado: {e}')
+        return 1
+    except runtime.BrzaError as e:
+        print(f'falhou:   {e}')
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

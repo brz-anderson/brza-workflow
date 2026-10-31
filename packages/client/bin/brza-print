@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Tira o print do aparelho de uma conferência — o simulador iOS, o Android do adb ou a janela de um app do Mac —, para
+a evidência de um caso manual, em qualquer projeto.
+
+  brza print <destino.png> [--ios [UDID] | --android [SERIAL] | --app NOME] [--force]
+
+Sem --ios, --android nem --app, acha sozinho o aparelho aberto: o simulador iOS ligado ou o Android que o adb vê. Com
+mais de um, ou nenhum, para e lista o que achou, para escolher pela opção.
+
+  --ios [UDID]        o simulador ligado (xcrun simctl io <udid> screenshot); sem UDID, o único ligado
+  --android [SERIAL]  o aparelho ou emulador do adb (adb exec-out screencap -p); sem SERIAL, o único conectado
+  --app NOME          a janela da frente do app do Mac com esse nome, como "BrzA Studio" ou "Google Chrome"
+                      (screencapture -l). Pede a permissão de Gravação de Tela, uma vez, ao app que roda o terminal —
+                      o BrzA Studio, no chat dele —, em Ajustes do Sistema › Privacidade e Segurança.
+  --force             sobrescreve o destino; sem ele, o destino que já existe é recusado.
+
+O simulador e o Android saem só com a tela do aparelho, sem pedir permissão. O destino de um caso manual fica na pasta
+do plano, plans/PLN-NNN-…/PLN-NNN-C1.png, linkado no Observado do caso.
+"""
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+PNG = b'\x89PNG\r\n\x1a\n'
+# A janela da frente de cada app: a lista do CoreGraphics vem da frente para trás; camada 0 é a janela comum.
+WINDOWS_JXA = '''ObjC.import("CoreGraphics")
+const list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1 | 16, 0))
+const out = []
+for (let i = 0; i < list.count; i++) {
+  const w = list.objectAtIndex(i)
+  const get = k => ObjC.unwrap(w.objectForKey(k))
+  const b = ObjC.deepUnwrap(w.objectForKey("kCGWindowBounds")) || {}
+  out.push({owner: get("kCGWindowOwnerName"), id: get("kCGWindowNumber"), layer: get("kCGWindowLayer"),
+            width: b.Width || 0, height: b.Height || 0})
+}
+JSON.stringify(out)'''
+PERMISSION = ('o macOS não deu a imagem da janela; dê a permissão de Gravação de Tela ao app que roda este terminal '
+              '(o BrzA Studio, no chat dele) em Ajustes do Sistema › Privacidade e Segurança › Gravação de Tela, e '
+              'abra o app de novo')
+
+
+class PrintError(RuntimeError):
+    """O aparelho ou a janela não deu o print."""
+
+
+def run(args: list[str], binary: bool = False) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(args, capture_output=True, text=not binary, timeout=60)
+    except FileNotFoundError:
+        raise PrintError(f'{args[0]} não está instalado') from None
+    except subprocess.TimeoutExpired:
+        raise PrintError(f'{" ".join(args[:3])} não respondeu em 60 s') from None
+
+
+def ios_devices() -> list[tuple[str, str]]:
+    """Os simuladores ligados, como (udid, nome); sem o Xcode, nenhum."""
+    if not shutil.which('xcrun'):
+        return []
+    r = run(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j'])
+    if r.returncode:
+        return []
+    devices = json.loads(r.stdout).get('devices', {})
+    return [(d['udid'], d['name']) for runtime in devices.values() for d in runtime if d.get('state') == 'Booted']
+
+
+def android_devices() -> list[tuple[str, str]]:
+    """Os aparelhos e emuladores prontos no adb, como (serial, modelo); sem o adb, nenhum."""
+    if not shutil.which('adb'):
+        return []
+    r = run(['adb', 'devices', '-l'])
+    if r.returncode:
+        return []
+    out = []
+    for line in r.stdout.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == 'device':
+            model = next((f.split(':', 1)[1] for f in fields[2:] if f.startswith('model:')), fields[0])
+            out.append((fields[0], model))
+    return out
+
+
+def app_window(name: str) -> int:
+    """O id da janela da frente do app, com o nome sem diferença de caixa."""
+    r = run(['osascript', '-l', 'JavaScript', '-e', WINDOWS_JXA])
+    if r.returncode:
+        raise PrintError(f'não li as janelas abertas ({r.stderr.strip()})')
+    windows = [w for w in json.loads(r.stdout)
+               if (w.get('owner') or '').casefold() == name.casefold() and w.get('layer') == 0
+               and w.get('width', 0) > 1 and w.get('height', 0) > 1]
+    if not windows:
+        owners = sorted({w['owner'] for w in json.loads(r.stdout) if w.get('layer') == 0 and w.get('owner')})
+        raise PrintError(f'nenhuma janela aberta do app "{name}"; os apps com janela são: {", ".join(owners)}')
+    return windows[0]['id']
+
+
+def pick(choices: list[tuple[str, str]], wanted: str | None, kind: str, flag: str) -> str:
+    """O id pedido, que precisa estar na lista, ou o único da lista."""
+    if wanted:
+        if wanted not in {c[0] for c in choices}:
+            raise PrintError(f'{kind} {wanted} não está aberto; os abertos: {listing(choices) or "nenhum"}')
+        return wanted
+    if len(choices) == 1:
+        return choices[0][0]
+    if not choices:
+        raise PrintError(f'nenhum {kind} aberto')
+    raise PrintError(f'mais de um {kind} aberto; escolha com {flag} <id>: {listing(choices)}')
+
+
+def listing(choices: list[tuple[str, str]]) -> str:
+    return '; '.join(f'{name} ({ident})' for ident, name in choices)
+
+
+def target(ios: str | None, android: str | None, app: str | None) -> tuple[str, str]:
+    """O alvo como (tipo, id): o que a opção pede, ou o único aparelho aberto."""
+    if app:
+        return 'app', str(app_window(app))
+    if ios is not None:
+        return 'ios', pick(ios_devices(), ios or None, 'simulador iOS', '--ios')
+    if android is not None:
+        return 'android', pick(android_devices(), android or None, 'aparelho Android', '--android')
+    found = [('ios', i, n) for i, n in ios_devices()] + [('android', s, m) for s, m in android_devices()]
+    if len(found) == 1:
+        return found[0][0], found[0][1]
+    if not found:
+        raise PrintError('nenhum simulador iOS ligado nem Android no adb; para a janela de um app do Mac, use --app NOME')
+    raise PrintError('mais de um aparelho aberto; escolha com --ios <udid> ou --android <serial>: '
+                     + '; '.join(f'{k} {n} ({i})' for k, i, n in found))
+
+
+def capture(kind: str, ident: str, path: Path):
+    """Grava o PNG do alvo em path."""
+    if kind == 'ios':
+        r = run(['xcrun', 'simctl', 'io', ident, 'screenshot', '--type=png', str(path)])
+        if r.returncode:
+            raise PrintError(f'o simctl não tirou o print ({r.stderr.strip()})')
+    elif kind == 'android':
+        r = run(['adb', '-s', ident, 'exec-out', 'screencap', '-p'], binary=True)
+        if r.returncode:
+            raise PrintError(f'o adb não tirou o print ({r.stderr.decode(errors="replace").strip()})')
+        path.write_bytes(r.stdout)
+    else:
+        r = run(['screencapture', '-x', '-o', '-l', ident, str(path)])
+        if r.returncode or not path.exists() or not path.stat().st_size:
+            raise PrintError(PERMISSION)
+
+
+def png_size(data: bytes) -> tuple[int, int]:
+    if data[:8] != PNG:
+        raise PrintError('o print não saiu como PNG')
+    return int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+
+
+def take(dest: Path, ios: str | None, android: str | None, app: str | None) -> tuple[str, tuple[int, int]]:
+    """Tira o print num temporário e só então grava o destino, para que a falha não deixe arquivo pela metade."""
+    kind, ident = target(ios, android, app)
+    with tempfile.TemporaryDirectory(prefix='brza-print-') as tmp:
+        path = Path(tmp) / 'print.png'
+        capture(kind, ident, path)
+        data = path.read_bytes() if path.exists() else b''
+    size = png_size(data)
+    dest.write_bytes(data)
+    return kind, size
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog='brza print',
+        description='Tira o print do aparelho de uma conferência: o simulador iOS, o Android do adb ou a janela de um '
+                    'app do Mac.')
+    ap.add_argument('dest', metavar='destino.png', help='o PNG, em geral plans/PLN-NNN-…/PLN-NNN-C1.png')
+    alvo = ap.add_mutually_exclusive_group()
+    alvo.add_argument('--ios', nargs='?', const='', metavar='UDID', help='o simulador iOS ligado')
+    alvo.add_argument('--android', nargs='?', const='', metavar='SERIAL', help='o aparelho ou emulador do adb')
+    alvo.add_argument('--app', metavar='NOME', help='a janela da frente de um app do Mac')
+    ap.add_argument('--force', action='store_true', help='sobrescreve o destino que já existe')
+    a = ap.parse_args(argv)
+    dest = Path(a.dest)
+    if dest.suffix.lower() != '.png':
+        ap.error(f'{dest} não termina em .png')
+    if dest.exists() and not a.force:
+        ap.error(f'{dest} já existe; use --force para sobrescrever')
+    if not dest.parent.is_dir():
+        ap.error(f'a pasta {dest.parent} não existe')
+    try:
+        kind, (w, h) = take(dest, a.ios, a.android, a.app)
+    except PrintError as e:
+        sys.exit(f'brza print: {e}')
+    label = {'ios': 'simulador iOS', 'android': 'Android', 'app': f'janela do {a.app}'}[kind]
+    print(f'{dest}: {w}×{h} px, {label}')
+
+
+if __name__ == '__main__':
+    main()

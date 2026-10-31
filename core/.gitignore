@@ -1,0 +1,6 @@
+.measurements/
+__pycache__/
+.worktrees/
+.DS_Store
+.sessions/
+.claude/settings.local.json

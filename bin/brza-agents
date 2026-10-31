@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Imprime o JSON do `claude --agents` com os subagentes de <brza-workspace>/.claude/agents/*.md.
+
+  brza-agents [--workspace <caminho>]
+
+Cada .md vira um agente: o nome é o `name` do frontmatter ou o do arquivo; `description`, `model`, `tools`, `memory`,
+`effort` e as outras chaves do frontmatter vão como estão, e o corpo vira o `prompt`. A saída é uma linha de JSON, na
+ordem dos nomes. Sem o diretório, ou sem agente, não imprime nada e sai com 0: use `--agents "$(brza-agents)"` só quando
+a saída vier não vazia, como a função `claude` do ~/.zshrc faz.
+
+O brza-workspace já lê o .claude/agents do projeto; o JSON serve às sessões do brza-studio, que não o têm.
+
+Saídas: 0 feito (a saída vazia quer dizer sem agentes); 1 arquivo ilegível.
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import brza_runtime as runtime  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog='brza agents', description='Imprime o JSON do claude --agents.')
+    ap.add_argument('--workspace', type=Path, help='a raiz do brza-workspace; padrão a BRZA_WORKSPACE ou o ~/Projects')
+    args = ap.parse_args(argv)
+    try:
+        text = runtime.agents_json(args.workspace or runtime.WORKSPACE)
+    except (OSError, UnicodeDecodeError) as e:
+        print(f'falhou:   {e}', file=sys.stderr)
+        return 1
+    if text:
+        print(text)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

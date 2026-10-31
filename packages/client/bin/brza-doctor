@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Confere se a sessão e a máquina estão prontas para o BrzA Studio, e diz o comando que conserta o que falta.
+
+  brza-doctor [--json]
+      ERRO  identidade: git var GIT_AUTHOR_IDENT ou GIT_COMMITTER_IDENT não é o noreply do brz-anderson
+      ERRO  medição: o .claude/settings.json do brza-workspace sem o measure.py, ou BRZA_WORKSPACE fora do ambiente
+      ERRO  links: algum brza-* de scripts/brza/ sem o link certo em ~/.local/bin (o link_state do brza-install)
+      ERRO  chat: o agentCmdOverrides.claude do app não é o ~/.local/bin/claude-brza, ou o link dele falta
+      AVISO chat: o app não respondeu, e o override ficou sem conferir
+      AVISO pnpm fora do PATH; o perfil brza-dev sem estado; o app instalado mais velho que a origin/master
+
+Saídas: 1 com algum ERRO, 0 sem. Cada linha diz o que conferiu e, no erro e no aviso, o comando que conserta. --json
+devolve a lista das conferências, com level, check, message e fix.
+
+A identidade e a medição vêm do ambiente que a função `claude` do ~/.zshrc e o claude-brza põem na sessão; num terminal
+aberto sem eles, as duas saem em erro. O app velho compara o commit da versão instalada com a origin/master do último
+`git fetch` no brza-studio, sem buscar de novo.
+"""
+import argparse
+import json
+import os
+import plistlib
+import re
+import runpy
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parents[2] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
+import brza_runtime as runtime  # noqa: E402
+
+INSTALL = runpy.run_path(str(HERE.parents[2] / 'bin' / 'brza-install'))
+link_state, commands, override = INSTALL['link_state'], INSTALL['commands'], INSTALL['override']
+
+NOREPLY = '240569289+brz-anderson@users.noreply.github.com'
+APP = Path('/Applications/BrzA Studio.app')
+# O perfil de onde o dev build semeia, antes do perfil do app (getDefaultSeedSource, em config/scripts/dev-profile-seed.mjs).
+DEV_PROFILE = runtime.DEFAULT_USER_DATA.parent / 'brza-dev'
+# Os arquivos que dizem que o perfil tem estado (profileHasState, no mesmo arquivo).
+PROFILE_STATE = ('orca-profile-index.json', 'profiles', 'orca-data.json')
+SESSION_FIX = ('abra a sessão pela função claude do ~/.zshrc, ou no app com o claude-brza (brza install --chat-command):'
+               ' os dois põem o env do .claude/settings.json do brza-workspace')
+which = shutil.which
+
+
+def git_ident(kind: str) -> str:
+    """O `git var GIT_<kind>_IDENT` no brza-workspace, como o commit o veria."""
+    r = subprocess.run(['git', '-C', str(runtime.WORKSPACE), 'var', f'GIT_{kind}_IDENT'], capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        raise runtime.BrzaError(f'git var GIT_{kind}_IDENT falhou: {r.stderr.strip()}')
+    return r.stdout.strip()
+
+
+def result(level: str, check: str, message: str, fix: str | None = None) -> dict:
+    return {'level': level, 'check': check, 'message': message, 'fix': fix}
+
+
+def identity() -> dict:
+    wrong = []
+    for kind in ('AUTHOR', 'COMMITTER'):
+        ident = git_ident(kind)
+        if f'<{NOREPLY}>' not in ident:
+            wrong.append(f'GIT_{kind}_IDENT é {re.sub(r" [0-9]+ [+-][0-9]{4}$", "", ident)}')
+    if wrong:
+        return result('ERRO', 'identidade', f'{"; ".join(wrong)}, e não o noreply do brz-anderson', SESSION_FIX)
+    return result('ok', 'identidade', f'autor e committer são o {NOREPLY}')
+
+
+def measurement() -> dict:
+    settings = runtime.WORKSPACE / '.claude' / 'settings.json'
+    problems = []
+    try:
+        if 'measure.py' not in settings.read_text():
+            problems.append(f'{settings} não liga o measure.py')
+    except OSError:
+        problems.append(f'{settings} não existe')
+    if not os.environ.get('BRZA_WORKSPACE'):
+        problems.append('BRZA_WORKSPACE fora do ambiente')
+    if problems:
+        return result('ERRO', 'medição', '; '.join(problems), SESSION_FIX)
+    return result('ok', 'medição', f'o measure.py está no settings.json, e BRZA_WORKSPACE={os.environ["BRZA_WORKSPACE"]}')
+
+
+def links() -> dict:
+    bad = {name: state for name in commands() if (state := link_state(name)) != 'ok'}
+    if not bad:
+        return result('ok', 'links', f'{len(commands())} brza-* ligados em {runtime.LOCAL_BIN}')
+    alien = [name for name, state in bad.items() if state != 'ausente']
+    fix = 'brza install --all'
+    if alien:
+        fix = f'rm {" ".join(str(runtime.LOCAL_BIN / n) for n in alien)}, depois de conferir, e {fix}'
+    return result('ERRO', 'links', '; '.join(f'{n} {s}' for n, s in bad.items()), fix)
+
+
+def chat() -> dict:
+    target = str(runtime.LOCAL_BIN / 'claude-brza')
+    try:
+        current = override()
+    except runtime.BrzaError as e:
+        return result('AVISO', 'chat', f'o app não respondeu, e o agentCmdOverrides.claude ficou sem conferir ({e})',
+                      'abra o BrzA Studio e rode de novo')
+    state = link_state('claude-brza')
+    if current != target or state != 'ok':
+        found = f'o agentCmdOverrides.claude é {current or "(vazio)"}'
+        if state != 'ok':
+            found += f', e o claude-brza {state}'
+        return result('ERRO', 'chat', f'{found}; o chat sobe sem os hooks e sem a identidade',
+                      'brza install --chat-command')
+    return result('ok', 'chat', f'o agentCmdOverrides.claude é {target}')
+
+
+def pnpm() -> dict:
+    path = which('pnpm')
+    if not path:
+        return result('AVISO', 'pnpm', 'o pnpm está fora do PATH; o brza tree, o brza test e o brza app não rodam',
+                      'abra o terminal pelo zsh de login, ou instale o pnpm')
+    return result('ok', 'pnpm', path)
+
+
+def dev_profile() -> dict:
+    if not any((DEV_PROFILE / name).exists() for name in PROFILE_STATE):
+        return result('AVISO', 'perfil', f'{DEV_PROFILE} sem estado; o brza dev semeia, então, do perfil do app, cuja'
+                      ' sessão de conta o dev build não decifra',
+                      'entre na conta num dev build do perfil compartilhado: ORCA_DEV_PROFILE=shared pnpm dev')
+    return result('ok', 'perfil', f'{DEV_PROFILE} tem estado para o seed')
+
+
+def installed_version() -> str | None:
+    try:
+        with open(APP / 'Contents' / 'Info.plist', 'rb') as f:
+            return plistlib.load(f).get('CFBundleShortVersionString')
+    except (OSError, plistlib.InvalidFileException):
+        return None
+
+
+def app_age() -> dict:
+    fix = 'brza app install, de um terminal fora do app, com ele fechado'
+    version = installed_version()
+    if not version:
+        return result('AVISO', 'app', f'não li a versão de {APP}', fix)
+    match = re.search(r'\.([0-9a-f]{7,40})$', version)
+    if not match:
+        return result('AVISO', 'app', f'a versão {version} não traz o commit; não comparei com a origin/master', fix)
+    commit = match.group(1)
+    tip = runtime.git('rev-parse', 'origin/master').strip()
+    if tip.startswith(commit):
+        return result('ok', 'app', f'{version}, a origin/master do último fetch')
+    try:
+        behind = int(runtime.git('rev-list', '--count', f'{commit}..origin/master').strip())
+    except runtime.BrzaError:
+        return result('AVISO', 'app', f'o commit {commit} do app instalado não está no {runtime.STUDIO}; rode git'
+                      ' fetch origin lá, ou reinstale', fix)
+    if behind == 0:
+        return result('ok', 'app', f'{version}, de um commit à frente da origin/master')
+    return result('AVISO', 'app', f'{version} está {behind} commits atrás da origin/master ({tip[:12]})', fix)
+
+
+CHECKS = (identity, measurement, links, chat, pnpm, dev_profile, app_age)
+NAMES = {'identity': 'identidade', 'measurement': 'medição', 'links': 'links', 'chat': 'chat', 'pnpm': 'pnpm',
+         'dev_profile': 'perfil', 'app_age': 'app'}
+
+
+def run_checks() -> list[dict]:
+    out = []
+    for check in CHECKS:
+        try:
+            out.append(check())
+        except (runtime.BrzaError, OSError) as e:
+            out.append(result('ERRO', NAMES[check.__name__], f'a conferência quebrou ({e})'))
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog='brza doctor', description='Confere a sessão e a máquina para o BrzA Studio.')
+    ap.add_argument('--json', action='store_true', help='devolve as conferências em JSON')
+    args = ap.parse_args(argv)
+    checks = run_checks()
+    if args.json:
+        print(json.dumps(checks, ensure_ascii=False, indent=2))
+    else:
+        for c in checks:
+            print(f'{c["level"]:<5} {c["check"]}: {c["message"]}')
+            if c['fix']:
+                print(f'      conserta: {c["fix"]}')
+    return 1 if any(c['level'] == 'ERRO' for c in checks) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

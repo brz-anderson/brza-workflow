@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Roda um comando num terminal do BrzA Studio, devolve a saída e põe a entrada e a saída no chat em blocos ```.
+
+Dois modos, que dão no mesmo par de blocos — o comando num ```bash e as últimas 200 linhas da saída (até 16 KB) noutro,
+com o código de saída e o caminho do arquivo da saída inteira:
+
+  brza run --chat <id> -- <comando>   o bloco que o agente propõe no chat, para o ▶ do app: roda o comando ali
+                                      mesmo, na aba que o ▶ abriu, e manda os blocos ao chat <id> como
+                                      mensagem, que acorda o agente para tomar as providências; o id é o
+                                      ORCA_AGENT_SESSION_ID do chat
+  brza run -- <comando>               o agente roda pelo Bash: abre uma aba visível no worktree do cwd, espera o comando,
+                                      imprime os blocos para o agente colar na resposta e sai com o código do comando;
+                                      a aba fecha quando dá 0 e fica aberta quando falha
+
+Os argumentos depois de `--` se juntam com espaço, como no ssh, e rodam no zsh interativo (`$SHELL -ic`), com as
+funções do ~/.zshrc, como se digitados no terminal: comando com `|`, `&&` ou `;` vai entre aspas simples para que o
+shell não o parta antes do brza-run. O comando roda num pseudo-terminal, então cor, barra de progresso e prompt
+interativo funcionam na aba; os blocos levam a saída sem as sequências de cor. O pager fica desligado (PAGER e
+GIT_PAGER são cat), para a saída inteira passar pelo brza-run.
+
+A mensagem entra no chat pelo `agentSession.send` do runtime do app, pelo `rpc` do brza_runtime, com
+`delivery: 'queue-if-active'`: com o agente no meio de um turno, ela espera na fila. A saída inteira fica em
+<ORCA_CHAT_SCRATCH_DIR ou o temp>/brza-run/<hora>-<id>/output.log.
+
+O ▶ abre a aba no zsh de login, que acha o brza-run pelo link em ~/.local/bin/brza-run, que o `brza install --run`
+cria. A regra do AGENTS.md — comando para quem pediu em cerca bash, sem o brza-run — não muda: ele é opção explícita.
+"""
+import argparse
+import json
+import os
+import pty
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+SELF = Path(__file__).resolve()
+sys.path.insert(0, str(SELF.parent))
+sys.path.insert(0, str(SELF.parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
+import brza_runtime as runtime  # noqa: E402
+from brza_runtime import canonicalize, send_mutation, send_to_chat  # noqa: E402,F401
+
+TAIL_LINES = 200
+TAIL_BYTES = 16 * 1024
+# CSI (cor, cursor), OSC (título, hiperlink) e os escapes curtos, como o ESC > que o less deixa
+ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[ -/]*[0-~]')
+
+
+def new_run() -> Path:
+    base = Path(os.environ.get('ORCA_CHAT_SCRATCH_DIR') or tempfile.gettempdir()) / 'brza-run'
+    run = base / f'{time.strftime("%Y%m%d-%H%M%S")}-{uuid.uuid4().hex[:6]}'
+    run.mkdir(parents=True)
+    return run
+
+
+def clean(raw: bytes) -> str:
+    """A saída como se lê na tela: sem cor e, na linha que o \\r reescreveu, só a última versão."""
+    text = ANSI.sub('', raw.decode('utf-8', errors='replace')).replace('\r\n', '\n')
+    return '\n'.join(line.rstrip('\r').split('\r')[-1] for line in text.split('\n'))
+
+
+def tail(text: str) -> tuple[str, int]:
+    """As últimas TAIL_LINES linhas, cortadas do começo até caber em TAIL_BYTES, e quantas linhas ficaram de fora."""
+    lines = text.rstrip('\n').split('\n') if text.strip() else []
+    kept = lines[-TAIL_LINES:]
+    while len(kept) > 1 and len('\n'.join(kept).encode()) > TAIL_BYTES:
+        kept.pop(0)
+    if kept and len(kept[0].encode()) > TAIL_BYTES:
+        kept[0] = kept[0].encode()[-TAIL_BYTES:].decode('utf-8', errors='ignore')
+    return '\n'.join(kept), len(lines) - len(kept)
+
+
+def fenced(text: str, lang: str = '') -> str:
+    """Bloco ``` com cerca maior que qualquer sequência de crases do texto."""
+    ticks = '`' * max(3, max((len(run) for run in re.findall(r'`+', text)), default=0) + 1)
+    return f'{ticks}{lang}\n{text}\n{ticks}'
+
+
+def report(command: str, code: int, output: str, log: Path) -> str:
+    shown, cut = tail(output)
+    note = f'Saiu com {code}.'
+    if cut:
+        note += f' Cortei as {cut} linhas antes destas; a saída inteira está em `{log}`.'
+    return f'{fenced(command, "bash")}\n{fenced(shown or "(sem saída)")}\n{note}'
+
+
+def run_here(command: str, run: Path) -> tuple[int, str]:
+    """Roda o comando num pseudo-terminal, mostrando a saída na aba, e grava a saída limpa em output.log."""
+    captured = bytearray()
+
+    def read(fd):
+        data = os.read(fd, 65536)
+        captured.extend(data)
+        return data
+
+    # sem pager: o less quebraria as linhas na largura da aba e, com saída longa, esperaria um q que ninguém digita
+    os.environ.update(PAGER='cat', GIT_PAGER='cat')
+    status = pty.spawn([os.environ.get('SHELL') or '/bin/zsh', '-ic', command], read)
+    code = os.waitstatus_to_exitcode(status)
+    code = 128 - code if code < 0 else code
+    output = clean(bytes(captured))
+    (run / 'output.log').write_text(output)
+    return code, output
+
+
+def run_in_chat(command: str, session_id: str) -> int:
+    code, output = run_here(command, run := new_run())
+    message = f'Rodei pelo ▶:\n\n{report(command, code, output, run / "output.log")}'
+    try:
+        send_to_chat(session_id, message)
+        print(f'\nbrza-run: saiu com {code}; mandei a entrada e a saída ao chat')
+    except (OSError, ValueError, KeyError, runtime.BrzaError) as e:
+        print(f'\nbrza-run: saiu com {code}, mas não mandei ao chat ({e})', file=sys.stderr)
+    return code
+
+
+def run_for_result(command: str, result: Path) -> int:
+    """O modo interno do `brza run -- <comando>`: roda na aba e grava o código em result.json, que o de fora espera."""
+    code, _ = run_here(command, result.parent)
+    partial = result.with_suffix('.tmp')
+    partial.write_text(json.dumps({'code': code}))
+    partial.replace(result)
+    return code
+
+
+def terminal_alive(handle: str) -> bool:
+    return any(t.get('handle') == handle for t in runtime.brza('terminal', 'list')['terminals'])
+
+
+def run_in_tab(args: list[str], cwd: Path, poll: float = 0.5) -> int:
+    command = ' '.join(args)
+    top = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    if top.returncode:
+        sys.exit(f'brza-run: {cwd} não está num checkout git que o app conheça')
+    run = new_run()
+    result = run / 'result.json'
+    inner = (f'cd {shlex.quote(str(cwd))} && {shlex.quote(str(SELF))} --result {shlex.quote(str(result))} -- '
+             + ' '.join(shlex.quote(a) for a in args))
+    created = runtime.brza('terminal', 'create', '--worktree', f'path:{top.stdout.strip()}',
+                   '--title', f'brza-run: {command}'[:40], '--command', inner)
+    handle = (created.get('terminal') or created).get('handle')
+    checked = time.monotonic()
+    while not result.exists():
+        # a aba fechada antes do fim não grava resultado: confere de tempos em tempos que ela ainda existe
+        if handle and time.monotonic() - checked > 5:
+            checked = time.monotonic()
+            if not terminal_alive(handle):
+                sys.exit(f'brza-run: a aba fechou antes do fim de {command}')
+        time.sleep(poll)
+    code = json.loads(result.read_text())['code']
+    print(report(command, code, (run / 'output.log').read_text(), run / 'output.log'))
+    if code == 0 and handle:
+        runtime.brza('terminal', 'close', '--terminal', handle)
+    return code
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Roda um comando num terminal do BrzA Studio e põe a entrada e a saída no chat.')
+    ap.add_argument('--chat', metavar='ID', help='roda aqui e manda ao chat ID (o ORCA_AGENT_SESSION_ID dele)')
+    ap.add_argument('--result', type=Path, help=argparse.SUPPRESS)
+    ap.add_argument('command', nargs=argparse.REMAINDER, help='-- <comando>')
+    a = ap.parse_args()
+    args = a.command[1:] if a.command[:1] == ['--'] else a.command
+    if not args:
+        ap.error('falta o comando depois de --')
+    if a.result:
+        sys.exit(run_for_result(' '.join(args), a.result))
+    if a.chat:
+        sys.exit(run_in_chat(' '.join(args), a.chat))
+    sys.exit(run_in_tab(args, Path.cwd()))
+
+
+if __name__ == '__main__':
+    main()
