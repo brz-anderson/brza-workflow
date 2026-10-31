@@ -33,7 +33,9 @@ def git(*args, cwd: Path):
     return subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-class NoteTest(unittest.TestCase):
+class NoteFixture(unittest.TestCase):
+    """O workspace de mentira e os ajudantes; sem teste próprio, para o test_brza_note_index.py herdar sem repetir."""
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -84,9 +86,9 @@ class NoteTest(unittest.TestCase):
 
     def run_note(self, *argv, env: dict | None = None, cwd: Path | None = None,
                  workstream: str | None = 'studio') -> tuple[int, str]:
-        """Roda o main; sem `cwd`, de fora do workspace de mentira, onde o caminho relativo parte da raiz-alvo. Em new e
-        commit, o --workstream vai junto, a menos que `workstream` seja None."""
-        if workstream and argv[0] in ('new', 'commit'):
+        """Roda o main; sem `cwd`, de fora do workspace de mentira, onde o caminho relativo parte da raiz-alvo. Em new,
+        commit e plan-open, o --workstream vai junto, a menos que `workstream` seja None."""
+        if workstream and argv[0] in ('new', 'commit', 'plan-open'):
             argv = (*argv, '--workstream', workstream)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
@@ -100,9 +102,17 @@ class NoteTest(unittest.TestCase):
     def origin_log(self, branch: str = 'workstream/studio') -> list[str]:
         return git('log', '--format=%s', branch, cwd=self.origin).splitlines()
 
+    def assert_master_got_only_the_index_line(self):
+        """A nota vive no workstream; na master só chega a linha do índice (.brza/index.jsonl), num commit à parte."""
+        self.assertEqual(self.origin_log('master'), ['índice: issue:a created', 'um'])
+        self.assertEqual(git('show', '--name-only', '--format=', 'master', cwd=self.origin).splitlines(),
+                         ['.brza/index.jsonl'])
+
     def committed_files(self, ref: str = 'HEAD') -> list[str]:
         return git('show', '--name-only', '--format=', ref, cwd=self.tree).splitlines()
 
+
+class NoteTest(NoteFixture):
     # new
 
     def test_new_worklog_writes_the_skeleton_and_prints_the_path(self):
@@ -250,7 +260,7 @@ class NoteTest(unittest.TestCase):
         code, out = self.run_note('commit', 'work/issues/a.md', '-m', 'docs: a')
         self.assertEqual(code, 0, out)
         self.assertEqual(self.origin_log()[:2], ['docs: a', 'docs: outra'])
-        self.assertEqual(self.origin_log('master'), ['um'])
+        self.assert_master_got_only_the_index_line()
         self.assertEqual((self.tree / 'README.md').read_text(), 'sujo ao lado\n')
 
     def test_commit_with_nothing_new_on_the_origin_does_not_pull(self):
@@ -288,7 +298,7 @@ class NoteTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn('(workstream/studio)', out)
         self.assertEqual(self.origin_log()[:2], ['docs: a', 'docs: PLN-001-x'])
-        self.assertEqual(self.origin_log('master'), ['um'])
+        self.assert_master_got_only_the_index_line()
 
     def test_commit_without_upstream_pushes_with_dash_u(self):
         git('branch', '--unset-upstream', cwd=self.tree)

@@ -35,7 +35,7 @@ Com a conferência limpa, grave num commit só, pela seção "Quem grava" da `SK
 marcados, `status: done`, `phase: closed` e `completed` no frontmatter, o `Retomar` reescrito e a linha do
 `## Worklogs`. Nada sai de `plans/`.
 
-- **A linha "Último PLN usado" fica como está**: o número não é reusado.
+- **O número não é reusado**: o índice da `master` só cresce, e o `plan-open` numera pelo maior.
 - **`PLN` parado no Desenho** fecha de três jeitos: virou decisão ou norma — foi escrita, e o plano vai a `done` citando
   o que nasceu dele —; virou passos — o plano continua, com `phase: execution` —; ou foi rejeitado — `status: dropped` e
   `phase: dropped`, com a linha do porquê em `## Worklogs`.

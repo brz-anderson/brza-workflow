@@ -1,0 +1,2 @@
+# O índice só cresce: dois acréscimos simultâneos se juntam sem conflito (o union do git, sem driver a configurar).
+.brza/index.jsonl merge=union

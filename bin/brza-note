@@ -10,7 +10,20 @@
       workstream, com o git pull --rebase --autostash antes só quando a origin andou; --no-push para no commit. Sem
       upstream, o push é o git push -u origin workstream/<nome>. A memória (memory/ e .claude/agent-memory/) vai ao
       commit só quando o caminho é dado; o que sobra sujo ali depois do commit sai em `aviso: memória suja fora do
-      commit: <caminhos>`, e a saída do resto não muda.
+      commit: <caminhos>`, e a saída do resto não muda. Depois do push, para cada plano, issue ou decisão do commit
+      cujo estado (caminho, H1, description, status, phase) difere do vigente no índice, acrescenta a linha
+      `created` (id novo) ou `changed` ao .brza/index.jsonl da origin/master, num commit só e sem checkout, com 3
+      tentativas na corrida; falhou, a nota já está no workstream e sai `aviso: índice não gravado; rode brza note
+      index --rebuild`, com saída 0. Com --no-push, nenhuma linha.
+  brza-note plan-open <slug> --title <H1> --description <frase> [--workstream <nome>]
+      reserva o número do plano novo no índice da master: git fetch, o maior PLN de .brza/index.jsonl na origin/master
+      + 1, e a linha `created` (status open, phase interview) acrescentada ali, sem checkout. Push recusado por
+      corrida refaz do fetch, com o número de novo, até 3 vezes. Imprime PLN-NNN e o caminho
+      plans/PLN-NNN-<slug>/PLN-NNN-plan.md; o arquivo do plano quem cria é a plan-runner. Sem remote, recusa.
+  brza-note index --rebuild
+      lê planos, issues e decisões de toda branch workstream/* (a da origin, ou a local sem ela) e acrescenta `created`
+      ao índice para o id e o caminho que faltam; idempotente. Serve à migração e a reparar o índice depois de um
+      commit que não o gravou.
   brza-note workstream <nome>
       cria a branch workstream/<nome> da origin/master (depois de git fetch) e o worktree em
       <workspace>/.worktrees/<nome>, com push -u. Recusa se a branch local ou o worktree já existem; se a branch só
@@ -36,6 +49,14 @@ workstream pelo sync. A raiz onde a nota vai, a raiz-alvo, sai assim, na ordem:
      recusa com o `brza note workstream <nome>` que o cria.
 O checador roda com --root na raiz-alvo.
 
+O índice da master. `.brza/index.jsonl` é a única exceção à regra de que a master guarda só a norma: uma linha JSON por
+evento (`created`, `changed`) de plano, issue ou decisão, de qualquer workstream. Só o brza-note acrescenta. O estado
+vigente de um id é a linha de maior `ts` (current_state), porque o merge=union do .gitattributes junta acréscimos
+simultâneos fora de ordem; o id de issue e decisão é `issue:<slug>` ou `decision:<slug>`, com o slug da criação, que o
+rename não muda (só o `path`). O commit na master sai de fetch, read-tree da origin/master num índice temporário,
+hash-object, update-index, write-tree, commit-tree e push <sha>:refs/heads/master: não toca o checkout principal,
+nem o worktree do workstream.
+
 O assunto é kebab-case, sem a data, e o --scope padrão é workspace. O worklog leva a sessão do $CLAUDE_SESSION_NAME,
 ou "<a escrever>" sem ele, e o H1 e o pedido ficam a escrever. O ## Fora do workspace sai vazio e é apagado quando não
 há o que registrar; os quatro campos estão no work/README.md.
@@ -53,11 +74,13 @@ worktree, o conflito do sync) ou o git falhou; 2 uso errado.
 """
 import argparse
 import datetime
+import json
 import os
 import re
 import runpy
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -71,6 +94,16 @@ Refused, workstream_root, workstream_of_plan = runtime.Refused, runtime.workstre
 MEMORY_PATHS = ('memory', '.claude/agent-memory')
 DATED = re.compile(r'\d{4}-\d{2}-\d{2}-')
 PRIORITIES = ('low', 'medium', 'high')
+INDEX_PATH = '.brza/index.jsonl'
+INDEX_BRANCH = 'master'
+INDEX_TRIES = 3
+# Os campos que, mudados, fazem uma linha `changed`; o resto (ts, commit, session) muda a cada commit
+INDEX_COMPARED = ('path', 'title', 'description', 'status', 'phase')
+PLAN_NOTE = re.compile(r'plans/(PLN-\d+)-[^/]+/\1-plan\.md')
+NOTE_KINDS = (('issue', re.compile(r'work/issues/(?!README\.md$)([^/]+)\.md')),
+              ('decision', re.compile(r'work/decisions/(?!README\.md$)([^/]+)\.md')))
+NOTE_ZONES = ('plans', 'work/issues', 'work/decisions')
+PLAN_PREFIX = re.compile(r'PLN-\d+:\s*')
 CHECKER = Path('.claude') / 'skills' / 'notes-checker' / 'scripts' / 'check_notes.py'
 
 WORKLOG = """---
@@ -232,7 +265,13 @@ def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
     if check(root) != 0:
         print('recusado: o checador achou erro; nada foi commitado')
         return 1
-    runtime.git('add', '--', *paths, cwd=root)
+    # O caminho que sumiu do disco é o antigo de um rename ou uma remoção: o add recusaria o pathspec, e o commit só dos
+    # caminhos dados leva a remoção, o que deixa o rename visível ao índice.
+    present = [p for p in paths if (root / p).exists() or (root / p).is_symlink()]
+    if present:
+        runtime.git('add', '--', *present, cwd=root)
+    if gone := [p for p in paths if p not in present]:
+        runtime.git('rm', '-q', '--cached', '--ignore-unmatch', '--', *gone, cwd=root)
     if not runtime.git('diff', '--cached', '--name-only', '--', *paths, cwd=root).strip():
         print('recusado: nada a commitar nos caminhos dados')
         return 1
@@ -248,6 +287,292 @@ def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
         runtime.git('pull', '-q', '--rebase', '--autostash', cwd=root)
     push(root, branch)
     print(f'enviado:  {runtime.git("log", "-1", "--format=%h", cwd=root).strip()} na origin ({branch})')
+    index_note_lines(root, branch)
+    return 0
+
+
+def index_note_lines(root: Path, branch: str):
+    """Depois do push no workstream, a linha do índice na master. Falhou: a nota já está no workstream, e a saída diz o
+    comando que repara, sem mudar o código de saída."""
+    try:
+        lines = index_after_commit(root, branch)
+    except (Refused, runtime.BrzaError):
+        print('aviso: índice não gravado; rode brza note index --rebuild')
+        return
+    if lines:
+        print('índice:   ' + ', '.join(f'{line["id"]} {line["event"]}' for line in lines) + f' na origin/{INDEX_BRANCH}')
+
+
+# O índice da master
+
+def index_repo() -> Path:
+    """O repositório onde o índice mora: o checkout do workspace, que tem a origin do índice. Uma função só, para a
+    raiz que o brza_root achar trocar uma linha."""
+    return runtime.WORKSPACE
+
+
+def plumb(*args: str, cwd: Path, env: dict | None = None, input: str | None = None) -> str:
+    """O git no `cwd`, com variáveis a mais e stdin; como o runtime.git, erro vira BrzaError com o stderr."""
+    r = subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, text=True, input=input,
+                       env={**os.environ, **(env or {})})
+    if r.returncode != 0:
+        raise runtime.BrzaError(f'git {" ".join(args)} falhou: {r.stderr.strip() or r.stdout.strip()}')
+    return r.stdout
+
+
+def now() -> str:
+    return datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def parse_ts(value) -> datetime.datetime:
+    """O instante do `ts`, ISO 8601 com fuso; o ilegível ou sem fuso vale o menor instante, e perde para qualquer um."""
+    floor = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    try:
+        when = datetime.datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        return floor
+    return when if when.tzinfo else floor
+
+
+def current_state(text: str) -> dict[str, dict]:
+    """O estado vigente de cada id do índice: a linha de maior `ts` (o instante, não o texto), e na mesma `ts` a
+    última do arquivo. O merge=union deixa as linhas fora de ordem, então a última do arquivo não vale. Linha em
+    branco, que não é JSON ou sem id não conta."""
+    state: dict[str, tuple[datetime.datetime, dict]] = {}
+    for raw in text.splitlines():
+        try:
+            item = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+            continue
+        when = parse_ts(item.get('ts'))
+        if item['id'] not in state or when >= state[item['id']][0]:
+            state[item['id']] = (when, item)
+    return {key: value[1] for key, value in state.items()}
+
+
+def index_fetch(repo: Path):
+    """O git fetch da origin do índice; sem remote, ou sem a origin/master, recusa."""
+    try:
+        runtime.git('remote', 'get-url', 'origin', cwd=repo)
+    except runtime.BrzaError:
+        raise Refused(f'{repo} não tem o remote origin, e o índice da master mora lá') from None
+    runtime.git('fetch', '-q', 'origin', cwd=repo)
+    try:
+        runtime.git('rev-parse', '--verify', '-q', f'origin/{INDEX_BRANCH}', cwd=repo)
+    except runtime.BrzaError:
+        raise Refused(f'a origin/{INDEX_BRANCH} não existe') from None
+
+
+def index_text(repo: Path) -> str:
+    """O .brza/index.jsonl na origin/master, ou vazio quando o arquivo ainda não existe."""
+    ref = f'origin/{INDEX_BRANCH}'
+    if not runtime.git('ls-tree', ref, '--', INDEX_PATH, cwd=repo).strip():
+        return ''
+    return runtime.git('show', f'{ref}:{INDEX_PATH}', cwd=repo)
+
+
+def index_commit(repo: Path, text: str, message: str) -> str:
+    """O commit da origin/master com o índice trocado por `text`, sem checkout: um índice temporário do git, o blob, a
+    árvore e o commit-tree. Devolve o sha; nada do checkout principal nem de worktree é lido ou escrito."""
+    parent = runtime.git('rev-parse', f'origin/{INDEX_BRANCH}', cwd=repo).strip()
+    blob = plumb('hash-object', '-w', '--stdin', cwd=repo, input=text).strip()
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {'GIT_INDEX_FILE': str(Path(tmp) / 'index')}
+        plumb('read-tree', parent, cwd=repo, env=env)
+        plumb('update-index', '--add', '--cacheinfo', f'100644,{blob},{INDEX_PATH}', cwd=repo, env=env)
+        tree = plumb('write-tree', cwd=repo, env=env).strip()
+    return plumb('commit-tree', tree, '-p', parent, '-m', message, cwd=repo).strip()
+
+
+def index_push(repo: Path, sha: str):
+    """O push do commit do índice para a master da origin; a corrida (não fast-forward) levanta BrzaError."""
+    runtime.git('push', '-q', 'origin', f'{sha}:refs/heads/{INDEX_BRANCH}', cwd=repo)
+
+
+def append_index(make_lines) -> list[dict]:
+    """Acrescenta ao índice da origin/master as linhas que `make_lines(texto_do_índice)` devolve, num commit só, até
+    INDEX_TRIES vezes: cada tentativa parte do fetch e chama `make_lines` de novo, com o índice que a corrida deixou.
+    Sem linhas, não commita. Esgotadas as tentativas, levanta BrzaError com o último erro."""
+    repo, last = index_repo(), None
+    for _ in range(INDEX_TRIES):
+        index_fetch(repo)
+        text = index_text(repo)
+        lines = make_lines(text)
+        if not lines:
+            return []
+        body = text + ('\n' if text and not text.endswith('\n') else '')
+        body += ''.join(json.dumps(line, ensure_ascii=False, separators=(',', ':')) + '\n' for line in lines)
+        sha = index_commit(repo, body, 'índice: ' + ', '.join(f'{line["id"]} {line["event"]}' for line in lines))
+        try:
+            index_push(repo, sha)
+        except runtime.BrzaError as e:
+            last = e
+            continue
+        return lines
+    raise runtime.BrzaError(f'o push do índice foi recusado {INDEX_TRIES} vezes: {last}')
+
+
+def note_fields(text: str) -> tuple[dict[str, str], str]:
+    """(o frontmatter, o H1) de uma nota. O frontmatter é só chave: valor de nível zero, sem aspas; lista fica fora."""
+    fm, body = {}, text
+    if text.startswith('---\n') and (end := text.find('\n---', 4)) >= 0:
+        for line in text[4:end].split('\n'):
+            if m := re.match(r'^([A-Za-z_][\w-]*):\s*(.+?)\s*$', line):
+                fm[m.group(1)] = m.group(2).strip('\'"')
+        body = text[end + 4:]
+    h1, fenced = '', False
+    for line in body.split('\n'):
+        if re.match(r'^(```|~~~)', line):
+            fenced = not fenced
+        elif not fenced and line.startswith('# '):
+            h1 = line[2:].strip()
+            break
+    return fm, h1
+
+
+def note_kind(path: str) -> tuple[str, str] | None:
+    """(o gênero, a chave) do caminho de uma nota do índice: `plan` com o PLN-NNN, `issue` ou `decision` com o nome do
+    arquivo sem .md; None para qualquer outro."""
+    if m := PLAN_NOTE.fullmatch(path):
+        return 'plan', m.group(1)
+    for kind, pattern in NOTE_KINDS:
+        if m := pattern.fullmatch(path):
+            return kind, m.group(1)
+    return None
+
+
+def note_state(kind: str, text: str) -> dict[str, str]:
+    """O que o índice guarda de uma nota, do texto dela: title, description e, quando há, status e phase (esta só no
+    plano). O título é o H1 (no plano, sem o `PLN-NNN: `); a descrição, o campo `description` ou, na nota que não o
+    tem, o H1."""
+    fm, h1 = note_fields(text)
+    state = {'title': PLAN_PREFIX.sub('', h1, count=1) if kind == 'plan' else h1,
+             'description': fm.get('description') or h1}
+    for key in ('status', 'phase') if kind == 'plan' else ('status',):
+        if key in fm:
+            state[key] = fm[key]
+    return state
+
+
+def index_line(event: str, kind: str, id_: str, path: str, state: dict[str, str], workstream: str,
+               commit: str | None, ts: str | None = None) -> dict:
+    """A linha do índice de uma nota, com o `state` dela (note_state)."""
+    line = {'ts': ts or now(), 'event': event, 'kind': kind, 'id': id_, 'path': path, 'title': state['title'],
+            'description': state['description']}
+    line.update({k: state[k] for k in ('status', 'phase') if k in state})
+    line.update(workstream=workstream, worktree=f'.worktrees/{workstream}')
+    if session := session_name():
+        line['session'] = session
+    if commit:
+        line['commit'] = commit
+    return line
+
+
+def plan_open(root: Path, slug: str, title: str, description: str) -> int:
+    """Reserva o PLN-NNN seguinte no índice da origin/master, com a linha `created`, e imprime o número e o caminho."""
+    branch = branch_of(root) or ''
+    if not branch.startswith(WORKSTREAM_PREFIX):
+        raise Refused(f'{root} está em {branch or "detached"}; o plano nasce num workstream, passe --workstream <nome>')
+    workstream_name = branch.removeprefix(WORKSTREAM_PREFIX)
+    taken = []
+
+    def make(text: str) -> list[dict]:
+        ids = [int(m.group(1)) for key in current_state(text) if (m := re.fullmatch(r'PLN-(\d+)', key))]
+        id_ = f'PLN-{max(ids, default=0) + 1:03d}'
+        path = f'plans/{id_}-{slug}/{id_}-plan.md'
+        taken[:] = [id_, path]
+        state = {'title': PLAN_PREFIX.sub('', title, count=1), 'description': description, 'status': 'open',
+                 'phase': 'interview'}
+        return [index_line('created', 'plan', id_, path, state, workstream_name, None)]
+
+    try:
+        append_index(make)
+    except runtime.BrzaError as e:
+        raise Refused(f'não reservei o número do plano: {e}') from None
+    print(taken[0])
+    print(taken[1])
+    return 0
+
+
+def changed_notes(root: Path) -> list[tuple[str | None, str, str, str]]:
+    """Os planos, issues e decisões do último commit de `root`, como (o caminho antigo no rename, o caminho, o
+    gênero, a chave). Apagado não conta."""
+    out = runtime.git('diff-tree', '--root', '--no-commit-id', '-r', '-M', '--name-status', '-z', 'HEAD', cwd=root)
+    tokens, found = out.split('\0'), []
+    while len(tokens) > 1:
+        status = tokens.pop(0)
+        old = tokens.pop(0) if status[0] in 'RC' else None
+        path = tokens.pop(0)
+        if status[0] != 'D' and (kind := note_kind(path)):
+            found.append((old if status[0] == 'R' else None, path, *kind))
+    return found
+
+
+def index_after_commit(root: Path, branch: str) -> list[dict]:
+    """As linhas do índice do último commit de `root`, já enviado ao workstream: `created` para o id novo e `changed`
+    para o que mudou de caminho, H1, description, status ou phase contra o vigente. Devolve as linhas gravadas."""
+    notes = changed_notes(root)
+    if not notes:
+        return []
+    texts = {path: runtime.git('show', f'HEAD:{path}', cwd=root) for _, path, _, _ in notes}
+    workstream_name = branch.removeprefix(WORKSTREAM_PREFIX)
+    commit = runtime.git('rev-parse', '--short', 'HEAD', cwd=root).strip()
+
+    def make(text: str) -> list[dict]:
+        state = current_state(text)
+        by_path = {line['path']: line for line in state.values() if isinstance(line.get('path'), str)}
+        lines = []
+        for old, path, kind, key in notes:
+            known = by_path.get(old or path)
+            id_ = key if kind == 'plan' else known['id'] if known else f'{kind}:{key}'
+            new = index_line('created', kind, id_, path, note_state(kind, texts[path]), workstream_name, commit)
+            if id_ in state:
+                if all(new.get(k) == state[id_].get(k) for k in INDEX_COMPARED):
+                    continue
+                new['event'] = 'changed'
+            lines.append(new)
+        return lines
+
+    return append_index(make)
+
+
+def rebuild() -> int:
+    """O `index --rebuild`: acrescenta `created` para cada plano, issue e decisão das branches workstream/* cujo id ou
+    caminho falta no índice. Lê a branch da origin, ou a local quando a origin não a tem."""
+    repo = index_repo()
+
+    def make(text: str) -> list[dict]:
+        state = current_state(text)
+        known_ids = set(state)
+        known_paths = {line.get('path') for line in state.values()}
+        refs = {}
+        for ref in runtime.git('for-each-ref', '--format=%(refname)', 'refs/heads/workstream', cwd=repo).split():
+            refs[ref.removeprefix('refs/heads/')] = ref
+        for ref in runtime.git('for-each-ref', '--format=%(refname)', 'refs/remotes/origin/workstream',
+                               cwd=repo).split():
+            refs[ref.removeprefix('refs/remotes/origin/')] = ref  # a da origin vence a local
+        lines = []
+        for branch, ref in sorted(refs.items()):
+            names = runtime.git('ls-tree', '-r', '--name-only', ref, '--', *NOTE_ZONES, cwd=repo).splitlines()
+            for path in sorted(names):
+                kind = note_kind(path)
+                if not kind:
+                    continue
+                id_ = kind[1] if kind[0] == 'plan' else f'{kind[0]}:{kind[1]}'
+                if id_ in known_ids or path in known_paths:
+                    continue
+                known_ids.add(id_)
+                when, _, commit = runtime.git('log', '-1', '--format=%cI\t%h', ref, '--', path,
+                                              cwd=repo).strip().partition('\t')
+                state = note_state(kind[0], runtime.git('show', f'{ref}:{path}', cwd=repo))
+                lines.append(index_line('created', kind[0], id_, path, state, branch.removeprefix(WORKSTREAM_PREFIX),
+                                        commit or None, when or None))
+        return lines
+
+    written = append_index(make)
+    print(f'índice: {len(written)} linha(s) acrescentada(s)' if written else 'índice: em dia, nada a acrescentar')
     return 0
 
 
@@ -382,6 +707,13 @@ def main(argv: list[str] | None = None) -> int:
     ap_commit.add_argument('-m', dest='message', required=True, help='a mensagem do commit')
     ap_commit.add_argument('--no-push', action='store_true', help='para no commit, sem pull nem push')
     ap_commit.add_argument('--workstream', help=workstream_help)
+    ap_plan = sub.add_parser('plan-open', help='reserva o PLN-NNN seguinte no índice da master')
+    ap_plan.add_argument('slug', help='em kebab-case, o assunto da pasta do plano')
+    ap_plan.add_argument('--title', required=True, help='o H1 do plano, com ou sem o `PLN-NNN: `')
+    ap_plan.add_argument('--description', required=True, help='uma frase, o campo description do plano')
+    ap_plan.add_argument('--workstream', help=workstream_help)
+    ap_index = sub.add_parser('index', help='mantém o índice da master')
+    ap_index.add_argument('--rebuild', action='store_true', help='acrescenta o que falta, lendo os workstreams')
     ap_workstream = sub.add_parser('workstream', help='cria a branch workstream/<nome> e o worktree dela em '
                                                       '.worktrees/<nome>')
     ap_workstream.add_argument('name', metavar='nome', help='em kebab-case, como studio ou tools-kit')
@@ -401,7 +733,17 @@ def main(argv: list[str] | None = None) -> int:
             return memory_setup()
         if args.command == 'sync':
             return sync(not args.no_push)
+        if args.command == 'index':
+            if not args.rebuild:
+                ap_index.error('diga o que fazer: --rebuild')
+            return rebuild()
         root = target_root(args.workstream)
+        if args.command == 'plan-open':
+            if not SUBJECT.fullmatch(args.slug):
+                ap_plan.error(f'slug inválido: {args.slug}; use kebab-case')
+            if not args.title.strip() or not args.description.strip():
+                ap_plan.error('--title e --description não podem ser vazios')
+            return plan_open(root, args.slug, args.title.strip(), ' '.join(args.description.split()))
         if args.command == 'new':
             if not SUBJECT.fullmatch(args.subject) or DATED.match(args.subject):
                 ap_new.error(f'assunto inválido: {args.subject}; use kebab-case, sem a data')

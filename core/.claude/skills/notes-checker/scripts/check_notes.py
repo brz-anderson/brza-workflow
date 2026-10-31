@@ -7,7 +7,9 @@ Fixfy, sem o que é só de lá (o fixfy-vault, o painel, as origens sprint e car
   erro   nome de arquivo duplicado; link Markdown relativo quebrado — o que existe em outra branch workstream/* não
          está quebrado, e o origin_ref de plano também se procura lá; [[wikilink]] fora de código;
          status fora do vocabulário; campo obrigatório ausente em nota datada de CUTOFF em diante;
-         plano aberto fora do molde do plans/README.md — o frontmatter, o Retomar e as seções (plan_findings)
+         plano aberto fora do molde do plans/README.md — o frontmatter, o Retomar e as seções (plan_findings);
+         plano, issue ou decisão aberta de DESCRIPTION_FROM em diante sem o campo `description`, que o índice da master
+         (`.brza/index.jsonl`) guarda; a nota anterior entra no índice com o H1 e não é cobrada
   aviso  o mesmo campo ausente em nota sem data nenhuma; type redundante; tag fora do vocabulário; achado de um parecer
          de work/reviews/ sem **Evidência:**; nota de work/ que linka um plano aberto e falta na seção de ponteiro dele
 
@@ -40,6 +42,11 @@ FORBIDDEN_TAG_PREFIXES = ("work/", "repo/", "scope/", "status/")
 # data nenhuma sai como aviso, porque data que não está escrita não se infere.
 CUTOFF = "2026-10-26"
 ROOT_ZONES = ("work", "plans", "wiki")
+# O dia a partir do qual plano, issue e decisão levam o campo `description` (uma frase, para o índice da master). Vale
+# pela data de criação da nota (a menor entre opened, decided e completed); a nota sem data, ou de antes, não é cobrada:
+# o índice usa o H1 dela. Fixado aqui e no work/README.md; o dia seguinte ao do P4 do PLN-006.
+DESCRIPTION_FROM = "2026-11-01"
+DESCRIPTION_GENRES = {"plan", "issue", "decision"}
 # O plano (plans/README.md): o status de cada phase e as origens
 OPEN_STATUSES = {"open", "in_progress", "in_review"}
 PHASE_STATUS = {"interview": "open", "design": "open", "execution": "in_progress", "review": "in_review",
@@ -356,6 +363,12 @@ def plan_findings(root, rel, full, fm, text, linking, workstreams=None):
     return errors, warnings
 
 
+def created_on(fm):
+    """A data de criação da nota: a menor entre opened, decided e completed, ou None sem nenhuma."""
+    dates = [fm.get(k) for k in ("opened", "decided", "completed") if isinstance(fm.get(k), str)]
+    return min(dates) if dates else None
+
+
 def date_of(fm):
     dates = [fm.get(k) for k in ("opened", "decided", "completed") if isinstance(fm.get(k), str)]
     return max(dates) if dates else None
@@ -404,6 +417,13 @@ def check(root):
             continue
         recent = (date_of(fm) or "") >= CUTOFF
         required = errors if recent else warnings
+        if (
+            genre in DESCRIPTION_GENRES
+            and (genre != "plan" or rel.endswith("-plan.md"))
+            and (created_on(fm) or "") >= DESCRIPTION_FROM
+            and not (isinstance(fm.get("description"), str) and fm["description"].strip())
+        ):
+            errors.append(("description-missing", rel, "o campo description, uma frase, vai ao índice da master"))
 
         status = fm.get("status")
         if status is not None:

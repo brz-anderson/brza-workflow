@@ -19,8 +19,8 @@ Esta skill decide o conteúdo do plano e roda na sessão que conduz o trabalho, 
 sessão que grava o plano em `plans/`, só nos caminhos da tarefa dela. **O código do `brza-studio` não é gravado por
 aqui**: cada passo nomeia o executor, e o passo de código roda numa sessão aberta no `brza-studio`.
 
-**A norma é a do [`plans/README.md`](../../../plans/README.md)** — a linha "Último PLN usado", o mapa de `phase` e
-`status`, as origens, o que fecha — e a do [`work/README.md`](../../../work/README.md), para as propriedades comuns, os
+**A norma é a do [`plans/README.md`](../../../plans/README.md)** — o número pelo `brza note plan-open`, o mapa de
+`phase` e `status`, as origens, o que fecha — e a do [`work/README.md`](../../../work/README.md), para as propriedades comuns, os
 links, o commit e o worklog. Esta skill traz o fluxo e o molde; não repete a norma. O checador é o `notes-checker`, ao
 lado desta skill.
 
@@ -34,8 +34,7 @@ e grava é a sessão principal". Esta skill segue essas seções e não repete o
 - **Ache a raiz do workspace**: `git rev-parse --show-toplevel`, de dentro do `brza-workspace`. Todo caminho desta skill
   — `plans/...`, `work/...` — é relativo a ela. Sem `plans/` ali, não abra plano em caminho inventado: diga que falta a
   pasta e pare.
-- **Leia a norma de planos** — o `plans/README.md`: a linha "Último PLN usado", o mapa de `phase` e `status`, o que
-  fecha —, a seção de `work/worklogs/` do `work/README.md` e o molde, `references/plan-template.md`. **O molde mora só
+- **Leia a norma de planos** — o `plans/README.md`: o mapa de `phase` e `status`, o que fecha —, a seção de `work/worklogs/` do `work/README.md` e o molde, `references/plan-template.md`. **O molde mora só
   nesta skill**, que é quem o lê: não há cópia em `plans/` para envelhecer em outro ritmo.
 - **O trabalho já tem plano?** Procure pelo assunto antes de abrir outro: `ls plans`, `grep -rli "<assunto>" plans
   work/worklogs`. Plano duplicado é o primeiro passo para dois estados do mesmo trabalho.
@@ -94,8 +93,9 @@ worklog que nasce de um plano aceito.
 caminhos da tarefa, como o `work/README.md` manda em "Commit": na branch do workstream da sessão, pelo `brza note
 commit`, sem PR, com a identidade do `brz-anderson`.
 
-1. **Grave só os caminhos da tarefa**: o plano dela, o worklog dela e, ao abrir `PLN`, a linha "Último PLN usado" do
-   `plans/README.md`, que sobe na `master`, num commit próprio, antes de gravar o plano. O `phase` e o `status` saem do mapa de lá. Confira com o checador, de
+1. **Grave só os caminhos da tarefa**: o plano dela e o worklog dela. Ao abrir `PLN`, o número sai do `brza note
+   plan-open`, que o reserva no índice da `master` antes de o plano ser gravado. O `phase` e o `status` saem do mapa
+   do `plans/README.md`. Confira com o checador, de
    qualquer diretório do workspace — `python3 ${CLAUDE_SKILL_DIR}/../notes-checker/scripts/check_notes.py` — antes de
    commitar.
 2. **O que é de outra tarefa, esta sessão não executa** — outro plano, o trabalho de outra issue, o passo de código que
@@ -111,7 +111,7 @@ sessão, a linha dele no `## Worklogs`, o `Retomar` e o `phase` no fim da sessã
 ## O nome, a pasta e os IDs
 
 **Todo `PLN` é uma pasta**, mesmo com um arquivo só — é regra de descoberta, não de tamanho: `plans/PLN-NNN-assunto/`,
-com o número seguinte ao "Último PLN usado" do `plans/README.md`.
+com o número que o `brza note plan-open` reservou.
 
 | Arquivo                | O que guarda                                                                                                                                         |
 | :--------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------- |

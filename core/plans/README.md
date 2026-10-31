@@ -6,15 +6,13 @@ Um plano responde a uma pergunta só: **como estou fazendo este trabalho**. Quem
 [`work/README.md`](../work/README.md); aqui fica só o que é de plano. Adaptada da norma de planos do workspace da
 Fixfy, sem o que é só de lá.
 
-**Último PLN usado:** 007
-
 **Abre plano** o trabalho que não cabe numa sessão só: lacuna a entrevistar, passo que precisa de detalhamento, ou
 proposta que precisa de desenho. Trabalho de uma sessão só não abre plano: o plano de implementação dele abre o
 worklog.
 
 | Regra | Como |
 | :---- | :--- |
-| Pasta | Uma por plano, mesmo com um arquivo só: `plans/PLN-001-assunto/`, no workstream da sessão que o abre, e nunca na `master`. O número é sequencial e não se reusa. A linha "Último PLN usado" acima sobe na `master`, num commit de norma, antes de o plano ser gravado |
+| Pasta | Uma por plano, mesmo com um arquivo só: `plans/PLN-001-assunto/`, no workstream da sessão que o abre, e nunca na `master`. O número é sequencial e não se reusa: sai do `brza note plan-open <slug> --title … --description …`, que o reserva no índice da `master` antes de o plano ser gravado |
 | Arquivos | `PLN-001-plan.md` sempre; `-interview.md` e `-design.md` quando o plano passa de ~400 linhas ou o desenho de ~800. O `-plan` é o arquivo lido para retomar. A imagem fica na pasta: a alternativa de interface escolhida no Desenho, `PLN-001-<assunto>.png`, pelo `brza shot`; o print de um caso manual, `PLN-001-C1.png`, pelo `brza print` |
 | IDs | `R3.2` rodada e pergunta, só cresce · `D3` item do Desenho, reescrito no lugar · `P3` passo · `X1` desvio · `A1` achado · `C1` caso manual. Citação de fora: `PLN-001/D3` |
 | Estado | Frontmatter **só no `-plan.md`**: `status`, `phase`, `origin`, `origin_ref`, `ready` e as três horas, na forma do molde; o `Retomar` é a primeira linha abaixo do H1 |
