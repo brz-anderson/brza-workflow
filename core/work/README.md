@@ -186,7 +186,9 @@ por um formatador que junta linhas.
 `work/`, `plans/` e `wiki/` são deste repositório, mas **não moram na `master`**: cada nota mora na branch do
 workstream dela, `workstream/<nome>`, no worktree `.worktrees/<nome>`, como diz o `AGENTS.md`. **A nota nasce no
 workstream da sessão que a escreve.** **O commit é pelo `brza note commit`**, que roda o checador, commita só os
-caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `master`. O commit é com a identidade do
+caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `master`; quando o frontmatter, o H1 ou o
+caminho de um plano, issue ou decisão muda, ele acrescenta a linha do índice `.brza/index.jsonl` na `master`, sem
+checkout. O commit é com a identidade do
 `brz-anderson`, que vem do `env` da sessão, e o push vai pela chave `personal` do `origin`
 (`git@personal:brz-anderson/brza-workspace.git`).
 
@@ -205,6 +207,7 @@ O `brza-studio` é outro repositório, com branch `master` e a norma dele: o pla
 | `type` | **Ausente**, quer dizer o gênero da pasta. Escrito só quando refina o caminho: `unknown`, para investigação em `issues/` |
 | `status` | `open` existe e ninguém pegou · `in_progress` alguém está fazendo · `in_review` feito, esperando parecer · `done` encerrado **com** desfecho · `dropped` encerrado **sem** desfecho, por escolha. **Omitido** nos gêneros sem ciclo de vida: `guide`, `worklog` e `note` |
 | `scope` | A que a nota se refere. Sempre **lista**: `brza-studio`, `workspace`, ou o que mais vier |
+| `description` | Uma frase: o que a nota entrega ou pede. Obrigatória em plano (`-plan.md`), issue e decisão criados a partir de 2026-11-01, e vai ao índice da `master`; nas anteriores, o índice usa o H1. O checador cobra `description-missing` |
 | `priority` | Só em `issues/`: `high` · `medium` · `low`. Opcional e sem default |
 | `opened` | Quando o assunto foi aberto |
 | `decided` / `decided_by` | Data da decisão e quem decidiu — par indivisível |

@@ -30,8 +30,10 @@ está no campo `status` do frontmatter.** A norma de escrita de cada pasta está
 
 **Essas notas não moram na `master`.** Cada _workstream_ — uma frente de trabalho — é uma branch `workstream/<nome>`,
 nascida da `master`, com um worktree em `.worktrees/<nome>`:
-- **Na `master`:** só a norma — este arquivo, o `CLAUDE.md`, o `README.md`, o `plans/README.md`, o `work/README.md`, o
-  `.claude/`, o `scripts/` e o `.gitignore`.
+- **Na `master`:** a norma — este arquivo, o `CLAUDE.md`, o `README.md`, o `plans/README.md`, o `work/README.md`, o
+  `.claude/`, o `scripts/`, o `.gitignore` e o `.gitattributes` — e o índice `.brza/index.jsonl`, a única exceção:
+  uma linha por plano, issue ou decisão criada ou alterada, em qualquer workstream, para que quem coordena veja todas
+  as frentes num arquivo só. Só o `brza note` acrescenta, e ninguém edita.
 - **No workstream:** a norma, que chega pelo `git merge` da `master`, e as notas da frente, com os planos dela, abertos
   e fechados, e a memória dela, em `memory/` e `.claude/agent-memory/`. A branch nunca volta à `master`.
 - **Os de agora:** o `studio`, o app; o `tools-kit`, o `brza`, os scripts e os plugins; o `workspace`, a própria norma.
@@ -53,7 +55,9 @@ de outro workstream.
 - **Nome acompanha o foco:** quando o foco de uma nota ou de um plano muda, o nome do arquivo, o H1 e os links mudam
   junto, com `move_note.py <origem> <destino> --title "<H1 novo>"`.
 
-**Nota se grava na branch do workstream, pelo `brza note commit`**, que recusa a `master` e dá o push no workstream.
+**Nota se grava na branch do workstream, pelo `brza note commit`**, que recusa a `master` e dá o push no workstream;
+quando o frontmatter de um plano, issue ou decisão muda, ele acrescenta a linha do índice na `master`, sem checkout.
+O número do plano novo sai do `brza note plan-open`.
 **Norma se grava na `master`**, com `git add` por caminho e `git pull --rebase` quando outro push corre junto, e chega
 aos workstreams pelo `brza note sync`, que faz o `git merge` da `master` em cada worktree.
 

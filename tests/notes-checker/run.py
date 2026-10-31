@@ -7,6 +7,7 @@ e confere que cada regra acusa o que deve, no nível que deve, e que move_note.p
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,7 @@ def main():
         fails = (check_rules(tmp) + check_template_and_empty_root(tmp) + check_move_note(tmp)
                  + check_move_plan(tmp) + check_plans_at_root(tmp))
         fails += check_plan_rules()
+        fails += check_description()
         fails += check_workstream_links()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -428,6 +430,64 @@ def check_plan_rules():
     expect("backlink-missing nunca é erro", not any(r == "backlink-missing" for r, _, _ in errors))
     expect("sem a data, a linha sem link do Worklogs não é cobrada",
            "worklog-line-without-link" not in rules(errors_without_date, "plans/PLN-922-caso/PLN-922-plan.md"))
+    return fails
+
+
+DESCRIPTION_NOTES = {
+    # plano, issue e decisão novos (de 2026-11-01 em diante): sem o campo, erro; com ele, conforme
+    "work/issues/nova-sem.md": "---\nstatus: open\nopened: 2026-11-01\n---\n\n# Sem\n",
+    "work/issues/nova-com.md": "---\nstatus: open\nopened: 2026-11-01\ndescription: Uma frase.\n---\n\n# Com\n",
+    "work/issues/nova-vazia.md": "---\nstatus: open\nopened: 2026-11-01\ndescription:\n---\n\n# Vazia\n",
+    "work/decisions/nova-sem.md": "---\nstatus: open\nopened: 2026-11-02\ntrigger: \"quando vier\"\n---\n\n# Sem\n",
+    "work/decisions/nova-decidida-sem.md": "---\nstatus: done\ndecided: 2026-11-02\ndecided_by: Anderson\n---\n",
+    "work/decisions/nova-com.md": "---\nstatus: done\ndecided: 2026-11-02\ndecided_by: Anderson\n"
+                                  "description: Decide isto.\n---\n",
+    # a anterior à data entra no índice com o H1 e não é cobrada, nem se fechou depois
+    "work/issues/antiga-sem.md": "---\nstatus: done\nopened: 2026-10-31\ncompleted: 2026-11-03\n---\n\n# Antiga\n",
+    "work/decisions/antiga-sem.md": "---\nstatus: done\ndecided: 2026-10-31\ndecided_by: Anderson\n---\n",
+    # nota sem data não é cobrada; worklog e guia não levam o campo
+    "work/issues/sem-data.md": "---\nstatus: open\n---\n",
+    "work/worklogs/2026-11-02-w.md": "---\nscope:\n  - workspace\n---\n\n# W\n",
+    "wiki/guides/guia-novo.md": "---\ntags: [design]\n---\n\n# Guia\n",
+    # o plano: só o -plan.md é cobrado, e não o -design
+    "plans/PLN-950-novo/PLN-950-plan.md": PLAN.replace("PLN-900: Conforme", "PLN-950: Novo"),
+    "plans/PLN-950-novo/PLN-950-design.md": "# PLN-950 — Desenho\n",
+    "plans/PLN-951-novo/PLN-951-plan.md": PLAN.replace("PLN-900: Conforme", "PLN-951: Novo")
+                                          .replace("---\n", "---\ndescription: O plano novo.\n", 1),
+}
+
+
+def check_description():
+    """O campo description: obrigatório em plano, issue e decisão criados a partir de DESCRIPTION_FROM; a nota de antes
+    ou sem data não é cobrada."""
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    try:
+        notes = dict(DESCRIPTION_NOTES)
+        # o plano de exemplo é de antes da data: leva a data nova para ser cobrado
+        for key in ("plans/PLN-950-novo/PLN-950-plan.md", "plans/PLN-951-novo/PLN-951-plan.md"):
+            assert "opened: 2026-10-" in notes[key], key
+            notes[key] = re.sub(r"opened: 2026-10-\d\d", "opened: 2026-11-01", notes[key], count=1)
+        write_notes(tmp, notes)
+        _, errors, _, _ = cn.check(tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    missing = {w for r, w, _ in errors if r == "description-missing"}
+    fails = 0
+
+    def expect(label, ok, detail=""):
+        nonlocal fails
+        print(("  ok  " if ok else "FALHA ") + label + ("" if ok else f": {detail}"))
+        fails += not ok
+
+    expect("a nota nova sem description é erro; vazia também", missing == {
+        "work/issues/nova-sem.md", "work/issues/nova-vazia.md", "work/decisions/nova-sem.md",
+        "work/decisions/nova-decidida-sem.md", "plans/PLN-950-novo/PLN-950-plan.md"}, sorted(missing))
+    expect("a nota nova com description não tem o erro", not missing & {
+        "work/issues/nova-com.md", "work/decisions/nova-com.md", "plans/PLN-951-novo/PLN-951-plan.md"}, sorted(missing))
+    expect("a nota de antes da data, sem data, o worklog, o guia e o -design não são cobrados", not missing & {
+        "work/issues/antiga-sem.md", "work/decisions/antiga-sem.md", "work/issues/sem-data.md",
+        "work/worklogs/2026-11-02-w.md", "wiki/guides/guia-novo.md", "plans/PLN-950-novo/PLN-950-design.md"},
+           sorted(missing))
     return fails
 
 

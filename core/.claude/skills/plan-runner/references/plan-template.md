@@ -1,8 +1,8 @@
 > **Molde de plano da `plan-runner`.** A norma está no `plans/README.md`, e as propriedades comuns a toda nota, no
 > `work/README.md`.
 >
-> **Como usar:** crie `plans/PLN-NNN-assunto/PLN-NNN-plan.md`, com o número seguinte ao "Último PLN usado" do
-> `plans/README.md`, e suba aquela linha no mesmo commit. **Apague todas as citações `>`:** neste arquivo, citação é
+> **Como usar:** crie `plans/PLN-NNN-assunto/PLN-NNN-plan.md`, com o número que o `brza note plan-open`
+> reservou. **Apague todas as citações `>`:** neste arquivo, citação é
 > sempre instrução. Seção marcada "gatilho" só existe quando o gatilho vale; as outras existem sempre. Seção sem
 > conteúdo é apagada, nunca deixada com "N/A".
 >
@@ -18,6 +18,7 @@
 > | `phase`                                                                     | `interview` · `design` · `execution` · `review` · `blocked` · `closed` · `dropped`       | sempre                            |
 > | `origin`                                                                    | `issue` · `decision` · `plan` · `request`                                                | sempre                            |
 > | `origin_ref`                                                                | o nome da issue ou da decisão sem `.md`; `PLN-NNN` ou `PLN-NNN/A<n>`                     | sempre, menos com `request`       |
+> | `description`                                                               | uma frase, o que o plano entrega; vai ao índice da master                                | sempre                            |
 > | `ready`                                                                     | `sim`, ou `não — o que falta, e o que isso trava`; entre aspas quando o texto tem `: `   | sempre                            |
 > | `estimate_h` · `executed_h` · `remaining_h`                                 | número, ponto decimal, sem unidade                                                       | quando algum passo tem `Estimado` |
 > | `scope` · `opened` · `owner` · `tags` · `blocks` · `deadline` · `completed` | como em toda nota                                                                        | como em toda nota                 |
@@ -47,6 +48,7 @@
 > phase: execution
 > origin: issue
 > origin_ref: nome-da-issue
+> description: uma frase, o que o plano entrega
 > ready: sim
 > estimate_h: 12.5
 > executed_h: 3
