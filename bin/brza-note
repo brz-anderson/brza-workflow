@@ -171,7 +171,7 @@ def session_name() -> str | None:
 
 def manifest() -> dict:
     """O manifesto do workspace, ou {} sem ele."""
-    return runtime.brza_root.read_manifest(runtime.WORKSPACE) or {}
+    return runtime.brza_root.read_manifest(runtime.require_workspace()) or {}
 
 
 def remote_and_branch() -> tuple[str, str]:
@@ -213,7 +213,7 @@ def target_root(workstream: str | None) -> Path:
     found = common_dir(Path.cwd())
     if found:
         top, common = found
-        if common == (runtime.WORKSPACE / '.git').resolve():
+        if common == (runtime.require_workspace() / '.git').resolve():
             branch = branch_of(top)
             if branch and branch.startswith(WORKSTREAM_PREFIX):
                 return top
@@ -385,7 +385,7 @@ def index_note_lines(root: Path, branch: str):
 def index_repo() -> Path:
     """O repositório onde o índice mora: o checkout do workspace, que tem a origin do índice. Uma função só, para a
     raiz que o brza_root achar trocar uma linha."""
-    return runtime.WORKSPACE
+    return runtime.require_workspace()
 
 
 def plumb(*args: str, cwd: Path, env: dict | None = None, input: str | None = None) -> str:
@@ -680,7 +680,7 @@ def ref_exists(ref: str, cwd: Path) -> bool:
 def workstream(name: str) -> int:
     """Cria o workstream `name`: a branch workstream/<nome> e o worktree em <workspace>/.worktrees/<nome>, com
     push -u."""
-    ws, branch = runtime.WORKSPACE, f'{WORKSTREAM_PREFIX}{name}'
+    ws, branch = runtime.require_workspace(), f'{WORKSTREAM_PREFIX}{name}'
     remote, base = remote_and_branch()
     path = ws / '.worktrees' / name
     if path.exists():
@@ -729,7 +729,7 @@ def memory_setup() -> int:
 def workstream_worktrees() -> dict[Path, str]:
     """Os worktrees do workspace numa branch workstream/*, cada caminho com a branch."""
     trees, path = {}, None
-    for line in runtime.git('worktree', 'list', '--porcelain', cwd=runtime.WORKSPACE).splitlines():
+    for line in runtime.git('worktree', 'list', '--porcelain', cwd=runtime.require_workspace()).splitlines():
         if line.startswith('worktree '):
             path = Path(line[len('worktree '):])
         elif line.startswith(f'branch refs/heads/{WORKSTREAM_PREFIX}'):
@@ -757,7 +757,7 @@ def merge_master(path: Path) -> str:
 def sync(do_push: bool) -> int:
     """O git merge <remote>/<branch> da norma em cada worktree de workstream, e o push dos que mudaram; uma linha por
     workstream."""
-    runtime.git('fetch', '-q', remote_and_branch()[0], cwd=runtime.WORKSPACE)
+    runtime.git('fetch', '-q', remote_and_branch()[0], cwd=runtime.require_workspace())
     failed = False
     for path, branch in sorted(workstream_worktrees().items()):
         label = branch.removeprefix(WORKSTREAM_PREFIX)
@@ -823,6 +823,10 @@ def main(argv: list[str] | None = None) -> int:
     if name is not None and not SUBJECT.fullmatch(name):
         ap.error(f'nome de workstream inválido: {name}; use kebab-case')
     try:
+        # todo subcomando escreve: no workspace da BRZA_WORKSPACE, que o cwd de outro repositório não pode tomar (A1)
+        if message := runtime.foreign_cwd():
+            raise Refused(message)
+        runtime.require_workspace()
         if args.command == 'workstream':
             return workstream(args.name)
         if args.command == 'memory-setup':

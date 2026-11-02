@@ -451,6 +451,17 @@ def find(cwd, environ=None, branch=False):
     return Workspace(root, manifest, role, top, branch_of(top) if branch and top and role else None)
 
 
+def foreign_cwd(found):
+    """A recusa quando o cwd de `found` (o resultado do `find`) é de outro repositório git — não o workspace que a
+    BRZA_WORKSPACE aponta nem o código dele —, ou None. Escrever ali levaria a mudança ao workspace da variável, e não
+    ao do cwd (sessão de um workspace que roda o sync num clone). Fora de qualquer repositório git, a variável vale."""
+    if found is None or found.role is not None or found.top is None:
+        return None
+    return ("o diretório atual está em %s, que é de outro repositório git, e a BRZA_WORKSPACE aponta o workspace %s; "
+            "rode de dentro de um deles, ou tire a BRZA_WORKSPACE do ambiente (`env -u BRZA_WORKSPACE`)"
+            % (found.top, found.root))
+
+
 def _entries():
     try:
         return read_registry()

@@ -831,5 +831,68 @@ class NoteWithoutManifestNamesTest(NoteFixture):
         self.assertNotIn('brza-studio', out)
 
 
+class NoteOutsideTheWorkspaceTest(NoteFixture):
+    """O `brza note` de processo: a BRZA_WORKSPACE que o cwd de outro repositório não pode tomar (A1), e o cwd sem
+    workspace nenhum (A5). O manifesto vem do OWNER, para a variável valer."""
+
+    OWNER = 'Beatriz'
+    COMMANDS = (('new', 'issue', 'x', '--workstream', 'studio'),
+                ('commit', 'README.md', '-m', 'x', '--workstream', 'studio'),
+                ('plan-open', 'p', '--title', 'T', '--description', 'd', '--workstream', 'studio'),
+                ('index', '--rebuild'), ('workstream', 'novo'), ('memory-setup',), ('sync', '--no-push'))
+
+    def run_process(self, *argv, cwd: Path, **env) -> tuple[int, str]:
+        base = {k: v for k, v in os.environ.items() if k not in ('BRZA_WORKSPACE', 'BRZA_STUDIO')}
+        done = subprocess.run([sys.executable, str(BIN / 'brza-note'), *argv], cwd=str(cwd), env={**base, **env},
+                              capture_output=True, text=True)
+        return done.returncode, done.stdout + done.stderr
+
+    def other_workspace(self) -> Path:
+        other = self.base / 'ws2'
+        subprocess.run(['git', 'init', '-q', '-b', 'master', str(other)], check=True)
+        (other / '.brza').mkdir()
+        (other / '.brza' / 'workspace.toml').write_text((self.ws / '.brza' / 'workspace.toml').read_text())
+        git('add', '.', cwd=other)
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init', cwd=other)
+        return other
+
+    def state(self, *repos: Path) -> list[str]:
+        return [git('for-each-ref', '--format=%(refname) %(objectname)', cwd=r) + git('worktree', 'list', cwd=r)
+                + (git('status', '--porcelain', cwd=r) if r != self.origin else '') for r in (*repos, self.origin)]
+
+    def test_every_command_refuses_when_the_cwd_is_another_workspace_and_changes_nothing(self):  # A1
+        other = self.other_workspace()
+        before = self.state(self.ws, other)
+        for argv in self.COMMANDS:
+            code, out = self.run_process(*argv, cwd=other, BRZA_WORKSPACE=str(self.ws))
+            self.assertEqual(code, 1, (argv, out))
+            self.assertIn('recusado:', out)
+            self.assertIn(str(other), out)  # o cwd
+            self.assertIn(str(self.ws), out)  # o workspace da variável
+            self.assertEqual(self.state(self.ws, other), before, argv)
+        self.assertFalse((self.tree / 'work' / 'issues' / 'x.md').exists())
+
+    def test_the_variable_still_applies_outside_any_git_repository(self):  # A1
+        code, out = self.run_process('new', 'issue', 'x', '--workstream', 'studio', cwd=self.base,
+                                     BRZA_WORKSPACE=str(self.ws))
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.tree / 'work' / 'issues' / 'x.md').exists())
+
+    def test_the_variable_applies_from_the_workspace_and_from_its_worktree(self):  # A1
+        for cwd in (self.ws, self.tree):
+            code, out = self.run_process('new', 'worklog', f'de-{cwd.name}', '--workstream', 'studio', cwd=cwd,
+                                         BRZA_WORKSPACE=str(self.ws))
+            self.assertEqual(code, 0, out)
+
+    def test_without_a_workspace_every_command_refuses_and_there_is_no_fixed_name(self):  # A5
+        home = self.base / 'home'
+        (home / 'Projects' / 'brza-workspace').mkdir(parents=True)  # o legado do X10 não o toma mais
+        for argv in self.COMMANDS:
+            code, out = self.run_process(*argv, cwd=self.base, HOME=str(home))
+            self.assertEqual(code, 1, (argv, out))
+            self.assertIn('recusado: nenhum workspace achado a partir de', out)
+        self.assertEqual(list((home / 'Projects' / 'brza-workspace').iterdir()), [])
+
+
 if __name__ == '__main__':
     unittest.main()

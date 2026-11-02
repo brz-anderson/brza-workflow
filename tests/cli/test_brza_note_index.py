@@ -112,6 +112,7 @@ class IndexTest(IndexFixture):
         self.assertEqual([x['id'] for x in self.origin_index()], ['PLN-001', 'PLN-002'])
 
     def test_two_plan_opens_running_at_the_same_time_get_different_numbers(self):
+        self.write_manifest()  # a BRZA_WORKSPACE só vale com manifesto (A5: sem o legado de nome fixo)
         env = {**os.environ, 'BRZA_WORKSPACE': str(self.ws), 'BRZA_STUDIO': str(self.studio)}
         procs = [subprocess.Popen([sys.executable, str(BIN / 'brza-note'), 'plan-open', f'plano-{n}', '--title', f'P{n}',
                                    '--description', 'x', '--workstream', 'studio'], env=env, cwd=self.base,

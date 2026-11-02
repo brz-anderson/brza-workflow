@@ -149,6 +149,16 @@ class DoctorTest(unittest.TestCase):
         for check in ('identidade', 'medição', 'links', 'registro', 'chat', 'pnpm', 'perfil', 'app'):
             self.assertTrue(self.line(out, check).startswith('ok'), out)
 
+    def test_sem_workspace_o_que_precisa_dele_e_erro_e_o_resto_segue(self):  # A5: sem o legado de nome fixo
+        with patch.object(runtime, 'WORKSPACE', None):
+            code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        for check in ('identidade', 'medição', 'registro'):
+            line = self.line(out, check)
+            self.assertTrue(line.startswith('ERRO'), out)
+            self.assertIn('nenhum workspace achado', line)
+        self.assertTrue(self.line(out, 'links').startswith('ok'), out)
+
     def test_identidade_certa_vem_do_author_do_manifesto(self):
         code, out = self.run_doctor()
         self.assertEqual(code, 0, out)

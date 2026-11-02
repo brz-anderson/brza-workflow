@@ -25,6 +25,8 @@ WHY = {
     "tests-moved": "os testes dos hooks moram em `tests/hooks/` do brza-workflow, e não mais no workspace",
     "app-client": "o texto do app e desta máquina (o scratch do chat, os artboards) vai ao `rules/brza-client.md` do "
                   "pacote `client` (A8 do P9)",
+    "norma-comum": "a norma comum se edita no `core/` do brza-workflow e chega pelo `brza sync`, e só a local se grava na "
+                   "branch da norma (A3 do P9)",
     "exemplo": "o exemplo de workstream do glossário deixa de ser o do brza-workspace",
 }
 
@@ -38,6 +40,24 @@ DIFFERENCES = [
     # --- .claude/skills
     Difference(".claude/skills/agent-instructions-writer/SKILL.md", "local",
                """ (`~/Projects/brza-workspace`)""", ""),
+    Difference(".claude/skills/agent-instructions-writer/SKILL.md", "norma-comum",
+               """- **A norma mora na `master`.** Leia e edite no checkout da raiz, não no worktree do
+  workstream, que só recebe a norma pelo merge.
+""",
+               """- **O arquivo diz onde se edita.** O que o `.brza/core.lock` segue — a norma comum — se edita no `core/` do `brza-workflow` e
+  chega pelo `brza sync`. O que é só deste workspace, a `.claude/rules/workspace.md` e o `README.md` local, mora na
+  `master`: leia e edite no checkout da raiz, não no worktree do workstream, que só recebe a norma pelo merge.
+"""),
+    Difference(".claude/skills/agent-instructions-writer/SKILL.md", "norma-comum",
+               """1. Grave na `master`, com `git add` por caminho — nunca `git add -A`, porque o checkout da raiz pode ter arquivo de outra
+   sessão — e `git pull --rebase` antes do push.
+2. Leve aos workstreams com `brza note sync`.
+""",
+               """1. Grave onde o arquivo mora. A norma comum, no `core/` do `brza-workflow`, e depois o `brza sync` neste workspace. A norma
+   só deste workspace, na `master`, com `git add` por caminho — nunca `git add -A`, porque o checkout da raiz
+   pode ter arquivo de outra sessão — e `git pull --rebase` antes do push.
+2. Leve aos workstreams com `brza note sync`, que o `brza sync` já roda ao fim.
+"""),
     Difference(".claude/skills/notes-checker/SKILL.md", "fixfy",
                """ Adaptada do `notes-checker` do workspace da Fixfy, sem
 o que é só de lá.""", ""),
@@ -133,6 +153,16 @@ ambiente da sessão"""),
   `workspace`.""",
                """- **Para todos os workstreams:** na configuração de projeto. A lista está em `.claude/rules/workspace.md`.
 - **Para um workstream só:** na configuração local do worktree dele, fora do git. A lista também está lá."""),
+    Difference("AGENTS.md", "norma-comum",
+               """**Norma se grava na `master`**, com `git add` por caminho e `git pull --rebase` quando outro push corre junto, e chega
+aos workstreams pelo `brza note sync`, que faz o `git merge` da `master` em cada worktree.
+""",
+               """**A norma se grava onde o arquivo mora.** O que o `.brza/core.lock` segue — a norma comum — se edita no `core/` do
+`brza-workflow` e chega a este workspace pelo `brza sync`; editá-lo aqui trava o sync seguinte. O que é só deste workspace
+vai à `.claude/rules/workspace.md` ou ao `README.md` local, que se editam na `master`, com `git add` por caminho e
+`git pull --rebase` quando outro push corre junto. Dali, a norma chega aos workstreams pelo `brza note sync`, que faz o
+`git merge` da `master` em cada worktree.
+"""),
     Difference("AGENTS.md", "exemplo",
                """como o `studio` ou o `tools-kit`, com""", """como o `app` ou o `ferramental`, com"""),
 

@@ -121,6 +121,19 @@ class GoldenRenderTest(unittest.TestCase):
         self.assertIn("(`bia-souza/casa-app`)", out)
         self.assertIn("do `casa-app`, na `trunk`.", out)  # a branch do código, e não a do workspace
 
+    def test_the_norm_says_the_common_norm_is_edited_in_the_flow_core_and_arrives_by_the_sync(self):  # A3 do P9
+        for path in ("AGENTS.md", ".claude/skills/agent-instructions-writer/SKILL.md"):
+            with self.subTest(path=path):
+                text = " ".join(read(CORE, path).split())
+                self.assertIn("`.brza/core.lock`", text)
+                self.assertIn("no `core/` do `brza-workflow`", text)
+                self.assertIn("`brza sync`", text)
+                self.assertIn("`.claude/rules/workspace.md`", text)
+                self.assertIn("`README.md` local", text)
+                self.assertIn("{{workspace.branch}}", text)
+        self.assertNotIn("Norma se grava na `{{workspace.branch}}`", read(CORE, "AGENTS.md"))
+        self.assertNotIn("A norma mora na `{{workspace.branch}}`", read(CORE, ".claude/skills/agent-instructions-writer/SKILL.md"))
+
     def test_the_claude_md_starts_by_importing_the_agents_md(self):
         for text in (read(CORE, "CLAUDE.md"),
                      brza_root.render(read(CORE, "CLAUDE.md"), BRZA_WORKSPACE, "CLAUDE.md")):

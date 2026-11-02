@@ -58,8 +58,11 @@ de outro workstream.
 **Nota se grava na branch do workstream, pelo `brza note commit`**, que recusa a `{{workspace.branch}}` e dá o push no workstream;
 quando o frontmatter de um plano, issue ou decisão muda, ele acrescenta a linha do índice na `{{workspace.branch}}`, sem checkout.
 O número do plano novo sai do `brza note plan-open`.
-**Norma se grava na `{{workspace.branch}}`**, com `git add` por caminho e `git pull --rebase` quando outro push corre junto, e chega
-aos workstreams pelo `brza note sync`, que faz o `git merge` da `{{workspace.branch}}` em cada worktree.
+**A norma se grava onde o arquivo mora.** O que o `.brza/core.lock` segue — a norma comum — se edita no `core/` do
+`brza-workflow` e chega a este workspace pelo `brza sync`; editá-lo aqui trava o sync seguinte. O que é só deste workspace
+vai à `.claude/rules/workspace.md` ou ao `README.md` local, que se editam na `{{workspace.branch}}`, com `git add` por caminho e
+`git pull --rebase` quando outro push corre junto. Dali, a norma chega aos workstreams pelo `brza note sync`, que faz o
+`git merge` da `{{workspace.branch}}` em cada worktree.
 
 ## Quem commita é o {{author.login}}
 

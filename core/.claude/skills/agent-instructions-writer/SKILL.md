@@ -38,8 +38,9 @@ pasta** → **sob demanda** (skill, `README.md`). Cada coisa fica no nível mais
   não aponte.
 - **O que o arquivo diz hoje**, e as seções vizinhas: a regra nova costuma reescrever uma que já existe, e não ganhar
   seção própria. Procure os termos dela em todos os arquivos da tabela antes de escrever.
-- **A norma mora na `{{workspace.branch}}`.** Leia e edite no checkout da raiz, não no worktree do
-  workstream, que só recebe a norma pelo merge.
+- **O arquivo diz onde se edita.** O que o `.brza/core.lock` segue — a norma comum — se edita no `core/` do `brza-workflow` e
+  chega pelo `brza sync`. O que é só deste workspace, a `.claude/rules/workspace.md` e o `README.md` local, mora na
+  `{{workspace.branch}}`: leia e edite no checkout da raiz, não no worktree do workstream, que só recebe a norma pelo merge.
 
 ## Escrever
 
@@ -55,9 +56,10 @@ pasta** → **sob demanda** (skill, `README.md`). Cada coisa fica no nível mais
 
 ## Gravar
 
-1. Grave na `{{workspace.branch}}`, com `git add` por caminho — nunca `git add -A`, porque o checkout da raiz pode ter arquivo de outra
-   sessão — e `git pull --rebase` antes do push.
-2. Leve aos workstreams com `brza note sync`.
+1. Grave onde o arquivo mora. A norma comum, no `core/` do `brza-workflow`, e depois o `brza sync` neste workspace. A norma
+   só deste workspace, na `{{workspace.branch}}`, com `git add` por caminho — nunca `git add -A`, porque o checkout da raiz
+   pode ter arquivo de outra sessão — e `git pull --rebase` antes do push.
+2. Leve aos workstreams com `brza note sync`, que o `brza sync` já roda ao fim.
 3. Mostre cada arquivo na resposta, na forma do `AGENTS.md` ("Arquivo gravado na norma… aparece na resposta").
 4. Quando a regra veio de uma memória de workstream, a memória sai (ou fica só com o que é da frente), e o índice
    `memory/MEMORY.md` acompanha, pelo `brza note commit` no workstream.

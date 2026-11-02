@@ -27,23 +27,29 @@ DEFAULT_USER_DATA = Path.home() / 'Library' / 'Application Support' / 'brza-stud
 LOCAL_BIN = Path.home() / '.local' / 'bin'
 
 
-def discover(cwd: Path | None = None) -> tuple[Path, Path, dict]:
+def discover(cwd: Path | None = None) -> tuple[Path | None, Path, dict]:
     """(a raiz do workspace, o checkout do código, o manifesto) do cwd, pelo `brza_root.find`: o manifesto no common dir,
     ou o registro da máquina para o código, e a BRZA_WORKSPACE como override. O código vem da BRZA_STUDIO, do registro
     ou do `[code].path` do manifesto.
 
-    Sem workspace achado, vale o legado — a BRZA_WORKSPACE sem manifesto, ou ~/Projects/brza-workspace —, que existe
-    para o brza-workspace de hoje, ainda sem manifesto, até o P8 do PLN-006 dar um a ele; e o manifesto é {}."""
+    Sem workspace achado, a raiz é None e o manifesto {}: o comando que precisa dela recusa, pelo `require_workspace()`.
+    Não há workspace de nome fixo (o legado do X10 saiu)."""
     found = brza_root.find(cwd or Path.cwd())
-    legacy = Path(os.environ.get('BRZA_WORKSPACE') or Path.home() / 'Projects' / 'brza-workspace')
-    root = found.root if found else legacy
+    root = found.root if found else None
     manifest = found.manifest if found else {}
-    code = (os.environ.get('BRZA_STUDIO') or brza_root.code_path(root, manifest)
+    code = (os.environ.get('BRZA_STUDIO') or (brza_root.code_path(root, manifest) if root else None)
             or Path.home() / 'Projects' / 'brza-studio')
-    return Path(root), Path(code), manifest
+    return (Path(root) if root else None), Path(code), manifest
+
+
+def foreign_cwd(cwd: Path | None = None) -> str | None:
+    """A mensagem de recusa quando o cwd é de outro repositório git que não é o workspace da BRZA_WORKSPACE nem o código
+    dele (`brza_root.foreign_cwd`), ou None. Os comandos que escrevem a conferem antes."""
+    return brza_root.foreign_cwd(brza_root.find(cwd or Path.cwd()))
 
 
 # A raiz do workspace e o código dele, como os scripts leem; o cwd de quando o processo sobe decide, e os testes trocam.
+# A WORKSPACE é None fora de um workspace: leia pelo `require_workspace()` onde o comando precisa dela.
 WORKSPACE, STUDIO, _MANIFEST = discover()
 
 
@@ -172,9 +178,23 @@ class Refused(Exception):
     """O pedido não se cumpre, e a mensagem diz por quê; o brza-note a imprime como `recusado:` e sai com 1."""
 
 
+class NoWorkspace(Refused, BrzaError):
+    """O comando precisa de um workspace, e o cwd não está em nenhum (nem a BRZA_WORKSPACE aponta um)."""
+
+
+def require_workspace() -> Path:
+    """A raiz do workspace do cwd, ou NoWorkspace — que é Refused e BrzaError — com a mensagem que diz o que fazer. Lê o
+    global na hora da chamada, para o teste trocá-lo."""
+    if WORKSPACE is None:
+        raise NoWorkspace(f'nenhum workspace achado a partir de {Path.cwd()} (sem .brza/workspace.toml no repositório, '
+                          'sem entrada no registro da máquina e sem BRZA_WORKSPACE que aponte um); rode dentro de um '
+                          'workspace, ou crie um com `brza init`')
+    return WORKSPACE
+
+
 def workstream_root(name: str) -> Path:
     """O worktree do workstream `name` em <workspace>/.worktrees; sem ele, recusa e diz o comando que o cria."""
-    root = WORKSPACE / '.worktrees' / name
+    root = require_workspace() / '.worktrees' / name
     if not (root / '.git').exists():
         raise Refused(f'o workstream {name} não tem worktree em {root}; crie com `brza note workstream {name}`')
     return root
@@ -186,8 +206,8 @@ def workstreams_with_plan(number: str, refs: str) -> list[str]:
     prefix = f'plans/PLN-{number}-'
     base = f'{refs}/'
     found = []
-    for ref in git('for-each-ref', '--format=%(refname)', base, cwd=WORKSPACE).split():
-        names = git('ls-tree', '--name-only', '-z', ref, 'plans/', cwd=WORKSPACE).split('\0')
+    for ref in git('for-each-ref', '--format=%(refname)', base, cwd=require_workspace()).split():
+        names = git('ls-tree', '--name-only', '-z', ref, 'plans/', cwd=require_workspace()).split('\0')
         if any(n.startswith(prefix) for n in names):
             found.append(ref.removeprefix(base))
     return sorted(found)
@@ -196,7 +216,7 @@ def workstreams_with_plan(number: str, refs: str) -> list[str]:
 def workstream_of_plan(number: str) -> str:
     """O workstream que tem o plano PLN-<number>: as branches locais primeiro e, sem achar nenhuma, as do remote do
     manifesto (`origin` sem ele). Nenhum ou mais de um recusa e pede o --workstream."""
-    remote = brza_root.workspace_remote(brza_root.read_manifest(WORKSPACE) or {})
+    remote = brza_root.workspace_remote(brza_root.read_manifest(require_workspace()) or {})
     for refs in ('refs/heads/workstream', f'refs/remotes/{remote}/workstream'):
         found = workstreams_with_plan(number, refs)
         if len(found) == 1:
@@ -301,7 +321,7 @@ def agents_json(workspace: Path | None = None) -> str | None:
     """O JSON do `claude --agents` com os subagentes de <workspace>/.claude/agents/*.md, na ordem dos nomes:
     {nome: {description, prompt, model, tools?, memory?, effort?, …}}. O nome é o `name` do frontmatter ou o do arquivo;
     o prompt é o corpo. Arquivo sem frontmatter fica de fora. Sem o diretório, ou sem agente, devolve None."""
-    folder = Path(workspace or WORKSPACE) / '.claude' / 'agents'
+    folder = Path(workspace or require_workspace()) / '.claude' / 'agents'
     if not folder.is_dir():
         return None
     agents = {}

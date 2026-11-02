@@ -21,6 +21,20 @@ SESSIONS = runpy.run_path(str(Path(__file__).resolve().parent.parent.parent / 'p
 GLOBALS = SESSIONS['main'].__globals__
 
 
+def fake_workspace(case: unittest.TestCase):
+    """Põe nos globais do script um workspace de mentira, com manifesto, e devolve a raiz dele: sem o legado de nome fixo
+    (A5 do P9), o `WORKSPACE` do processo de teste é None, que não tem o que ler."""
+    temp = tempfile.TemporaryDirectory()
+    case.addCleanup(temp.cleanup)
+    root = Path(temp.name).resolve() / 'ws'
+    (root / '.brza').mkdir(parents=True)
+    (root / '.brza' / 'workspace.toml').write_text('schema = 1\n[workspace]\nname = "ws"\n')
+    patcher = patch.dict(GLOBALS, {'WORKSPACE': root})
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    return root
+
+
 class RunningTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -45,13 +59,16 @@ class RunningTest(unittest.TestCase):
 
 
 class ChatBlockerTest(unittest.TestCase):
+    def setUp(self):
+        self.workspace = fake_workspace(self)
+
     def blocker(self, checkout: Path, override):
         settings = {'settings': {'agentCmdOverrides': {'claude': override} if override else {}}}
         with patch.dict(GLOBALS, {'rpc': lambda method, params=None: settings}):
             return SESSIONS['chat_blocker'](checkout)
 
     def test_the_workspace_reads_its_own_settings(self):
-        workspace = GLOBALS['WORKSPACE']
+        workspace = self.workspace
         self.assertIsNone(self.blocker(workspace, None))
         self.assertIsNone(self.blocker(workspace / 'plans', None))
 
@@ -120,6 +137,7 @@ class CommandTest(unittest.TestCase):
     """O list, o send e o close sobre um app falso e transcripts num config temporário."""
 
     def setUp(self):
+        self.workspace = fake_workspace(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.config = Path(temp.name)
@@ -308,7 +326,17 @@ class CommandTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         code, out = self.run_in(Path(temp.name), 'fora', '--checkout', '.worktrees/tools-kit', '--dry-run')
         self.assertEqual(code, 0)
-        self.assertIn(f'(chat, {(GLOBALS["WORKSPACE"] / ".worktrees" / "tools-kit").resolve()})', out)
+        self.assertIn(f'(chat, {(self.workspace / ".worktrees" / "tools-kit").resolve()})', out)
+
+    def test_open_without_any_workspace_refuses_and_launches_nothing(self):  # A5: sem o legado de nome fixo
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with patch.dict(GLOBALS, {'WORKSPACE': None, 'SESSION_MAP': None}), \
+                patch.object(sys.modules['brza_runtime'], 'WORKSPACE', None):
+            code, out = self.run_in(Path(temp.name), 'sem-ws', '--dry-run')
+        self.assertEqual(code, 1)
+        self.assertIn('recusado: nenhum workspace achado', out)
+        self.assertEqual(self.launches, [])
 
     def test_an_absolute_checkout_stays_as_given(self):
         root = self.workspace_clone()
@@ -329,7 +357,7 @@ class CommandTest(unittest.TestCase):
         (event,) = self.read_map()
         self.assertEqual({k: v for k, v in event.items() if k != 'at'},
                          {'event': 'open', 'name': 'pln-009', 'title': 'PLN-002 P9: prova', 'chat': 'claude_n',
-                          'checkout': str(GLOBALS['WORKSPACE']), 'renamed': False})
+                          'checkout': str(self.workspace), 'renamed': False})
         self.assertRegex(event['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$')
 
     def test_open_without_title_titles_the_tab_with_the_name(self):

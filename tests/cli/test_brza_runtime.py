@@ -176,6 +176,72 @@ class StudioTest(unittest.TestCase):
                                               or Path.home() / 'Projects' / 'brza-studio'))
 
 
+class DiscoverTest(unittest.TestCase):
+    """O workspace do cwd, sem legado de nome fixo (A5), e a BRZA_WORKSPACE que o cwd de outro repositório não toma (A1)."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name).resolve()
+        self.home = self.base / 'home'
+        legacy = self.home / 'Projects' / 'brza-workspace'  # onde o legado do X10 cairia
+        legacy.mkdir(parents=True)
+        env = {'HOME': str(self.home), 'BRZA_REGISTRY': str(self.base / 'nenhum.toml')}
+        p = patch.dict(os.environ, env)
+        p.start()
+        self.addCleanup(p.stop)
+        for name in ('BRZA_WORKSPACE', 'BRZA_STUDIO'):
+            os.environ.pop(name, None)
+        self.ws = self.workspace('ws')
+
+    def workspace(self, name: str) -> Path:
+        root = self.base / name
+        root.mkdir()
+        subprocess.run(['git', 'init', '-q', '-b', 'master', str(root)], check=True)
+        (root / '.brza').mkdir()
+        (root / '.brza' / 'workspace.toml').write_text('schema = 1\n[workspace]\nname = "x"\n')
+        git('add', '.', cwd=root)
+        git('commit', '-q', '-m', 'um', cwd=root)
+        return root
+
+    def test_without_a_workspace_the_root_is_none_and_the_fixed_name_is_not_taken(self):  # A5
+        plain = self.base / 'plain'
+        plain.mkdir()
+        root, _, manifest = runtime.discover(plain)
+        self.assertIsNone(root)
+        self.assertEqual(manifest, {})
+        os.environ['BRZA_WORKSPACE'] = str(self.home / 'Projects' / 'brza-workspace')  # sem manifesto
+        self.assertIsNone(runtime.discover(plain)[0])
+
+    def test_the_workspace_of_the_cwd_is_found_by_its_manifest(self):
+        root, _, manifest = runtime.discover(self.ws)
+        self.assertEqual(root, self.ws)
+        self.assertEqual(manifest['workspace']['name'], 'x')
+
+    def test_require_workspace_refuses_with_a_clear_message_that_is_refused_and_brza_error(self):  # A5
+        with patch.object(runtime, 'WORKSPACE', None):
+            with self.assertRaisesRegex(runtime.NoWorkspace, 'nenhum workspace achado'):
+                runtime.require_workspace()
+            self.assertTrue(issubclass(runtime.NoWorkspace, (runtime.Refused, runtime.BrzaError)))
+            with self.assertRaises(runtime.NoWorkspace):
+                runtime.workstream_root('x')
+            with self.assertRaises(runtime.NoWorkspace):
+                runtime.agents_json()
+        with patch.object(runtime, 'WORKSPACE', self.ws):
+            self.assertEqual(runtime.require_workspace(), self.ws)
+
+    def test_foreign_cwd_names_both_paths_when_the_cwd_is_another_repository(self):  # A1
+        other = self.workspace('ws2')
+        os.environ['BRZA_WORKSPACE'] = str(self.ws)
+        message = runtime.foreign_cwd(other)
+        self.assertIn(str(other), message)
+        self.assertIn(str(self.ws), message)
+        for cwd in (self.ws, self.base, self.home):  # o workspace, e fora de qualquer repositório
+            self.assertIsNone(runtime.foreign_cwd(cwd), cwd)
+        del os.environ['BRZA_WORKSPACE']
+        self.assertIsNone(runtime.foreign_cwd(other))  # sem a variável, o cwd é o workspace
+
+
 class WorktreeTest(unittest.TestCase):
     """Um brza-studio de mentira: um clone de uma origin local, na master."""
 

@@ -187,6 +187,49 @@ class SyncTest(unittest.TestCase):
         self.assertIsNone(result.committed)
         self.assertEqual(git('rev-parse', 'HEAD', cwd=self.ws), head)
 
+    # o commit de origem sem arquivo do núcleo (A4)
+
+    def flow_changes_outside_the_core(self):
+        """O primeiro sync, e depois um commit do brza-workflow que só mexe fora do core/ e dos pacotes."""
+        self.sync()
+        self.head, self.locked = git('rev-parse', 'HEAD', cwd=self.ws), self.lock()['commit']
+        return self.flow_commit({'README.md': 'só o README do brza-workflow\n'}, 'doc: README')
+
+    def test_a_flow_commit_outside_the_core_does_not_rewrite_the_lock_or_commit(self):
+        new = self.flow_changes_outside_the_core()
+        self.assertNotEqual(new, self.locked)
+        result, out = self.sync()
+        self.assertEqual(result.code, 0, out)
+        self.assertIn('em dia', out)
+        self.assertIn('o lock segue em brza-workflow@%s' % self.locked[:7], out)
+        self.assertIsNone(result.committed)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=self.ws), self.head)
+        self.assertEqual(self.lock()['commit'], self.locked)
+        self.assertEqual(git('status', '--porcelain', cwd=self.ws), '')
+
+    def test_dry_run_says_nothing_to_write_and_why_the_lock_stays_when_only_the_origin_commit_moved(self):
+        self.flow_changes_outside_the_core()
+        before = self.snapshot()
+        result, out = self.sync(dry_run=True)
+        self.assertEqual(result.code, 0, out)
+        self.assertNotIn('escreveria', out)
+        self.assertNotIn('apagaria', out)
+        self.assertIn('o lock segue em brza-workflow@%s' % self.locked[:7], out)
+        self.assertIn('dry-run: nada foi escrito', out)
+        self.assertEqual(result.written, [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_dry_run_and_real_agree_when_the_core_did_change(self):
+        self.flow_changes_outside_the_core()
+        self.flow_commit({'core/AGENTS.md': '# {{workspace.name}}\n\nOutra regra.\n'}, 'muda a norma')
+        _, dry = self.sync(dry_run=True)
+        self.assertIn('escreveria: AGENTS.md', dry)
+        self.assertNotIn('o lock segue', dry)
+        result, out = self.sync()
+        self.assertEqual(sorted(self.head_files()), ['.brza/core.lock', 'AGENTS.md'])
+        self.assertEqual(self.lock()['commit'], git('rev-parse', 'HEAD', cwd=self.flow))
+        self.assertNotIn('o lock segue', out)
+
     def test_the_commit_only_carries_the_synced_paths_even_with_another_file_staged(self):
         write(self.ws, {'work/nota.md': 'x\n'})
         git('add', 'work/nota.md', cwd=self.ws)
@@ -609,6 +652,58 @@ class SyncCommandTest(unittest.TestCase):
         code, out = self.run_sync('--core-only', cwd=self.base)
         self.assertEqual(code, 1)
         self.assertIn('nenhum workspace', out)
+
+    def other_workspace(self) -> Path:
+        """Um segundo workspace de mentira, que não é o da BRZA_WORKSPACE."""
+        other = self.base / 'ws2'
+        subprocess.run(['git', 'init', '-q', '-b', 'master', str(other)], check=True)
+        write(other, {**LOCAL, brza_root.MANIFEST: brza_root.dump_manifest(MANIFEST)})
+        git('add', '.', cwd=other)
+        git('commit', '-q', '-m', 'init', cwd=other)
+        return other
+
+    def test_the_command_refuses_when_the_variable_points_to_another_workspace_than_the_cwd(self):  # A1
+        other = self.other_workspace()
+        heads = {p: git('rev-parse', 'HEAD', cwd=p) for p in (self.ws, other)}
+        before = {p: git('status', '--porcelain', cwd=p) for p in (self.ws, other)}
+        self.env['BRZA_WORKSPACE'] = str(self.ws)
+        for argv in (('--core-only', '--no-push'), ('--dry-run',), ()):
+            code, out = self.run_sync(*argv, cwd=other)
+            self.assertEqual(code, 1, out)
+            self.assertIn('recusado:', out)
+            self.assertIn(str(other), out)  # o cwd
+            self.assertIn(str(self.ws), out)  # o workspace da variável
+        for p in (self.ws, other):
+            self.assertEqual(git('rev-parse', 'HEAD', cwd=p), heads[p])
+            self.assertEqual(git('status', '--porcelain', cwd=p), before[p])
+            self.assertFalse((p / 'AGENTS.md').exists())
+            self.assertFalse((p / brza_root.LOCK).exists())
+
+    def test_the_variable_still_applies_outside_any_git_repository(self):  # A1
+        self.env['BRZA_WORKSPACE'] = str(self.ws)
+        code, out = self.run_sync('--core-only', '--no-push', cwd=self.base)
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.ws / 'AGENTS.md').exists())
+
+    def test_the_variable_applies_from_the_workspace_itself(self):  # A1
+        self.env['BRZA_WORKSPACE'] = str(self.ws)
+        code, out = self.run_sync('--core-only', '--no-push', cwd=self.ws)
+        self.assertEqual(code, 0, out)
+
+    def test_the_command_does_not_commit_when_the_flow_moved_outside_the_core(self):  # A4
+        self.assertEqual(self.run_sync('--core-only')[0], 0)
+        head = git('rev-parse', 'HEAD', cwd=self.ws)
+        write(self.flow, {'README.md': 'só o README\n'})
+        git('add', '-A', cwd=self.flow)
+        git('commit', '-q', '-m', 'doc', cwd=self.flow)
+        code, out = self.run_sync('--dry-run')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('escreveria', out)
+        self.assertIn('o lock segue em', out)
+        code, out = self.run_sync('--core-only')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('commit:', out)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=self.ws), head)
 
     def test_the_command_refuses_a_broken_lock_with_exit_1(self):
         write(self.ws, {brza_root.LOCK: 'lixo [\n'})

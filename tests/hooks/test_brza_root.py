@@ -296,6 +296,24 @@ class FindTest(RootCase):
         found = self.root.find(str(self.base), environ=environ)
         self.assertEqual((found.root, found.role), (self.notes, None))
 
+    def test_foreign_cwd_refuses_the_cwd_in_another_git_repo_and_names_both_paths(self):  # A1
+        environ = {"BRZA_WORKSPACE": str(self.notes)}
+        other = make_repo(self.base / "other-notes", "main", {".brza/workspace.toml": 'schema = 1\n[workspace]\nname = "o"\n'})
+        message = self.root.foreign_cwd(self.root.find(str(other / ".brza"), environ=environ))
+        self.assertIn(str(other), message)
+        self.assertIn(str(self.notes), message)
+        self.assertIn("BRZA_WORKSPACE", message)
+        unrelated = make_repo(self.base / "fixfy", "master")
+        self.assertIn(str(unrelated), self.root.foreign_cwd(self.root.find(str(unrelated), environ=environ)))
+
+    def test_foreign_cwd_lets_the_workspace_its_worktrees_the_code_and_the_outside_through(self):  # A1
+        environ = {"BRZA_WORKSPACE": str(self.notes)}
+        for cwd in (self.notes, self.tree, self.code, self.far, self.base):  # o `base` não é repositório git
+            with self.subTest(cwd=cwd):
+                self.assertIsNone(self.root.foreign_cwd(self.root.find(str(cwd), environ=environ)))
+        self.assertIsNone(self.root.foreign_cwd(None))
+        self.assertIsNone(self.root.foreign_cwd(self.root.find(str(self.tree))))  # sem a variável
+
     def test_the_override_wins_over_the_cwd(self):
         other = make_repo(self.base / "other-notes", "main", {".brza/workspace.toml": 'schema = 1\n[workspace]\nname = "o"\n'})
         found = self.root.find(str(self.tree), environ={"BRZA_WORKSPACE": str(other)})

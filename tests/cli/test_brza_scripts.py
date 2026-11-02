@@ -223,6 +223,12 @@ class AgentsCliTest(unittest.TestCase):
             code, out = self.run_cli()
         self.assertEqual((code, list(json.loads(out))), (0, ['a']))
 
+    def test_without_a_workspace_it_refuses_with_exit_1_and_a_clear_message(self):  # A5
+        with patch.object(runtime, 'WORKSPACE', None):
+            code, out = self.run_cli()  # o stderr vai junto
+        self.assertEqual(code, 1)
+        self.assertIn('recusado: nenhum workspace achado', out)
+
     def test_the_installer_picks_it_up_as_a_command(self):
         self.assertTrue((BIN / 'brza-agents').stat().st_mode & 0o111)
         self.assertIn('brza-agents', INSTALL['commands'](BIN))

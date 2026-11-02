@@ -366,13 +366,20 @@ def sync_core(root, flow=None, ref=None, force=(), dry_run=False, with_git=True,
     lock_files = load_lock(root)
     plan = plan_sync(root, flow, commit, manifest, lock_files, force)
     old = brza_root.read_lock(root)
-    lock_changed = (old is None or old['commit'] != commit or old['ref'] != ref
-                    or old['files'] != plan.files)
+    # O lock só muda quando um arquivo do núcleo muda (A4): um commit do brza-workflow fora do core/ não gera commit de
+    # norma no workspace, nem merge nos worktrees. O lock da primeira vez (old None) sempre se grava.
+    lock_changed = (old is None or old['files'] != plan.files or bool(plan.write) or bool(plan.remove)
+                    or plan.hooks_text is not None)
+    commit_only = not lock_changed and old['commit'] != commit
+    lock_note = ('o lock segue em brza-workflow@%s: o núcleo não mudou nesse commit, e o sync não regrava só o '
+                 'commit de origem' % old['commit'][:7]) if commit_only else None
     report(plan, dry_run, out, root)
     touched = [] if dry_run else apply(root, plan)
     code = 1 if plan.refused or plan.hooks_diff else 0
     refused = sorted(plan.refused) + ([HOOKS_KEY] if plan.hooks_diff else [])
     if dry_run:
+        if lock_note:
+            out('lock:     ' + lock_note)
         out('dry-run: nada foi escrito; brza-workflow@%s' % short)
         return Result(code, commit, sorted(plan.write) + ([SETTINGS] if plan.hooks_text is not None else []),
                       plan.remove, refused, plan.kept, None)
@@ -384,7 +391,7 @@ def sync_core(root, flow=None, ref=None, force=(), dry_run=False, with_git=True,
     written = sorted(plan.write) + ([SETTINGS] if plan.hooks_text is not None else [])
     committed = None
     if not touched:
-        out('em dia: brza-workflow@%s' % short)
+        out('em dia: brza-workflow@%s%s' % (short, ' (' + lock_note + ')' if lock_note else ''))
     elif with_git:
         committed = commit_and_push(root, manifest, touched, plan.remove, short, push, out)
     else:
@@ -462,6 +469,9 @@ def main(argv=None) -> int:
     found = brza_root.find(str(Path.cwd()))
     if not found:
         print('recusado: nenhum workspace achado a partir de %s (sem .brza/workspace.toml)' % Path.cwd())
+        return 1
+    if message := brza_root.foreign_cwd(found):
+        print('recusado: %s' % message)
         return 1
     try:
         result = sync_core(found.root, ref=args.ref, force=args.force, dry_run=args.dry_run, push=not args.no_push)

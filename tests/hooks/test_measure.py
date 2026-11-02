@@ -55,6 +55,15 @@ class HookTest(unittest.TestCase):
                 self.measure.main()
 
 
+class DocstringTest(HookTest):
+    def test_the_docstring_names_the_guard_that_writes_the_guard_line_and_not_the_one_that_left(self):  # A8
+        doc = self.measure.__doc__
+        self.assertIn("`compact_guard.py` grava no mesmo log a linha `guard`", doc)
+        self.assertNotIn("resume_guard", doc)
+        self.assertTrue(os.path.isfile(os.path.join(HOOKS, "compact_guard.py")))
+        self.assertFalse(os.path.exists(os.path.join(HOOKS, "resume_guard.py")))
+
+
 class PriceTest(HookTest):
     def test_claude_price_by_id_and_not_by_family(self):
         self.assertEqual(self.measure.price_of("claude-haiku-4-5-20251001")["input"], 1.0)

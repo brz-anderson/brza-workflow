@@ -25,7 +25,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--workspace', type=Path, help='a raiz do workspace; padrão o workspace do cwd (BRZA_WORKSPACE, manifesto ou registro)')
     args = ap.parse_args(argv)
     try:
-        text = runtime.agents_json(args.workspace or runtime.WORKSPACE)
+        text = runtime.agents_json(args.workspace or runtime.require_workspace())
+    except runtime.NoWorkspace as e:
+        print(f'recusado: {e}', file=sys.stderr)
+        return 1
     except (OSError, UnicodeDecodeError) as e:
         print(f'falhou:   {e}', file=sys.stderr)
         return 1

@@ -56,17 +56,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
-from brza_runtime import (WORKSPACE, BrzaError, brza, brza_root, canonicalize, git, rpc,  # noqa: E402,F401
-                          send_to_chat, user_data)
+from brza_runtime import (WORKSPACE, BrzaError, NoWorkspace, brza, brza_root, canonicalize, git,  # noqa: E402,F401
+                          require_workspace, rpc, send_to_chat, user_data)
 
 CHAT_COMMAND = 'claude-brza'
 VERBS = ('open', 'list', 'send', 'title', 'close')
-SESSION_MAP = WORKSPACE / '.sessions' / 'sessions.jsonl'
+SESSION_MAP = WORKSPACE / '.sessions' / 'sessions.jsonl' if WORKSPACE else None  # sem workspace, sem mapa
 WAIT_SECONDS = 60.0
 
 
 def record(event: str, **fields):
     """Acrescenta uma linha ao mapa de sessões."""
+    if SESSION_MAP is None:
+        require_workspace()
     SESSION_MAP.parent.mkdir(parents=True, exist_ok=True)
     row = {'event': event, 'at': datetime.now().astimezone().isoformat(timespec='seconds'), **fields}
     with SESSION_MAP.open('a') as f:
@@ -76,6 +78,8 @@ def record(event: str, **fields):
 def session_map() -> dict[str, dict]:
     """O mapa dobrado, por chat: o `open` liga o nome ao chat, o `title` e o `session` atualizam, o `close` desliga."""
     entries: dict[str, dict] = {}
+    if SESSION_MAP is None:
+        return entries
     try:
         lines = SESSION_MAP.read_text().splitlines()
     except OSError:
@@ -144,20 +148,22 @@ def running(name: str) -> bool:
 
 def workspace_root(cwd: Path | None = None) -> Path:
     """A raiz do workspace do cwd, pelo `brza_root.find` — o manifesto no common dir, ou o registro da máquina, para um
-    worktree do código —, ou a WORKSPACE quando o cwd não é de um workspace."""
+    worktree do código —, ou a WORKSPACE quando o cwd não é de um workspace; sem nenhuma das duas, recusa."""
     found = brza_root.find(cwd or Path.cwd())
-    return found.root if found else WORKSPACE
+    return found.root if found else (WORKSPACE or require_workspace())
 
 
 def resolve_checkout(checkout: Path, cwd: Path | None = None) -> Path:
     """O --checkout absoluto como veio; o relativo a partir da raiz do workspace, e não do cwd."""
+    if checkout is None:  # sem a WORKSPACE no import, o argparse não tem padrão
+        return workspace_root(cwd)
     checkout = checkout.expanduser()
     return (checkout if checkout.is_absolute() else workspace_root(cwd) / checkout).resolve()
 
 
 def chat_blocker(checkout: Path) -> str | None:
     """Por que o chat nesse checkout sobe sem os hooks do workspace, ou None quando sobe com eles."""
-    if checkout == WORKSPACE or WORKSPACE in checkout.parents:
+    if WORKSPACE and (checkout == WORKSPACE or WORKSPACE in checkout.parents):
         return None
     try:
         override = rpc('settings.getAgentLaunch')['settings'].get('agentCmdOverrides', {}).get('claude')
@@ -335,7 +341,7 @@ def main():
     ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
     ap.add_argument('--rename', action='store_true', help='manda o /rename <nome>, para o correio achar a sessão')
     ap.add_argument('--checkout', type=Path, default=WORKSPACE,
-                    help='o checkout do chat; o relativo parte da raiz do workspace, não do cwd')
+                    help='o checkout do chat; o relativo parte da raiz do workspace, não do cwd; padrão a raiz do workspace')
     group = ap.add_mutually_exclusive_group()
     group.add_argument('--prompt')
     group.add_argument('--prompt-file', type=Path)
@@ -344,7 +350,11 @@ def main():
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
 
-    checkout = resolve_checkout(args.checkout)
+    try:
+        checkout = resolve_checkout(args.checkout)
+    except NoWorkspace as e:
+        print(f'recusado: {e}')
+        return 1
     prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
     title = args.title or args.name
     if running(args.name) or mapped_and_open(args.name):

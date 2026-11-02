@@ -55,7 +55,7 @@ which = shutil.which
 
 def git_ident(kind: str) -> str:
     """O `git var GIT_<kind>_IDENT` no workspace, como o commit o veria."""
-    r = subprocess.run(['git', '-C', str(runtime.WORKSPACE), 'var', f'GIT_{kind}_IDENT'], capture_output=True,
+    r = subprocess.run(['git', '-C', str(runtime.require_workspace()), 'var', f'GIT_{kind}_IDENT'], capture_output=True,
                        text=True)
     if r.returncode != 0:
         raise runtime.BrzaError(f'git var GIT_{kind}_IDENT falhou: {r.stderr.strip()}')
@@ -64,7 +64,7 @@ def git_ident(kind: str) -> str:
 
 def git_config_email() -> str | None:
     """O `git config user.email` no workspace, ou None sem ele."""
-    r = subprocess.run(['git', '-C', str(runtime.WORKSPACE), 'config', 'user.email'], capture_output=True, text=True)
+    r = subprocess.run(['git', '-C', str(runtime.require_workspace()), 'config', 'user.email'], capture_output=True, text=True)
     return (r.stdout.strip() or None) if r.returncode == 0 else None
 
 
@@ -75,7 +75,7 @@ def result(level: str, check: str, message: str, fix: str | None = None) -> dict
 def author_email() -> tuple[str, str] | None:
     """(o e-mail esperado, de onde vem): o `[author].email` do manifesto do workspace ou, sem ele, o `git config
     user.email`; None sem nenhum dos dois."""
-    manifest = brza_root.read_manifest(runtime.WORKSPACE) or {}
+    manifest = brza_root.read_manifest(runtime.require_workspace()) or {}
     author = manifest.get('author')
     email = author.get('email') if isinstance(author, dict) else None
     if isinstance(email, str) and email:
@@ -101,7 +101,7 @@ def identity() -> dict:
 
 
 def measurement() -> dict:
-    settings = runtime.WORKSPACE / '.claude' / 'settings.json'
+    settings = runtime.require_workspace() / '.claude' / 'settings.json'
     problems = []
     try:
         if 'measure.py' not in settings.read_text():
@@ -124,8 +124,8 @@ def links() -> dict:
     """Os links do núcleo (--all), do cliente (--client) e do scripts/brza/ do workspace (--local), cada nome com o
     comando que o conserta. O nome do núcleo ou do cliente vale mais que o do mesmo nome no scripts/brza/ do workspace."""
     groups = [('--all', core_dir()), ('--client', client_dir())]
-    local = runtime.WORKSPACE / 'scripts' / 'brza'
-    if local.is_dir():
+    local = runtime.WORKSPACE / 'scripts' / 'brza' if runtime.WORKSPACE else None
+    if local and local.is_dir():
         groups.append((f'--local {runtime.WORKSPACE}', local))
     bad: dict[str, str] = {}
     flags: list[str] = []
@@ -166,7 +166,7 @@ def missing(entry: dict) -> list[str]:
 
 def registry() -> dict:
     """O registro da máquina: o workspace do cwd ligado ao código dele, e nenhum código em dois workspaces."""
-    root = runtime.WORKSPACE
+    root = runtime.require_workspace()
     path = brza_root.registry_path()
     try:
         entries = brza_root.read_registry()

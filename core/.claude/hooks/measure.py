@@ -21,7 +21,7 @@ do manifesto) no checkout dela, o do plano cuja `pln-NNN` está na branch do rep
 workspace vem do `brza_root`: o manifesto no common dir, ou o registro da máquina para o código. O turno leva também as `rounds`: as respostas às perguntas com
 opções (`AskUserQuestion`) do trecho, contadas como recomendada, outra opção ou texto livre.
 
-Só mede: nunca bloqueia nem escreve fora de .measurements/. O `resume_guard.py` grava no mesmo log a linha `guard`.
+Só mede: nunca bloqueia nem escreve fora de .measurements/. O `compact_guard.py` grava no mesmo log a linha `guard`.
 Cada transcript é lido a partir de onde a leitura anterior parou (estado em .measurements/state.json): a retomada de
 um subagente mede só o trecho novo, e cada turno mede só o próprio trecho.
 """
