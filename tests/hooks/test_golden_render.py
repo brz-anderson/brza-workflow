@@ -43,7 +43,9 @@ OTHER = {
 }
 # O que é do brza-workspace e não pode sobrar no que o render faz com outro manifesto (R1.2, R8.2)
 FORBIDDEN = ("brza-workspace", "brza-studio", "BrzA Studio", "Anderson", "brz-anderson", "Fixfy", "fixfy", "users.noreply.github.com",
-             "`personal`", "Último PLN usado", "tools-kit")
+             "`personal`", "Último PLN usado", "tools-kit", "claude-501")
+# O texto do app (o chat, o scratch dele) mora no pacote do cliente; no núcleo e nos moldes não sobra (A8 do P9)
+APP_TERMS = ("orca", "ORCA", "orca-visual")
 
 
 def read(*parts):
@@ -108,7 +110,7 @@ class GoldenRenderTest(unittest.TestCase):
                 with self.subTest(path=path):
                     out = brza_root.render(read(base, path), OTHER, path)
                     self.assertNotIn("{{", out)
-                    for word in FORBIDDEN:
+                    for word in FORBIDDEN + (() if base == CLIENT_CORE else APP_TERMS):
                         self.assertNotIn(word, out, "%s deixou %r" % (path, word))
 
     def test_the_other_manifest_reaches_the_text(self):
@@ -134,6 +136,19 @@ class GoldenRenderTest(unittest.TestCase):
         left = [d for d in DIFFERENCES if d.why == "rules-client"]
         self.assertEqual(len(left), 1)
         self.assertNotIn("## A configuração chega pela função do shell", read(CORE, "CLAUDE.md"))
+
+    def test_the_client_rules_hold_the_app_scratch_and_the_chat_artboards(self):
+        out = brza_root.render(read(CLIENT_CORE, ".claude", "rules", "brza-client.md"), BRZA_WORKSPACE, "brza-client.md")
+        for text in ("ORCA_CHAT_SCRATCH_DIR", "orca-chat-visuals", '::orca-visual{file="<arquivo>.html"',
+                     "chat-scratch/<hash>", "brza shot <artboard>.html <scratch>/<letra>.png --width 736"):
+            self.assertIn(text, out)
+        self.assertNotIn("claude-501", out)  # o uid desta máquina não vai a nenhum pacote
+        for text in ("ORCA_CHAT_SCRATCH_DIR", "orca-chat-visuals", "::orca-visual", "chat-scratch"):
+            self.assertNotIn(text, read(CORE, "CLAUDE.md") + read(CORE, ".claude", "skills", "plan-runner", "references",
+                                                                 "open-and-plan.md"))
+        self.assertIn(".claude/rules/brza-client.md", read(CORE, "CLAUDE.md"))
+        self.assertIn(".claude/rules/brza-client.md", read(CORE, ".claude", "skills", "plan-runner", "references",
+                                                            "open-and-plan.md"))
 
     def test_the_templates_render_with_the_manifest(self):
         for path in markdown_of(TEMPLATES):

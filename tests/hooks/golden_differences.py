@@ -23,6 +23,8 @@ WHY = {
     "readme-local": "os workstreams de agora, a chave de acesso e o perfil do `gh` vão ao `README.md` local (D3)",
     "local": "caminho ou texto só do brza-workspace que sai do núcleo (o gate local, o caminho da raiz)",
     "tests-moved": "os testes dos hooks moram em `tests/hooks/` do brza-workflow, e não mais no workspace",
+    "app-client": "o texto do app e desta máquina (o scratch do chat, os artboards) vai ao `rules/brza-client.md` do "
+                  "pacote `client` (A8 do P9)",
     "exemplo": "o exemplo de workstream do glossário deixa de ser o do brza-workspace",
 }
 
@@ -69,6 +71,20 @@ o que é só de lá.""", ""),
    "<uma frase>"` reserva o número no índice da `master`, mesmo com outra sessão abrindo plano junto, e imprime o
    `PLN-NNN` e o caminho; o plano se grava no worktree do workstream da sessão. No worklog,
    `AAAA-MM-DD-assunto-em-kebab.md`."""),
+    Difference(".claude/skills/plan-runner/references/open-and-plan.md", "app-client",
+               """   - **No chat do BrzA Studio, cada alternativa de interface é um artboard**: um `.html` no `ORCA_CHAT_SCRATCH_DIR`,
+     na forma da skill `orca-chat-visuals` do app, e uma linha `::orca-visual{file="<arquivo>.html" title="A — <rótulo>"}`
+     por alternativa, com a letra da opção no `title`. Até 8 por resposta.
+   - **Antes da rodada, a sessão confere cada artboard pelo PNG**, porque ela não vê o chat:
+     `brza shot <artboard>.html <scratch>/<letra>.png --width 736`, a largura do chat, e a leitura da imagem. Coluna
+     estourada, corte ou texto sobreposto se corrige no `.html` antes da rodada. Numa grade com texto que não quebra, a
+     coluna é `minmax(0,1fr)` e o item tem `min-width:0`.
+   - **Fora do chat**, sem o `ORCA_CHAT_SCRATCH_DIR`, o artboard vai ao _scratch_ e a rodada leva o caminho dele.
+""",
+               """   - **Cada alternativa de interface é um artboard**, um `.html` no _scratch_, e a rodada leva o caminho dele. No chat
+     de um app que mostre o artboard na conversa, a forma de entregá-lo e de conferi-lo está em
+     `.claude/rules/brza-client.md`, quando o pacote `client` está instalado.
+"""),
     Difference(".claude/skills/plan-runner/references/plan-template.md", "p4-contador",
                """> **Como usar:** crie `plans/PLN-NNN-assunto/PLN-NNN-plan.md`, com o número seguinte ao "Último PLN usado" do
 > `plans/README.md`, e suba aquela linha no mesmo commit. **Apague todas as citações `>`:** neste arquivo, citação é""",
@@ -135,6 +151,9 @@ A norma do workspace está no `AGENTS.md`, importado na primeira linha deste arq
 qualquer valor de **Project instructions**, e sem duplicar quando o valor é `claude-md-and-agents-md`. Este arquivo
 traz só o adaptador: traduz o vocabulário da norma e acrescenta a mecânica própria do Claude. O que é só deste
 workspace está em `.claude/rules/`, que o Claude Code também carrega no arranque."""),
+    Difference("CLAUDE.md", "app-client",
+               """o scratchpad da sessão, anunciado no arranque, em `/private/tmp/claude-501/…`; no chat do BrzA Studio, o `chat-scratch/<hash>` do `~/Library/Application Support/brza-studio/`, que entra como diretório de trabalho adicional |""",
+               """o scratchpad da sessão, anunciado no arranque; com o pacote `client`, o do chat do app está em `.claude/rules/brza-client.md` |"""),
     Difference("CLAUDE.md", "rules-client",
                """## A configuração chega pela função do shell
 

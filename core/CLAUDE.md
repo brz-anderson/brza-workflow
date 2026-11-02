@@ -19,7 +19,7 @@ workspace está em `.claude/rules/`, que o Claude Code também carrega no arranq
 | retomar o subagente        | `SendMessage` com o nome ou o ID do agente, que volta com o contexto dele; não abre `Agent` novo |
 | estágio de workflow        | cada `agent()` de um workflow                                                                    |
 | camada alta, média, rápida | Opus, Sonnet, Haiku — o `haiku` é o Haiku 5.5, pelo `env` do `settings.json`                     |
-| scratch                    | o scratchpad da sessão, anunciado no arranque, em `/private/tmp/claude-501/…`; no chat do {{workspace.title}}, o `chat-scratch/<hash>` do `~/Library/Application Support/{{code.name}}/`, que entra como diretório de trabalho adicional |
+| scratch                    | o scratchpad da sessão, anunciado no arranque; com o pacote `client`, o do chat do app está em `.claude/rules/brza-client.md` |
 | sessão nova                | `/exit` e `claude --name <nome>` no worktree do workstream, `.worktrees/<nome>`, sem `--resume`, `--continue` nem `--rc`; pelo `brza sessions`, com `--checkout .worktrees/<nome>` |
 | compactação                | `/compact`, depois do `/close-task`; o runtime também compacta sozinho perto do limite da janela |
 

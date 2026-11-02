@@ -24,7 +24,10 @@ no disco, nem no git do workspace.
 Sem o `--core-only`, depois da camada 1 roda a camada 2, o `brza note sync`, que leva a norma aos worktrees dos
 workstreams. O `brza init` chama só a camada 1, por `sync_core(root, with_git=False)`, no diretório novo.
 
-Roda no Python 3.9: só o brza_root e a stdlib.
+Do que o PLN-006 entrega, só os hooks do núcleo e o `brza_root` têm de rodar no Python 3.9 do sistema (X6); o CLI
+exige o 3.10 (`str | None`), como na origem. Esta camada 1 só usa o `brza_root` e a stdlib, e a fumaça dela passa no
+3.9, mas os testes não rodam lá; a camada 2 chama o `brza-note`, que exige o 3.10: numa máquina só com o 3.9, a
+camada 1 commita e dá o push, e a 2 cai. Use `--core-only` ali.
 """
 import argparse
 import datetime

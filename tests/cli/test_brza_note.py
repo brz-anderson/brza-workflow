@@ -36,13 +36,30 @@ def git(*args, cwd: Path):
 class NoteFixture(unittest.TestCase):
     """O workspace de mentira e os ajudantes; sem teste próprio, para o test_brza_note_index.py herdar sem repetir."""
 
+    # A branch da norma e o remote do workspace; com outros valores, o fixture grava o manifesto (A5 do P9)
+    BRANCH, REMOTE = 'master', 'origin'
+    OWNER = None  # o `[workspace].owner` do manifesto; None, sem manifesto
+
+    def write_manifest(self):
+        """O `.brza/workspace.toml` do workspace de mentira, com o owner, a branch e o remote desta classe."""
+        manifest = {'schema': 1, 'workspace': {'name': 'ws', 'title': 'Casa', 'owner': self.OWNER or 'Beatriz',
+                                               'branch': self.BRANCH, 'remote': self.REMOTE, 'born': '2026-11-01'},
+                    'author': {'name': 't', 'email': 't@t', 'login': 't'},
+                    'code': {'name': 'casa-app', 'path': str(self.studio), 'github': 't/casa-app'}}
+        (self.ws / '.brza').mkdir(exist_ok=True)
+        (self.ws / '.brza' / 'workspace.toml').write_text(runtime.brza_root.dump_manifest(
+            runtime.brza_root.with_defaults(manifest)))
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
         self.origin, self.other, self.ws = self.base / 'origin.git', self.base / 'other', self.base / 'ws'
-        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'master', str(self.origin)], check=True)
-        subprocess.run(['git', 'clone', '-q', str(self.origin), str(self.ws)], check=True, capture_output=True)
+        self.studio = self.base / 'studio'
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', self.BRANCH, str(self.origin)], check=True)
+        subprocess.run(['git', 'clone', '-q', '-o', self.REMOTE, str(self.origin), str(self.ws)], check=True,
+                       capture_output=True)
+        git('checkout', '-q', '-B', self.BRANCH, cwd=self.ws)
         git('config', 'user.name', 't', cwd=self.ws)
         git('config', 'user.email', 't@t', cwd=self.ws)
         (self.ws / 'work' / 'worklogs').mkdir(parents=True)
@@ -50,11 +67,12 @@ class NoteFixture(unittest.TestCase):
         (self.ws / 'README.md').write_text('um\n')
         (self.ws / '.gitignore').write_text('.worktrees/\n.claude/settings.local.json\n')
         self.checker_exit(0)
+        if (self.BRANCH, self.REMOTE, self.OWNER) != ('master', 'origin', None):
+            self.write_manifest()
         git('add', '.', cwd=self.ws)
         git('commit', '-q', '-m', 'um', cwd=self.ws)
-        git('push', '-q', 'origin', 'HEAD:master', cwd=self.ws)
-        git('branch', '-q', '--set-upstream-to=origin/master', cwd=self.ws)
-        self.studio = self.base / 'studio'
+        git('push', '-q', self.REMOTE, f'HEAD:{self.BRANCH}', cwd=self.ws)
+        git('branch', '-q', f'--set-upstream-to={self.REMOTE}/{self.BRANCH}', cwd=self.ws)
         for p in (patch.object(runtime, 'WORKSPACE', self.ws), patch.object(runtime, 'STUDIO', self.studio),
                   patch.dict(GLOBALS, {'today': lambda: TODAY})):
             p.start()
@@ -122,7 +140,8 @@ class NoteTest(NoteFixture):
         self.assertEqual(out.strip().splitlines()[-1], str(path))
         text = path.read_text()
         self.assertTrue(text.startswith('---\nscope:\n  - workspace\n---\n\n# '))
-        self.assertIn('O pedido de Anderson, em 2026-10-28, na sessão `pln-002-p6`: "', text)
+        self.assertIn('O pedido, em 2026-10-28, na sessão `pln-002-p6`: "', text)  # sem manifesto, sem o dono
+        self.assertNotIn('Anderson', text)
         for section in ('## O que se fez', '## O que ficou', '## Fora do workspace'):
             self.assertIn(f'\n{section}\n', text)
 
@@ -195,9 +214,26 @@ class NoteTest(NoteFixture):
                                   '--priority', 'high')
         self.assertEqual(code, 0, out)
         text = (self.tree / 'work' / 'issues' / 'algo-quebrado.md').read_text()
-        self.assertTrue(text.startswith('---\nstatus: open\nscope:\n  - workspace\n  - brza-studio\n'
-                                        'opened: 2026-10-28\npriority: high\n---\n\n# '), text)
+        self.assertTrue(text.startswith('---\nstatus: open\ndescription: <uma frase>\nscope:\n  - workspace\n'
+                                        '  - brza-studio\nopened: 2026-10-28\npriority: high\n---\n\n# '), text)
         self.assertIn('\n## O pedido\n', text)
+
+    def real_checker(self, root: Path) -> subprocess.CompletedProcess:
+        """O checador de verdade do núcleo, na raiz `root` (o do fixture é um falso que sai com o código dado)."""
+        script = ROOT / 'core' / '.claude' / 'skills' / 'notes-checker' / 'scripts' / 'check_notes.py'
+        return subprocess.run([sys.executable, str(script), '--root', str(root)], capture_output=True, text=True,
+                              env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+
+    def test_the_new_issue_skeleton_passes_the_real_checker_once_the_h1_is_written(self):
+        # o checador cobra `description` das notas criadas depois de 2026-11-01 (A6 do P9): o esqueleto o traz
+        code, out = self.run_note('new', 'issue', 'nova-issue', env={'CLAUDE_SESSION_NAME': 's'})
+        self.assertEqual(code, 0, out)
+        path = self.tree / 'work' / 'issues' / 'nova-issue.md'
+        text = path.read_text().replace('opened: 2026-10-28', 'opened: 2026-11-02')
+        path.write_text(text.replace('# <H1 a escrever>', '# Uma issue nova'))
+        done = self.real_checker(self.tree)
+        self.assertNotIn('description-missing', done.stdout + done.stderr)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_new_issue_without_priority_omits_the_field(self):
         code, out = self.run_note('new', 'issue', 'sem-prioridade')
@@ -756,6 +792,43 @@ class NoteTest(NoteFixture):
         code, out = self.run_note('sync', '--no-push')
         self.assertEqual(code, 1, out)
         self.assertIn('o merge com a up/main foi abortado', out)
+
+
+class NoteManifestNamesTest(NoteFixture):
+    """O dono e o nome do código vêm do manifesto, e não do brza-workspace (A9 do P9)."""
+    OWNER = 'Beatriz'
+
+    def test_the_worklog_skeleton_names_the_owner_of_the_manifest(self):
+        code, out = self.run_note('new', 'worklog', 'um-dia', env={'CLAUDE_SESSION_NAME': 's1'})
+        self.assertEqual(code, 0, out)
+        text = (self.tree / 'work' / 'worklogs' / '2026-10-28-um-dia.md').read_text()
+        self.assertIn('O pedido de Beatriz, em 2026-10-28, na sessão `s1`: "', text)
+        self.assertNotIn('Anderson', text)
+
+    def test_the_refusals_name_the_code_of_the_manifest_and_not_the_brza_studio(self):
+        subprocess.run(['git', 'init', '-q', '-b', 'feat/sem-plano', str(self.studio)], check=True)
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'c', cwd=self.studio)
+        code, out = self.run_note('new', 'issue', 'x', cwd=self.studio, workstream=None)
+        self.assertEqual(code, 1, out)
+        self.assertIn('a branch feat/sem-plano do casa-app não traz o plano', out)
+        self.assertNotIn('brza-studio', out)
+        code, out = self.run_note('new', 'issue', 'x', cwd=self.base, workstream=None)
+        self.assertEqual(code, 1, out)
+        self.assertIn('nem do casa-app', out)
+        self.assertNotIn('brza-studio', out)
+
+    def test_the_help_names_no_workspace_of_the_origin(self):
+        code, out = self.run_note('new', '--help', workstream=None)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('brza-studio', out)
+
+
+class NoteWithoutManifestNamesTest(NoteFixture):
+    def test_the_refusals_say_the_code_when_there_is_no_manifest(self):
+        code, out = self.run_note('new', 'issue', 'x', cwd=self.base, workstream=None)
+        self.assertEqual(code, 1, out)
+        self.assertIn('nem do código', out)
+        self.assertNotIn('brza-studio', out)
 
 
 if __name__ == '__main__':

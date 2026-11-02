@@ -28,7 +28,8 @@ init_workspace, InitError, main = INIT['init_workspace'], INIT['InitError'], INI
 
 IDENTITY = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
 # o que veio de outro workspace: nada disso pode sobrar no que o init escreve (R1.2, R8.2)
-FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'Fixfy')
+FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'Fixfy', 'claude-501')
+APP_TERMS = ('orca', 'ORCA')  # o texto do app mora só no pacote do cliente (A8 do P9)
 CHECKER = ('.claude', 'skills', 'notes-checker', 'scripts', 'check_notes.py')
 
 
@@ -180,12 +181,39 @@ class AcceptanceTest(InitBase):
         found = {}
         for path in files_of(self.root):
             text = (self.root / path).read_text(encoding='utf-8', errors='ignore')
-            for term in FOREIGN:
+            for term in FOREIGN + APP_TERMS:
                 if term in text:
                     found.setdefault(path, []).append(term)
         self.assertEqual(found, {})
         self.assertFalse([p for p in files_of(self.root) if p.endswith('.md')
                           and '{{workspace.' in (self.root / p).read_text()])
+
+    def run_note(self, *argv):
+        """O `bin/brza-note` por processo, no workspace criado: o `new` e o `commit` dele são o que o aceite exercita."""
+        env = {**os.environ, **IDENTITY, 'BRZA_WORKSPACE': str(self.root), 'PYTHONDONTWRITEBYTECODE': '1'}
+        done = subprocess.run([sys.executable, str(BIN / 'brza-note'), *argv], capture_output=True, text=True, env=env,
+                              cwd=str(self.root))
+        return done.returncode, done.stdout + done.stderr
+
+    def test_an_issue_made_by_brza_note_new_passes_the_checker_and_the_commit(self):
+        # o esqueleto do `new` nasce com `description`: sem ele, o checador do núcleo recusa a nota nova (A6 do P9)
+        origin = self.base / 'acme-notes.git'
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'master', str(origin)], check=True)
+        git(self.root, 'remote', 'add', 'origin', str(origin))
+        git(self.root, 'push', '-q', '-u', 'origin', 'master')
+        code, out = self.run_note('workstream', 'app')
+        self.assertEqual(code, 0, out)
+        code, out = self.run_note('new', 'issue', 'uma-issue', '--workstream', 'app')
+        self.assertEqual(code, 0, out)
+        issue = self.root / '.worktrees' / 'app' / 'work' / 'issues' / 'uma-issue.md'
+        self.assertIn('\ndescription: ', issue.read_text())
+        issue.write_text(issue.read_text().replace('# <H1 a escrever>', '# Uma issue de teste'))
+        done = self.checker(self.root / '.worktrees' / 'app')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        code, out = self.run_note('commit', 'work/issues/uma-issue.md', '-m', 'docs: uma issue', '--workstream', 'app')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('recusado', out)
+        self.assertIn('issue:uma-issue created', out)
 
     def test_the_readme_is_rendered_and_does_not_copy_the_shell_block(self):
         readme = (self.root / 'README.md').read_text()
@@ -410,7 +438,45 @@ class ManifestChoicesTest(InitBase):
         self.assertEqual(done.returncode, 0, done.stdout)
 
 
+class DocstringTest(unittest.TestCase):
+    def test_the_sync_and_the_init_say_what_runs_on_the_python_3_9_and_what_needs_the_3_10(self):
+        # A11 do P9 e o X6: só os hooks e o brza_root têm de rodar no 3.9; o CLI exige o 3.10
+        sync = runpy.run_path(str(BIN / 'brza-sync'))
+        for doc in (INIT['__doc__'], sync['__doc__']):
+            self.assertIn('3.10', doc)
+            self.assertIn('X6', doc)
+            self.assertNotIn('Roda no Python 3.9', doc)
+
+
 class CheckTest(InitBase):
+    def flow_with(self, name, rel, extra):
+        """Um brza-workflow de mentira com `extra` no fim de `rel`, e o BRZA_WORKFLOW apontando para ele."""
+        flow = self.base / name
+        shutil.copytree(self.flow, flow)
+        target = flow / rel
+        target.write_text(target.read_text() + extra)
+        git(flow, 'add', '-A')
+        git(flow, 'commit', '-q', '-m', name)
+        return patch.dict(os.environ, {'BRZA_WORKFLOW': str(flow)})
+
+    def test_the_text_of_the_app_in_the_core_or_the_uid_of_this_machine_fails_the_check(self):
+        for extra, term in (('\nA skill orca-chat-visuals.\n', 'orca'), ('\nUm ORCA_CHAT_SCRATCH_DIR.\n', 'ORCA'),
+                            ('\nEm /private/tmp/claude-501/.\n', 'claude-501')):
+            with self.subTest(term=term), self.flow_with('app-flow', 'core/AGENTS.md', extra):
+                with self.assertRaises(INIT['CheckError']) as caught:
+                    self.init()
+                self.assertIn('AGENTS.md', str(caught.exception))
+                self.assertIn(term, str(caught.exception))
+                shutil.rmtree(self.root)
+                shutil.rmtree(self.base / 'app-flow')
+
+    def test_the_client_package_may_name_the_app_and_the_core_may_not(self):
+        rules = ROOT / 'packages' / 'client' / 'core' / '.claude' / 'rules' / 'brza-client.md'
+        self.assertIn('orca', rules.read_text())  # o pacote traz o texto do app
+        self.init(packages=['client'])  # e a conferência o deixa passar
+        self.assertIn('orca', (self.root / '.claude' / 'rules' / 'brza-client.md').read_text())
+
+
     def test_a_term_of_the_origin_in_the_written_files_fails_the_check_and_skips_commit_and_registry(self):
         flow = self.base / 'dirty-flow'
         shutil.copytree(self.flow, flow)

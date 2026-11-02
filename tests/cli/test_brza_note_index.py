@@ -21,7 +21,9 @@ def note_text(status='open', description='Uma frase.', h1='O que a nota diz', bo
     return f'---\n{fm}opened: 2026-10-31\n---\n\n# {h1}\n\n{body}'
 
 
-class IndexTest(NoteFixture):
+class IndexFixture(NoteFixture):
+    """O workspace com o índice da master vazio e os ajudantes; sem teste próprio, como o NoteFixture."""
+
     def setUp(self):
         super().setUp()
         # o checkout principal, na master, com o .gitattributes do núcleo e o índice vazio, como o init deixa
@@ -62,6 +64,8 @@ class IndexTest(NoteFixture):
         git('config', 'user.email', 't@t', cwd=path)
         return path
 
+
+class IndexTest(IndexFixture):
     # plan-open
 
     def test_plan_open_reserves_the_next_number_with_a_created_line_on_the_origin_master(self):
@@ -400,3 +404,188 @@ class IndexTest(NoteFixture):
     def test_index_without_rebuild_is_wrong_usage(self):
         code, _ = self.run_note('index', workstream=None)
         self.assertEqual(code, 2)
+
+
+class IndexRepairTest(IndexFixture):
+    """O `--rebuild` que repara o `changed` perdido (A4 do P9) e a recusa do id que é de outro workstream (A7)."""
+
+    def issue_text(self, status='open', h1='Uma'):
+        return note_text(status=status, h1=h1)
+
+    def push_other_commit(self):
+        """Um commit com push que não toca a nota: o `changed_notes` lê só o HEAD, e a mudança sem linha fica."""
+        self.write('work/worklogs/2026-10-31-w.md', '---\nscope:\n  - workspace\n---\n\n# W\n')
+        code, out = self.commit_note('work/worklogs/2026-10-31-w.md')
+        self.assertEqual(code, 0, out)
+
+    def test_rebuild_appends_the_changed_line_that_a_no_push_commit_left_out(self):
+        self.write('work/issues/uma-issue.md', self.issue_text())
+        self.commit_note('work/issues/uma-issue.md')
+        self.write('work/issues/uma-issue.md', self.issue_text(status='in_progress'))
+        code, out = self.run_note('commit', 'work/issues/uma-issue.md', '-m', 'docs: andamento', '--no-push')
+        self.assertEqual(code, 0, out)
+        self.push_other_commit()
+        self.assertEqual([x['status'] for x in self.origin_index()], ['open'])  # o aviso manda rodar o --rebuild
+        code, out = self.run_note('index', '--rebuild', workstream=None)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('em dia', out)
+        lines = [x for x in self.origin_index() if x['id'] == 'issue:uma-issue']
+        self.assertEqual([(x['event'], x['status'], x['workstream']) for x in lines],
+                         [('created', 'open', 'studio'), ('changed', 'in_progress', 'studio')])
+        self.assertEqual(GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+                         ['issue:uma-issue']['status'], 'in_progress')
+
+    def test_rebuild_after_the_repair_is_idempotent(self):
+        self.write('work/issues/uma-issue.md', self.issue_text())
+        self.commit_note('work/issues/uma-issue.md')
+        self.write('work/issues/uma-issue.md', self.issue_text(h1='Outro título'))
+        self.run_note('commit', 'work/issues/uma-issue.md', '-m', 'x', '--no-push')
+        self.push_other_commit()
+        self.run_note('index', '--rebuild', workstream=None)
+        before = self.origin_index()
+        code, out = self.run_note('index', '--rebuild', workstream=None)
+        self.assertEqual(code, 0, out)
+        self.assertIn('em dia', out)
+        self.assertEqual(self.origin_index(), before)
+
+    def test_rebuild_repairs_the_phase_of_a_plan_whose_index_line_failed(self):
+        self.run_note('plan-open', 'novo', '--title', 'O plano', '--description', 'Faz isto.')
+        self.write('plans/PLN-001-novo/PLN-001-plan.md',
+                   '---\nstatus: in_progress\nphase: execution\ndescription: Faz isto.\nopened: 2026-10-31\n---\n\n'
+                   '# PLN-001: O plano\n\n- **Retomar:** x\n')
+        self.run_note('commit', 'plans/PLN-001-novo', '-m', 'x', '--no-push')
+        self.push_other_commit()
+        self.run_note('index', '--rebuild', workstream=None)
+        last = [x for x in self.origin_index() if x['id'] == 'PLN-001'][-1]
+        self.assertEqual((last['event'], last['status'], last['phase']), ('changed', 'in_progress', 'execution'))
+
+    def test_rebuild_leaves_alone_the_id_that_the_index_gives_to_another_workstream(self):
+        tools = self.make_workstream('tools')
+        self.write('work/issues/dupla.md', self.issue_text(h1='Do studio'))
+        self.commit_note('work/issues/dupla.md')
+        self.write('work/issues/dupla.md', self.issue_text(h1='Da tools'), tree=tools)
+        git('add', '.', cwd=tools)
+        git('commit', '-q', '-m', 'dupla na tools', cwd=tools)
+        git('push', '-q', cwd=tools)
+        before = self.origin_index()
+        self.run_note('index', '--rebuild', workstream=None)
+        self.run_note('index', '--rebuild', workstream=None)
+        mine = [x for x in self.origin_index() if x['id'] == 'issue:dupla']
+        self.assertEqual([(x['event'], x['workstream'], x['title']) for x in mine], [('created', 'studio', 'Do studio')])
+        self.assertEqual([x for x in self.origin_index() if x['id'] != 'PLN-001'],
+                         [x for x in before if x['id'] != 'PLN-001'])
+
+    # o id de outro workstream
+
+    def test_commit_refuses_a_new_note_whose_id_belongs_to_another_workstream(self):
+        tools = self.make_workstream('tools')
+        self.write('work/issues/uma-issue.md', self.issue_text(h1='Do studio'))
+        self.commit_note('work/issues/uma-issue.md')
+        index = self.origin_index()
+        self.write('work/issues/uma-issue.md', self.issue_text(h1='Outra, da tools'), tree=tools)
+        before = git('rev-parse', 'HEAD', cwd=tools)
+        code, out = self.run_note('commit', 'work/issues/uma-issue.md', '-m', 'docs: repetida', workstream='tools')
+        self.assertEqual(code, 1, out)
+        self.assertIn('recusado', out)
+        self.assertIn('issue:uma-issue', out)
+        self.assertIn('studio', out)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=tools), before)  # nada commitado
+        self.assertEqual(git('status', '--porcelain', '--untracked-files=all', cwd=tools), '?? work/issues/uma-issue.md')
+        self.assertEqual(self.origin_index(), index)  # e o índice não mudou: a issue do studio segue vigente
+        self.assertNotIn('docs: repetida', self.origin_log('workstream/tools'))
+
+    def test_commit_refuses_a_new_decision_whose_id_belongs_to_another_workstream(self):
+        tools = self.make_workstream('tools')
+        self.write('work/decisions/d.md', note_text(h1='A decisão'))
+        self.commit_note('work/decisions/d.md')
+        self.write('work/decisions/d.md', note_text(h1='Outra'), tree=tools)
+        code, out = self.run_note('commit', 'work/decisions/d.md', '-m', 'x', workstream='tools')
+        self.assertEqual(code, 1, out)
+        self.assertIn('decision:d', out)
+
+    def test_commit_of_a_change_to_the_note_the_workstream_already_owns_is_not_refused(self):
+        tools = self.make_workstream('tools')
+        self.write('work/issues/minha.md', self.issue_text(), tree=tools)
+        code, out = self.run_note('commit', 'work/issues/minha.md', '-m', 'x', workstream='tools')
+        self.assertEqual(code, 0, out)
+        self.write('work/issues/minha.md', self.issue_text(status='done'), tree=tools)
+        code, out = self.run_note('commit', 'work/issues/minha.md', '-m', 'y', workstream='tools')
+        self.assertEqual(code, 0, out)
+        self.assertEqual([x['event'] for x in self.origin_index()], ['created', 'changed'])
+
+    def test_commit_of_a_note_moved_from_another_workstream_is_not_refused(self):
+        # A nota saiu do studio (apagada e commitada lá): o id continua o da criação, e o workstream passa a ser o novo.
+        tools = self.make_workstream('tools')
+        self.write('work/issues/mudou.md', self.issue_text())
+        self.commit_note('work/issues/mudou.md')
+        git('rm', '-q', 'work/issues/mudou.md', cwd=self.tree)
+        code, out = self.commit_note('work/issues/mudou.md')
+        self.assertEqual(code, 0, out)
+        self.write('work/issues/mudou.md', self.issue_text(h1='Mudou de workstream'), tree=tools)
+        code, out = self.run_note('commit', 'work/issues/mudou.md', '-m', 'docs: veio do studio', workstream='tools')
+        self.assertEqual(code, 0, out)
+        last = self.origin_index()[-1]
+        self.assertEqual((last['event'], last['id'], last['workstream']), ('changed', 'issue:mudou', 'tools'))
+
+    def test_the_check_of_the_id_is_skipped_with_no_push_and_without_a_remote_index(self):
+        tools = self.make_workstream('tools')
+        self.write('work/issues/uma-issue.md', self.issue_text())
+        self.commit_note('work/issues/uma-issue.md')
+        self.write('work/issues/uma-issue.md', self.issue_text(h1='Outra'), tree=tools)
+        code, out = self.run_note('commit', 'work/issues/uma-issue.md', '-m', 'x', '--no-push', workstream='tools')
+        self.assertEqual(code, 0, out)  # sem push, o commit não escreve no índice nem consulta a origin
+
+
+class IndexOtherBranchTest(NoteFixture):
+    """Um workspace cuja norma mora na `main` do remote `up` (A5 do P9): o índice e o push seguem o manifesto."""
+    BRANCH, REMOTE = 'main', 'up'
+
+    def origin_index(self, ref: str = 'main') -> list[dict]:
+        try:
+            text = git('show', f'{ref}:{INDEX}', cwd=self.origin)
+        except subprocess.CalledProcessError:
+            return []
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def test_plan_open_reserves_the_number_on_the_up_main(self):
+        code, out = self.run_note('plan-open', 'novo', '--title', 'Novo', '--description', 'x')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip().splitlines()[-2], 'PLN-001')
+        self.assertEqual([x['id'] for x in self.origin_index()], ['PLN-001'])
+        self.assertEqual(git('log', '-1', '--format=%s', 'main', cwd=self.origin), 'índice: PLN-001 created')
+
+    def test_commit_writes_the_index_line_on_the_up_main(self):
+        (self.tree / 'work' / 'issues').mkdir(parents=True, exist_ok=True)
+        (self.tree / 'work' / 'issues' / 'uma.md').write_text(note_text())
+        code, out = self.run_note('commit', 'work/issues/uma.md', '-m', 'docs: uma')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('aviso', out)
+        self.assertIn('issue:uma created na up/main', out)
+        self.assertEqual([x['id'] for x in self.origin_index()], ['issue:uma'])
+
+    def test_commit_without_upstream_pushes_the_workstream_to_the_manifest_remote(self):
+        git('branch', '--unset-upstream', cwd=self.tree)
+        (self.tree / 'work' / 'issues').mkdir(parents=True, exist_ok=True)
+        (self.tree / 'work' / 'issues' / 'uma.md').write_text(note_text())
+        code, out = self.run_note('commit', 'work/issues/uma.md', '-m', 'docs: uma')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(git('rev-parse', '--abbrev-ref', '@{upstream}', cwd=self.tree), 'up/workstream/studio')
+
+    def test_rebuild_reads_the_workstreams_of_the_manifest_remote(self):
+        (self.tree / 'work' / 'issues').mkdir(parents=True, exist_ok=True)
+        (self.tree / 'work' / 'issues' / 'i.md').write_text(note_text())
+        git('add', '.', cwd=self.tree)
+        git('commit', '-q', '-m', 'i', cwd=self.tree)
+        git('push', '-q', cwd=self.tree)
+        git('worktree', 'remove', '--force', str(self.tree), cwd=self.ws)
+        git('branch', '-q', '-D', 'workstream/studio', cwd=self.ws)
+        code, out = self.run_note('index', '--rebuild', workstream=None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(x['id'] for x in self.origin_index()), ['PLN-001', 'issue:i'])
+
+    def test_a_missing_remote_is_named_in_the_refusal(self):
+        git('remote', 'remove', 'up', cwd=self.ws)
+        code, out = self.run_note('plan-open', 'novo', '--title', 'Novo', '--description', 'x')
+        self.assertEqual(code, 1, out)
+        self.assertIn('recusado', out)
+        self.assertIn('remote up', out)

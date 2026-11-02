@@ -54,14 +54,9 @@ do pedido, e o plano segue para Planejar.
 3. **Leve as alternativas a uma rodada na mensagem, em texto**, no formato sem a ferramenta, lado a lado sobre os
    mesmos casos, com a tabela e a recomendação marcada: a caixa da pergunta com opções esconde o artefato que precisa
    estar à vista para escolher. Quem escolhe é {{workspace.owner}}. Opção que muda o que se vê vem com a comparação à vista:
-   - **No chat do {{workspace.title}}, cada alternativa de interface é um artboard**: um `.html` no `ORCA_CHAT_SCRATCH_DIR`,
-     na forma da skill `orca-chat-visuals` do app, e uma linha `::orca-visual{file="<arquivo>.html" title="A — <rótulo>"}`
-     por alternativa, com a letra da opção no `title`. Até 8 por resposta.
-   - **Antes da rodada, a sessão confere cada artboard pelo PNG**, porque ela não vê o chat:
-     `brza shot <artboard>.html <scratch>/<letra>.png --width 736`, a largura do chat, e a leitura da imagem. Coluna
-     estourada, corte ou texto sobreposto se corrige no `.html` antes da rodada. Numa grade com texto que não quebra, a
-     coluna é `minmax(0,1fr)` e o item tem `min-width:0`.
-   - **Fora do chat**, sem o `ORCA_CHAT_SCRATCH_DIR`, o artboard vai ao _scratch_ e a rodada leva o caminho dele.
+   - **Cada alternativa de interface é um artboard**, um `.html` no _scratch_, e a rodada leva o caminho dele. No chat
+     de um app que mostre o artboard na conversa, a forma de entregá-lo e de conferi-lo está em
+     `.claude/rules/brza-client.md`, quando o pacote `client` está instalado.
 4. **Grave o vigente**, com a origem de cada item. A alternativa que perdeu fica até o passo que a transcreve e então
    sai, com uma linha **Descartada** e o porquê. No `PLN`, a crítica posterior vai para a Entrevista, e o item é
    reescrito no lugar. A alternativa de interface escolhida vira PNG na pasta do plano, para sobreviver ao scratch:
