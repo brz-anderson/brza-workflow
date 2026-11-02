@@ -5,9 +5,11 @@
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +56,53 @@ class SendTest(unittest.TestCase):
         self.assertEqual(params['envelope']['expectedRuntimeFence'], 7)
         self.assertEqual(params['envelope']['payloadFingerprint'], hashlib.sha256(payload.encode()).hexdigest())
         self.assertRegex(params['envelope']['clientOperationId'], r'^\d{13}-[0-9a-f]{32}$')
+
+
+class RpcCallerChatTest(unittest.TestCase):
+    """O `agentSession.send` diz ao app de que chat vem a mensagem; é o que a faz chegar como tarefa, não como a da pessoa."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(dir='/tmp'))  # o caminho do socket unix tem limite de tamanho
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.dir)]))
+        endpoint = self.dir / 's.sock'
+        (self.dir / 'orca-runtime.json').write_text(json.dumps(
+            {'authToken': 't', 'transports': [{'kind': 'unix', 'endpoint': str(endpoint)}]}))
+        self.requests = []
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(endpoint))
+        server.listen()
+        self.addCleanup(server.close)
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                with conn:
+                    self.requests.append(json.loads(conn.makefile().readline()))
+                    conn.sendall(b'{"ok": true, "result": {}}\n')
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    def call(self, method, chat):
+        env = {k: v for k, v in os.environ.items() if k != 'ORCA_AGENT_SESSION_ID'}
+        env['ORCA_USER_DATA_PATH'] = str(self.dir)
+        if chat:
+            env['ORCA_AGENT_SESSION_ID'] = chat
+        with patch.dict(os.environ, env, clear=True):
+            runtime.rpc(method, {})
+        return self.requests[-1]
+
+    def test_send_names_the_chat_of_the_agent_that_sends(self):
+        request = self.call('agentSession.send', 'claude_abc')
+        self.assertEqual(request['orchestrationCompatibilityEvidence'], {'agentSessionId': 'claude_abc'})
+
+    def test_send_outside_a_chat_names_none(self):
+        self.assertNotIn('orchestrationCompatibilityEvidence', self.call('agentSession.send', None))
+
+    def test_a_read_names_no_chat(self):
+        self.assertNotIn('orchestrationCompatibilityEvidence', self.call('agentSession.history', 'claude_abc'))
 
 
 AGENT_REVIEWER = """---

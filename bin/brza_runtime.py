@@ -82,13 +82,19 @@ def brza(*args):
 
 
 def rpc(method, params=None, timeout: float = 10.0):
-    """Chama um método do runtime pelo socket local, como o CLI faz; o CLI não expõe as configurações."""
+    """Chama um método do runtime pelo socket local, como o CLI faz; o CLI não expõe as configurações.
+
+    O `agentSession.send` leva o chat do agente que chama (o ORCA_AGENT_SESSION_ID): é o que o faz chegar ao chat de
+    destino como tarefa do coordenador, e não como a mensagem da pessoa."""
     try:
         meta = json.loads(runtime_file().read_text())
         endpoint = next(t['endpoint'] for t in meta['transports'] if t['kind'] == 'unix')
     except (OSError, ValueError, KeyError, StopIteration) as e:
         raise BrzaError(f'não li o runtime em {runtime_file()} ({e})') from None
     request = {'id': str(uuid.uuid4()), 'authToken': meta['authToken'], 'method': method, 'params': params}
+    if method == 'agentSession.send' and (chat := os.environ.get('ORCA_AGENT_SESSION_ID', '').strip()):
+        # o CLI do app diz isso no launch; sem o chat de origem, o app mostra a mensagem como a da pessoa
+        request['orchestrationCompatibilityEvidence'] = {'agentSessionId': chat}
     try:
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(timeout)
