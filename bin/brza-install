@@ -5,8 +5,8 @@
   brza install --all            liga todo brza-* executável de bin/ do checkout, inclusive o brza-install; o primeiro
                                 roda pelo caminho inteiro, <checkout>/bin/brza-install --all, porque o link dele ainda
                                 não existe
-  brza install --client         liga todo brza-* executável de packages/client/bin/ (doctor, print, run, sessions); o
-                                claude-brza fica de fora, e segue só pelo --chat-command
+  brza install --client         liga todo brza-* executável de packages/client/bin/ (devices, doctor, print, run,
+                                sessions); o claude-brza fica de fora, e segue só pelo --chat-command
   brza install --local <dir>    liga os brza-* executáveis de um diretório local: o scripts/brza/ de um workspace (dê a
                                 raiz dele ou a própria pasta), que guarda os comandos do código do projeto — app, dev,
                                 test, tree, shot —, e não do brza-workflow

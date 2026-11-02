@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""Lista, cria e abre os simuladores iOS e os emuladores Android da máquina, para a conferência de qualquer projeto.
+
+  brza devices [list] [--ios | --android] [--profiles] [--json]
+  brza devices open [NOME] [--ios | --android] [--wait] [--download] [--runtime VERSÃO] [--image PACOTE]
+
+O list mostra os simuladores iOS e os AVDs do Android, ligados ou não, e o que dá para criar: os modelos que os
+runtimes iOS instalados aceitam e a imagem Android que um AVD novo usaria. O --profiles acrescenta os perfis de
+aparelho do avdmanager, como pixel_10_pro.
+
+O open liga o aparelho pelo nome, sem diferença de caixa, e com espaço e "_" valendo o mesmo:
+  - um simulador ou AVD que já existe, pelo nome ou pelo UDID: liga, ou só traz a janela quando já está ligado;
+  - um modelo iOS, como "iPhone 18 Pro": cria o simulador no runtime mais novo que aceita o modelo, e liga;
+  - um perfil Android, como "Pixel 10 Pro" ou pixel_10_pro: cria o AVD com a imagem instalada mais nova — a do Google
+    Play, na arquitetura da máquina — e liga.
+Sem NOME, liga o único aparelho que existe; com mais de um, para e lista.
+
+  --wait              espera o aparelho terminar de ligar (simctl bootstatus; sys.boot_completed no adb); sem ele,
+                      o open devolve o terminal logo
+  --download          baixa o que falta: o runtime iOS (xcodebuild -downloadPlatform iOS) ou a imagem Android
+                      (sdkmanager); são vários GB. Sem ele, o comando para e diz o que rodar
+  --runtime VERSÃO    com --download, a versão do iOS a baixar, como 27.0; sem ela, a mais nova
+  --image PACOTE      a imagem do AVD novo, como "system-images;android-36.1;google_apis_playstore;arm64-v8a"
+
+O SDK Android é o de ANDROID_HOME, de ANDROID_SDK_ROOT ou o ~/Library/Android/sdk, e os AVDs, os de ANDROID_AVD_HOME ou
+de ~/.android/avd. O avdmanager e o sdkmanager pedem um Java: sem JAVA_HOME, vale o que vem no Android Studio. O
+emulador roda solto do terminal, com a saída em <temporário>/brza-devices-<avd>.log.
+
+Saídas: 0 feito; 1 o aparelho, o runtime ou a imagem faltou, ou a ferramenta falhou; 2 uso errado.
+"""
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+STUDIO_JAVA = Path('/Applications/Android Studio.app/Contents/jbr/Contents/Home')
+BOOT_TIMEOUT = 300
+TAG_ORDER = ('google_apis_playstore', 'google_apis', 'default')
+FIRST_PORT, LAST_PORT = 5554, 5584
+
+
+class DevicesError(RuntimeError):
+    """O aparelho, o runtime, a imagem ou a ferramenta não deu o que o comando precisa."""
+
+
+def run(args: list[str], *, input: str | None = None, timeout: float | None = 120, env: dict | None = None,
+        capture: bool = True) -> subprocess.CompletedProcess:
+    """Roda a ferramenta; sem capture, a saída vai ao terminal, para o download mostrar o progresso."""
+    try:
+        return subprocess.run(args, input=input, capture_output=capture, text=True, timeout=timeout, env=env)
+    except FileNotFoundError:
+        raise DevicesError(f'{args[0]} não está instalado') from None
+    except subprocess.TimeoutExpired:
+        raise DevicesError(f'{" ".join(args[:3])} não respondeu em {timeout:.0f} s') from None
+
+
+def norm(name: str) -> str:
+    """O nome para comparar: sem caixa, e com "_" e espaço valendo o mesmo."""
+    return ' '.join(name.replace('_', ' ').casefold().split())
+
+
+def version_key(text: str) -> tuple:
+    """A versão numérica de "iOS 27.0" ou de "android-36.1", para ordenar; o que não tem número fica por último."""
+    numbers = re.findall(r'\d+', text)
+    return tuple(int(n) for n in numbers) if numbers else (-1,)
+
+
+# --- iOS ------------------------------------------------------------------------------------------------------------
+
+def simctl() -> dict:
+    """O xcrun simctl list -j; sem o Xcode, vazio."""
+    if not shutil.which('xcrun'):
+        return {}
+    r = run(['xcrun', 'simctl', 'list', '-j'])
+    if r.returncode:
+        raise DevicesError(f'o simctl não listou os aparelhos ({r.stderr.strip()})')
+    return json.loads(r.stdout)
+
+
+def ios_runtimes(state: dict) -> list[dict]:
+    """Os runtimes iOS disponíveis, do mais novo ao mais velho."""
+    runtimes = [r for r in state.get('runtimes', []) if r.get('isAvailable') and r.get('platform', 'iOS') == 'iOS']
+    return sorted(runtimes, key=lambda r: version_key(r.get('version', r['name'])), reverse=True)
+
+
+def ios_devices(state: dict) -> list[dict]:
+    """Os simuladores iOS dos runtimes disponíveis: os ligados primeiro, depois do runtime mais novo ao mais velho."""
+    out = []
+    for rank, runtime in enumerate(ios_runtimes(state)):
+        for d in state.get('devices', {}).get(runtime['identifier'], []):
+            if d.get('isAvailable', True):
+                out.append({'platform': 'ios', 'name': d['name'], 'id': d['udid'], 'on': d.get('state') == 'Booted',
+                            'os': runtime['name'], 'rank': rank})
+    return sorted(out, key=lambda d: (not d['on'], d['rank']))
+
+
+def ios_models(state: dict) -> list[dict]:
+    """Cada modelo que algum runtime instalado aceita, com o runtime mais novo que o aceita."""
+    seen, out = set(), []
+    for runtime in ios_runtimes(state):
+        for t in runtime.get('supportedDeviceTypes', []):
+            if t['name'] not in seen:
+                seen.add(t['name'])
+                out.append({'name': t['name'], 'type': t['identifier'], 'runtime': runtime['identifier'],
+                            'os': runtime['name']})
+    return out
+
+
+def ios_known_type(state: dict, name: str) -> bool:
+    return any(norm(t['name']) == norm(name) for t in state.get('devicetypes', []))
+
+
+def ios_open(device: dict, wait: bool):
+    if not device['on']:
+        r = run(['xcrun', 'simctl', 'boot', device['id']])
+        if r.returncode and 'Booted' not in r.stderr:
+            raise DevicesError(f'o simctl não ligou {device["name"]} ({r.stderr.strip()})')
+    run(['open', '-a', 'Simulator', '--args', '-CurrentDeviceUDID', device['id']])
+    if wait:
+        r = run(['xcrun', 'simctl', 'bootstatus', device['id']], timeout=BOOT_TIMEOUT)
+        if r.returncode:
+            raise DevicesError(f'{device["name"]} não terminou de ligar ({r.stderr.strip()})')
+
+
+def ios_create(model: dict) -> dict:
+    r = run(['xcrun', 'simctl', 'create', model['name'], model['type'], model['runtime']])
+    if r.returncode:
+        raise DevicesError(f'o simctl não criou {model["name"]} ({r.stderr.strip()})')
+    return {'platform': 'ios', 'name': model['name'], 'id': r.stdout.strip(), 'on': False, 'os': model['os']}
+
+
+def ios_download_command(version: str | None) -> list[str]:
+    return ['xcodebuild', '-downloadPlatform', 'iOS', *(['-buildVersion', version] if version else [])]
+
+
+# --- Android --------------------------------------------------------------------------------------------------------
+
+def sdk_root() -> Path | None:
+    for candidate in (os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'),
+                      str(Path.home() / 'Library' / 'Android' / 'sdk')):
+        if candidate and Path(candidate).is_dir():
+            return Path(candidate)
+    return None
+
+
+def avd_home() -> Path:
+    if os.environ.get('ANDROID_AVD_HOME'):
+        return Path(os.environ['ANDROID_AVD_HOME'])
+    user = Path(os.environ.get('ANDROID_USER_HOME') or Path.home() / '.android')
+    return user / 'avd'
+
+
+def need_sdk() -> Path:
+    sdk = sdk_root()
+    if not sdk:
+        raise DevicesError('não achei o SDK Android; instale o Android Studio ou aponte ANDROID_HOME')
+    return sdk
+
+
+def adb(sdk: Path | None) -> str:
+    local = sdk / 'platform-tools' / 'adb' if sdk else None
+    return str(local) if local and local.exists() else 'adb'
+
+
+def java_env() -> dict:
+    """O ambiente do avdmanager e do sdkmanager: o JAVA_HOME dado, ou o Java que vem no Android Studio."""
+    env = dict(os.environ)
+    if not env.get('JAVA_HOME') and STUDIO_JAVA.is_dir():
+        env['JAVA_HOME'] = str(STUDIO_JAVA)
+    return env
+
+
+def cmdline_tool(sdk: Path, name: str) -> str:
+    tool = sdk / 'cmdline-tools' / 'latest' / 'bin' / name
+    if not tool.exists():
+        raise DevicesError(f'{tool} não existe; instale o Android SDK Command-line Tools pelo SDK Manager do Android '
+                           'Studio')
+    return str(tool)
+
+
+def ini(path: Path) -> dict:
+    out = {}
+    try:
+        for line in path.read_text(errors='replace').splitlines():
+            key, sep, value = line.partition('=')
+            if sep:
+                out[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return out
+
+
+def running_avds(sdk: Path | None) -> dict[str, str]:
+    """O AVD de cada emulador que o adb vê, como {nome do AVD: serial}."""
+    if not (sdk or shutil.which('adb')):
+        return {}
+    r = run([adb(sdk), 'devices'])
+    if r.returncode:
+        return {}
+    out = {}
+    for line in r.stdout.splitlines()[1:]:
+        fields = line.split()
+        if fields and fields[0].startswith('emulator-'):
+            name = run([adb(sdk), '-s', fields[0], 'emu', 'avd', 'name'])
+            first = name.stdout.splitlines()[0].strip() if name.returncode == 0 and name.stdout.strip() else ''
+            if first:
+                out[first] = fields[0]
+    return out
+
+
+def android_devices(sdk: Path | None) -> list[dict]:
+    """Os AVDs de ~/.android/avd, com o nome de exibição, a imagem e o serial quando ligados."""
+    home = avd_home()
+    if not home.is_dir():
+        return []
+    running = running_avds(sdk)
+    out = []
+    for entry in sorted(home.glob('*.ini')):
+        name, info = entry.stem, ini(entry)
+        config = ini(Path(info.get('path', home / f'{name}.avd')) / 'config.ini')
+        sysdir = config.get('image.sysdir.1', '').strip('/').split('/')
+        out.append({'platform': 'android', 'name': name, 'id': name,
+                    'label': config.get('avd.ini.displayname', name), 'on': name in running,
+                    'serial': running.get(name), 'os': sysdir[1] if len(sysdir) > 1 else info.get('target', '')})
+    return sorted(out, key=lambda d: not d['on'])
+
+
+def system_images(sdk: Path | None) -> list[str]:
+    """As imagens instaladas, como pacote do sdkmanager; só conta a pasta que tem a imagem dentro."""
+    root = sdk / 'system-images' if sdk else None
+    if not root or not root.is_dir():
+        return []
+    return [f'system-images;{p.parent.parent.name};{p.parent.name};{p.name}'
+            for p in root.glob('*/*/*') if p.is_dir() and any(p.iterdir())]
+
+
+def machine_abi() -> str:
+    return 'arm64-v8a' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+
+
+def best_image(images: list[str]) -> str | None:
+    """A imagem da arquitetura da máquina, do Google Play antes das outras, da API mais nova."""
+    def key(package: str):
+        _, api, tag, _ = package.split(';')
+        return (TAG_ORDER.index(tag) if tag in TAG_ORDER else len(TAG_ORDER), tuple(-n for n in version_key(api)))
+    fit = [p for p in images if p.count(';') == 3 and p.endswith(';' + machine_abi())]
+    return min(fit, key=key) if fit else None
+
+
+def android_profiles(sdk: Path) -> list[str]:
+    r = run([cmdline_tool(sdk, 'avdmanager'), 'list', 'device', '-c'], env=java_env())
+    if r.returncode:
+        raise DevicesError(f'o avdmanager não listou os perfis ({(r.stderr or r.stdout).strip()[-300:]})')
+    return [line.strip() for line in r.stdout.splitlines() if re.fullmatch(r'[\w.-]+', line.strip())]
+
+
+def available_images(sdk: Path) -> list[str]:
+    r = run([cmdline_tool(sdk, 'sdkmanager'), '--list'], env=java_env(), timeout=300)
+    if r.returncode:
+        raise DevicesError(f'o sdkmanager não listou as imagens ({(r.stderr or r.stdout).strip()[-300:]})')
+    return sorted({m.group(0) for m in re.finditer(r'system-images;[\w.-]+;[\w.-]+;[\w.-]+', r.stdout)})
+
+
+def android_download(sdk: Path, package: str):
+    print(f'baixando {package} pelo sdkmanager…', file=sys.stderr)
+    r = run([cmdline_tool(sdk, 'sdkmanager'), package], input='y\n' * 50, env=java_env(), timeout=None,
+            capture=False)
+    if r.returncode:
+        raise DevicesError(f'o sdkmanager não baixou {package}')
+
+
+def avd_name(name: str) -> str:
+    return re.sub(r'\W+', '_', name).strip('_')
+
+
+def android_create(sdk: Path, name: str, profile: str, image: str) -> dict:
+    avd = avd_name(name)
+    r = run([cmdline_tool(sdk, 'avdmanager'), 'create', 'avd', '-n', avd, '-k', image, '-d', profile],
+            input='no\n', env=java_env())
+    if r.returncode:
+        raise DevicesError(f'o avdmanager não criou {avd} ({(r.stderr or r.stdout).strip()[-300:]})')
+    return {'platform': 'android', 'name': avd, 'id': avd, 'label': name, 'on': False, 'serial': None,
+            'os': image.split(';')[1]}
+
+
+def free_port(sdk: Path | None) -> int:
+    r = run([adb(sdk), 'devices']) if (sdk or shutil.which('adb')) else None
+    used = set(re.findall(r'emulator-(\d+)', r.stdout)) if r and r.returncode == 0 else set()
+    for port in range(FIRST_PORT, LAST_PORT + 1, 2):
+        if str(port) not in used:
+            return port
+    raise DevicesError(f'as portas de {FIRST_PORT} a {LAST_PORT} estão todas em uso por emuladores')
+
+
+def spawn(args: list[str], log: Path):
+    """O emulador solto do terminal, com a saída no log."""
+    with log.open('w') as out:
+        subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def android_open(sdk: Path, device: dict, wait: bool) -> str:
+    """Liga o AVD e devolve o serial; o que já está ligado só devolve o serial dele."""
+    if device['on']:
+        serial = device['serial']
+    else:
+        emulator = sdk / 'emulator' / 'emulator'
+        if not emulator.exists():
+            raise DevicesError(f'{emulator} não existe; instale o Android Emulator pelo SDK Manager do Android Studio')
+        port = free_port(sdk)
+        log = Path(tempfile.gettempdir()) / f'brza-devices-{device["name"]}.log'
+        spawn([str(emulator), '-avd', device['name'], '-port', str(port)], log)
+        serial = f'emulator-{port}'
+    if wait:
+        android_wait(sdk, serial)
+    return serial
+
+
+def android_wait(sdk: Path, serial: str, timeout: float = BOOT_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    run([adb(sdk), '-s', serial, 'wait-for-device'], timeout=timeout)
+    while time.monotonic() < deadline:
+        r = run([adb(sdk), '-s', serial, 'shell', 'getprop', 'sys.boot_completed'])
+        if r.returncode == 0 and r.stdout.strip() == '1':
+            return
+        time.sleep(2)
+    raise DevicesError(f'{serial} não terminou de ligar em {timeout:.0f} s')
+
+
+# --- A escolha ------------------------------------------------------------------------------------------------------
+
+def platforms(a) -> set[str]:
+    return {'ios'} if a.ios else {'android'} if a.android else {'ios', 'android'}
+
+
+def existing(wanted: set[str], state: dict, sdk: Path | None) -> list[dict]:
+    return (ios_devices(state) if 'ios' in wanted else []) + (android_devices(sdk) if 'android' in wanted else [])
+
+
+def describe(device: dict) -> str:
+    label = device.get('label') or device['name']
+    state = 'ligado' if device['on'] else 'desligado'
+    return f'{label} ({"iOS" if device["platform"] == "ios" else "Android"}, {device["os"]}, {state}, {device["id"]})'
+
+
+def find_existing(devices: list[dict], name: str) -> dict | None:
+    for d in devices:
+        if name == d['id'] or norm(name) in (norm(d['name']), norm(d.get('label', d['name']))):
+            return d
+    return None
+
+
+def open_device(a) -> str:
+    wanted, state = platforms(a), simctl() if not a.android else {}
+    sdk = sdk_root() if not a.ios else None
+    devices = existing(wanted, state, sdk)
+    if not a.name:
+        if len(devices) == 1:
+            return start(devices[0], a, sdk)
+        if not devices:
+            raise DevicesError('nenhum simulador nem AVD criado; diga o modelo, como brza devices open "iPhone 18 Pro"')
+        raise DevicesError('mais de um aparelho; diga qual pelo nome:\n  ' + '\n  '.join(describe(d) for d in devices))
+    found = find_existing(devices, a.name)
+    if found:
+        return start(found, a, sdk)
+    if 'ios' in wanted and state:
+        model = next((m for m in ios_models(state) if norm(m['name']) == norm(a.name)), None)
+        if model:
+            return start(ios_create(model), a, sdk, created=True)
+        if ios_known_type(state, a.name):
+            return ios_missing_runtime(a, wanted, sdk)
+    if 'android' in wanted:
+        sdk = sdk or need_sdk()
+        profile = next((p for p in android_profiles(sdk) if norm(p) == norm(a.name)), None)
+        if profile:
+            image = android_image(sdk, a)
+            return start(android_create(sdk, a.name, profile, image), a, sdk, created=True)
+    raise DevicesError(f'"{a.name}" não é aparelho criado, modelo iOS nem perfil Android; veja brza devices list '
+                       '--profiles')
+
+
+def ios_missing_runtime(a, wanted: set[str], sdk: Path | None) -> str:
+    command = ios_download_command(a.runtime)
+    if not a.download:
+        raise DevicesError(f'nenhum runtime iOS instalado aceita o {a.name}; baixe um com --download, que roda '
+                           f'{" ".join(command)}, e escolha a versão com --runtime')
+    print(f'baixando o runtime iOS{" " + a.runtime if a.runtime else ""} pelo xcodebuild…', file=sys.stderr)
+    if run(command, timeout=None, capture=False).returncode:
+        raise DevicesError(f'o {" ".join(command)} falhou')
+    model = next((m for m in ios_models(simctl()) if norm(m['name']) == norm(a.name)), None)
+    if not model:
+        raise DevicesError(f'o runtime baixado também não aceita o {a.name}; tente outra versão com --runtime')
+    return start(ios_create(model), a, sdk, created=True)
+
+
+def android_image(sdk: Path, a) -> str:
+    installed = system_images(sdk)
+    if a.image and a.image in installed:
+        return a.image
+    image = a.image or best_image(installed)
+    if image and image in installed:
+        return image
+    if not a.download:
+        hint = f'sdkmanager "{a.image}"' if a.image else 'a imagem mais nova do Google Play'
+        raise DevicesError(f'nenhuma imagem Android {machine_abi()} instalada para o AVD novo; baixe com --download '
+                           f'({hint}), ou escolha uma com --image')
+    image = a.image or best_image(available_images(sdk))
+    if not image:
+        raise DevicesError(f'o sdkmanager não oferece imagem {machine_abi()}; escolha uma com --image')
+    android_download(sdk, image)
+    return image
+
+
+def start(device: dict, a, sdk: Path | None, created: bool = False) -> str:
+    verb = 'criado e ligado' if created else 'já estava ligado' if device['on'] else 'ligado'
+    if device['platform'] == 'ios':
+        ios_open(device, a.wait)
+        where = device['id']
+    else:
+        where = android_open(sdk or need_sdk(), device, a.wait)
+    ready = ', pronto' if a.wait else ''
+    return f'{device.get("label") or device["name"]}: {verb}{ready} ({device["os"]}, {where})'
+
+
+# --- A lista --------------------------------------------------------------------------------------------------------
+
+def listing(a) -> dict:
+    wanted = platforms(a)
+    out = {}
+    if 'ios' in wanted:
+        state = simctl()
+        devices = ios_devices(state)
+        names = {norm(d['name']) for d in devices}
+        out['ios'] = {'devices': devices,
+                      'models': [m for m in ios_models(state) if norm(m['name']) not in names]}
+    if 'android' in wanted:
+        sdk = sdk_root()
+        out['android'] = {'devices': android_devices(sdk), 'image': best_image(system_images(sdk)),
+                          'sdk': str(sdk) if sdk else None}
+        if a.profiles and sdk:
+            out['android']['profiles'] = android_profiles(sdk)
+    return out
+
+
+def print_listing(data: dict):
+    if 'ios' in data:
+        ios = data['ios']
+        print('iOS')
+        for d in ios['devices']:
+            print(f'  {"●" if d["on"] else "○"} {d["name"]:<28} {d["os"]:<10} {d["id"]}')
+        if not ios['devices']:
+            print('  nenhum simulador; instale o Xcode' if not ios['models'] else '  nenhum simulador')
+        if ios['models']:
+            by_os = {}
+            for m in ios['models']:
+                by_os.setdefault(m['os'], []).append(m['name'])
+            for os_name, names in by_os.items():
+                print(f'  para criar no {os_name}: {", ".join(names)}')
+    if 'android' in data:
+        android = data['android']
+        print('Android')
+        if not android['sdk']:
+            print('  sem o SDK; instale o Android Studio ou aponte ANDROID_HOME')
+        for d in android['devices']:
+            serial = f' {d["serial"]}' if d['serial'] else ''
+            print(f'  {"●" if d["on"] else "○"} {d["label"]:<28} {d["os"]:<10} {d["name"]}{serial}')
+        if android['sdk'] and not android['devices']:
+            print('  nenhum AVD')
+        if android['sdk']:
+            image = android['image'] or f'nenhuma imagem {machine_abi()} instalada (--download baixa uma)'
+            print(f'  AVD novo: um perfil do avdmanager, com {image}')
+        if android.get('profiles'):
+            print(f'  perfis: {", ".join(android["profiles"])}')
+        elif android['sdk']:
+            print('  os perfis: brza devices list --profiles')
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog='brza devices',
+        description='Lista, cria e abre os simuladores iOS e os emuladores Android da máquina.')
+    sub = ap.add_subparsers(dest='action')
+    ls = sub.add_parser('list', help='os aparelhos e o que dá para criar (o padrão)')
+    op = sub.add_parser('open', help='liga um aparelho pelo nome, e o cria antes quando é modelo ou perfil')
+    for p in (ap, ls, op):
+        target = p.add_mutually_exclusive_group()
+        target.add_argument('--ios', action='store_true', default=argparse.SUPPRESS, help='só o iOS')
+        target.add_argument('--android', action='store_true', default=argparse.SUPPRESS, help='só o Android')
+    for p in (ap, ls):
+        p.add_argument('--profiles', action='store_true', default=argparse.SUPPRESS,
+                       help='acrescenta os perfis do avdmanager')
+        p.add_argument('--json', action='store_true', default=argparse.SUPPRESS, help='a lista em JSON')
+    op.add_argument('name', nargs='?', metavar='NOME', help='o aparelho, o modelo iOS ou o perfil Android')
+    op.add_argument('--wait', action='store_true', help='espera o aparelho terminar de ligar')
+    op.add_argument('--download', action='store_true', help='baixa o runtime iOS ou a imagem Android que falta')
+    op.add_argument('--runtime', metavar='VERSÃO', help='com --download, a versão do iOS, como 27.0')
+    op.add_argument('--image', metavar='PACOTE', help='a imagem do AVD novo, no nome do sdkmanager')
+    a = ap.parse_args(argv)
+    for flag in ('ios', 'android', 'profiles', 'json'):
+        setattr(a, flag, getattr(a, flag, False))
+    try:
+        if a.action == 'open':
+            if a.runtime and not a.download:
+                ap.error('--runtime só vale com --download')
+            print(open_device(a))
+        else:
+            data = listing(a)
+            if a.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2))
+            else:
+                print_listing(data)
+    except DevicesError as e:
+        sys.exit(f'brza devices: {e}')
+
+
+if __name__ == '__main__':
+    main()
