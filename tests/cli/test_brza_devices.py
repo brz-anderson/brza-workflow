@@ -48,7 +48,9 @@ class Fake:
     """O run falso: responde cada ferramenta pelo começo dos argumentos e guarda as chamadas."""
 
     def __init__(self, state=None, adb='List of devices attached\n\n', avd_names=None, profiles='pixel_10_pro\n',
-                 sdk_list='', fail=()):
+                 sdk_list='', fail=(), sysctl=None):
+        machine = {'hw.memsize': str(24 * 2 ** 30), 'hw.perflevel0.physicalcpu': '5'}
+        self.sysctl = sysctl if sysctl is not None else machine
         self.state = state if state is not None else simctl()
         self.adb, self.avd_names, self.profiles, self.sdk_list, self.fail = adb, avd_names or {}, profiles, \
             sdk_list, fail
@@ -71,6 +73,13 @@ class Fake:
             out = '1\n'
         elif name == 'avdmanager' and args[1:3] == ['list', 'device']:
             out = self.profiles
+        elif name == 'avdmanager' and args[1:3] == ['create', 'avd']:
+            folder = Path(os.environ['ANDROID_AVD_HOME']) / f'{args[4]}.avd'
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / 'config.ini').write_text('hw.gpu.mode=auto\nhw.ramSize=2048\nhw.lcd.width=1080\n')
+        elif args[0] == 'sysctl':
+            out = self.sysctl.get(args[2], '')
+            code = 0 if out else 1
         elif name == 'sdkmanager' and args[1:] == ['--list']:
             out = self.sdk_list
         if any(f in ' '.join(args) for f in self.fail):
@@ -244,6 +253,8 @@ class DevicesTest(unittest.TestCase):
         self.assertEqual(fake.inputs[fake.calls.index(create)], 'no\n')
         self.assertEqual(self.spawned[0][1:3], ['-avd', 'Pixel_10_Pro'])
         self.assertIn('Pixel 10 Pro: criado e ligado (android-36.1, emulator-5554)', out)
+        config = (self.avds / 'Pixel_10_Pro.avd' / 'config.ini').read_text()
+        self.assertEqual(config, 'hw.gpu.mode=host\nhw.ramSize=4096\nhw.lcd.width=1080\nhw.cpu.ncore=6\n')
 
     def test_android_profile_without_image_points_to_download(self):
         code, _, _ = self.run_main(Fake(), 'open', 'pixel_10_pro', '--android')
@@ -274,6 +285,32 @@ class DevicesTest(unittest.TestCase):
         with patch.object(Path, 'home', lambda: self.sdk / 'nada'):
             code, out, _ = self.run_main(Fake(), 'list', '--android')
         self.assertIn('sem o SDK', out)
+
+
+class TuningTest(unittest.TestCase):
+    def tuning(self, sysctl, cpus=15):
+        fake = Fake(sysctl=sysctl)
+        with patch.dict(GLOBALS, run=fake), patch.object(GLOBALS['os'], 'cpu_count', lambda: cpus), \
+                patch.object(GLOBALS['shutil'], 'which', lambda tool: '/usr/sbin/' + tool):
+            return DEVICES['host_tuning']()
+
+    def test_half_the_ram_up_to_4_gb_and_the_performance_cores_plus_one(self):
+        self.assertEqual(self.tuning({'hw.memsize': str(24 * 2 ** 30), 'hw.perflevel0.physicalcpu': '5'}),
+                         {'hw.gpu.mode': 'host', 'hw.ramSize': '4096', 'hw.cpu.ncore': '6'})
+        self.assertEqual(self.tuning({'hw.memsize': str(6 * 2 ** 30), 'hw.perflevel0.physicalcpu': '4'}, cpus=4),
+                         {'hw.gpu.mode': 'host', 'hw.ramSize': '3072', 'hw.cpu.ncore': '4'})
+
+    def test_without_sysctl_answers_falls_back_to_2_gb_and_half_the_cores(self):
+        self.assertEqual(self.tuning({}, cpus=8), {'hw.gpu.mode': 'host', 'hw.ramSize': '2048', 'hw.cpu.ncore': '4'})
+
+    def test_tune_replaces_and_appends_and_a_missing_config_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.ini'
+            config.write_text('a=1\nhw.gpu.mode=auto\n')
+            DEVICES['tune_avd'](config, {'hw.gpu.mode': 'host', 'hw.ramSize': '4096'})
+            self.assertEqual(config.read_text(), 'a=1\nhw.gpu.mode=host\nhw.ramSize=4096\n')
+            with self.assertRaisesRegex(DEVICES['DevicesError'], 'não li'):
+                DEVICES['tune_avd'](Path(tmp) / 'nada' / 'config.ini', {})
 
 
 class HelpersTest(unittest.TestCase):

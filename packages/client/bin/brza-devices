@@ -12,7 +12,9 @@ O open liga o aparelho pelo nome, sem diferença de caixa, e com espaço e "_" v
   - um simulador ou AVD que já existe, pelo nome ou pelo UDID: liga, ou só traz a janela quando já está ligado;
   - um modelo iOS, como "iPhone 18 Pro": cria o simulador no runtime mais novo que aceita o modelo, e liga;
   - um perfil Android, como "Pixel 10 Pro" ou pixel_10_pro: cria o AVD com a imagem instalada mais nova — a do Google
-    Play, na arquitetura da máquina — e liga.
+    Play, na arquitetura da máquina —, ajusta e liga. O ajuste põe a GPU do Mac (hw.gpu.mode=host), metade da RAM
+    até 4 GB e os núcleos de desempenho mais um: com o gpu auto, o emulador cai no renderizador por software quando
+    vê pouca memória livre ao subir.
 Sem NOME, liga o único aparelho que existe; com mais de um, para e lista.
 
   --wait              espera o aparelho terminar de ligar (simctl bootstatus; sys.boot_completed no adb); sem ele,
@@ -286,8 +288,40 @@ def android_create(sdk: Path, name: str, profile: str, image: str) -> dict:
             input='no\n', env=java_env())
     if r.returncode:
         raise DevicesError(f'o avdmanager não criou {avd} ({(r.stderr or r.stdout).strip()[-300:]})')
+    tune_avd(avd_home() / f'{avd}.avd' / 'config.ini', host_tuning())
     return {'platform': 'android', 'name': avd, 'id': avd, 'label': name, 'on': False, 'serial': None,
             'os': image.split(';')[1]}
+
+
+def sysctl(name: str) -> int | None:
+    r = run(['sysctl', '-n', name]) if shutil.which('sysctl') else None
+    return int(r.stdout.strip()) if r and r.returncode == 0 and r.stdout.strip().isdigit() else None
+
+
+def host_tuning() -> dict[str, str]:
+    """A config do AVD novo pela máquina: a GPU do Mac, metade da RAM até 4 GB e os núcleos de desempenho mais um.
+    Com o hw.gpu.mode=auto, o emulador cai no renderizador por software quando vê pouca memória livre ao subir, e
+    trava."""
+    memory, performance = sysctl('hw.memsize'), sysctl('hw.perflevel0.physicalcpu')
+    total = os.cpu_count() or 4
+    ram = min(4096, memory // 2 // 2 ** 20) if memory else 2048
+    cores = min(total, performance + 1) if performance else max(2, total // 2)
+    return {'hw.gpu.mode': 'host', 'hw.ramSize': str(ram), 'hw.cpu.ncore': str(cores)}
+
+
+def tune_avd(config: Path, values: dict[str, str]):
+    """Troca no config.ini do AVD cada chave dada, e acrescenta a que falta."""
+    try:
+        lines = config.read_text().splitlines()
+    except OSError as e:
+        raise DevicesError(f'o AVD foi criado, mas não li o {config} para ajustar ({e})') from None
+    left = dict(values)
+    out = []
+    for line in lines:
+        key = line.partition('=')[0].strip()
+        out.append(f'{key}={left.pop(key)}' if key in left else line)
+    out += [f'{k}={v}' for k, v in left.items()]
+    config.write_text('\n'.join(out) + '\n')
 
 
 def free_port(sdk: Path | None) -> int:
