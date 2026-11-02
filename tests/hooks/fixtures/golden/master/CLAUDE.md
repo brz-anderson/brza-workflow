@@ -117,13 +117,16 @@ está nos dois papéis. O `.claude/hooks/fact_audit.py`, segundo hook do `Subage
 | :------------- | :------------------------------------------- | :------------------------------------------------------------------ |
 | `fact`         | uma por marca                                | o id, o tipo de evidência, a confiança, o texto e a fonte           |
 | `fact_capture` | uma por trecho lido                          | as marcas, as malformadas e a devolução sem marca                   |
-| `fact_check`   | uma por fato `rodado`, `lido` ou `doc`       | o veredito do Haiku (`holds`, `fails`, `unknown`) e o `cite`        |
+| `fact_check`   | uma por fato `rodado`, `lido` ou `doc`       | o veredito do Haiku (`holds`, `fails`, `unknown`), o `cite` e o `read` |
 | `fact_audit`   | uma por auditoria                            | os fatos enviados e conferidos, o custo, a duração e o erro         |
 | `fact_outcome` | pelo `scripts/fact_outcome.py`               | o desfecho que a sessão registra, com a `ref`                       |
 
-- **É o único hook que solta processo:** com fato auditável, o `stop` grava
-  `.measurements/fact-audit/<agente>-<offset>.json` e solta, sem esperar, um `claude -p --model haiku` só de leitura (`Read`, `Grep`, `Glob`, `WebFetch`; teto de
-  US$ 0,25 e 10 min) que refaz a evidência. O fato `rodado` se confere pela saída gravada, sem rodar de novo.
+- **É o único hook que solta processo:** com fato auditável, o `stop` grava o parágrafo de cada fato em
+  `.measurements/fact-audit/<agente>-<offset>.json` e solta, sem esperar, um `claude -p --model haiku` só de leitura
+  (`Read`, `Grep`, `Glob`, `WebFetch`), com teto de US$ 0,02 por fato, no mínimo US$ 0,25, e 10 min. O fato `rodado` se
+  confere pela saída gravada, sem rodar de novo.
+- **O veredito exige a leitura:** o Haiku diz o arquivo ou a URL que abriu, e o `holds` ou `fails` que não casa com uma
+  leitura da sessão dele vira `unknown`, com `read_ok: false`.
 - **Sem auditar a auditoria:** a sessão `-p` roda com `BRZA_FACT_AUDIT=1`; o `fact_audit.py` não a lê, e o `turn` dela
   sai com `fact_audit: true`, fora dos agregados do resumo.
 - **O desfecho da sessão:** o fato `inferido`, abaixo de 80 ou de custo (`C…`) não vai ao Haiku. A sessão o registra

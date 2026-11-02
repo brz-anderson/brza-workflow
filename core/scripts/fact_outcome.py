@@ -13,8 +13,10 @@ vale o último desfecho, que é como o resumo (`summarize_measurements.py --fact
 fato, e não o do cwd, porque chega de outra sessão.
 
 Saída 0, ou 2 no erro de uso, no fato ou prefixo que não se resolve e na falha de leitura ou gravação do log. O log é o
-do `measure.py` (`MEASURE_DIR` para teste), de `<raiz do workspace>/.claude/hooks/`: a raiz é a `BRZA_WORKSPACE`, ou o
-diretório acima de scripts/. Só biblioteca padrão, Python 3.9.
+do `measure.py` (`MEASURE_DIR` para teste), de `<raiz do workspace>/.claude/hooks/`: a raiz é a `BRZA_WORKSPACE` ou, sem
+ela e sem a `MEASURE_DIR`, o pai do `git rev-parse --git-common-dir` — o checkout principal, também de um worktree —,
+ou o diretório acima de scripts/ se o git falhar. O `--pending` diz no stderr o log lido e o workstream filtrado, e
+avisa quando ele é a branch da norma (`[workspace].branch` do manifesto) ou vazio. Só biblioteca padrão, Python 3.9.
 """
 
 import argparse
@@ -22,12 +24,50 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# A mesma raiz do summarize_measurements.py: a BRZA_WORKSPACE, ou o diretório acima de scripts/.
-WORKSPACE = os.environ.get("BRZA_WORKSPACE") or os.path.join(HERE, "..")
-MEASURE = os.path.normpath(os.path.join(WORKSPACE, ".claude", "hooks", "measure.py"))
+HOOK = os.path.join(".claude", "hooks", "measure.py")
+
+
+def git_root(here):
+    """O pai do `git rev-parse --git-common-dir` de `here`, que é o checkout principal mesmo num worktree, ou None se o
+    git falha ou o diretório comum não é um `.git`. A mesma função do summarize_measurements.py."""
+    try:
+        done = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=here, text=True,
+                              capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    common = done.stdout.strip()
+    if done.returncode != 0 or os.path.basename(common) != ".git":
+        return None
+    return os.path.dirname(common)
+
+
+def workspace_root(here=HERE, env=None):
+    """A raiz do workspace: com a `BRZA_WORKSPACE` ou a `MEASURE_DIR`, a de sempre (a variável, ou o diretório acima de
+    scripts/); sem as duas, o checkout principal pelo git, para o terminal de um worktree ler o log vivo, e não o
+    `.measurements/` velho do próprio worktree. O `measure.py` carregado dali escreve e lê no mesmo diretório."""
+    env = os.environ if env is None else env
+    if env.get("BRZA_WORKSPACE"):
+        return env["BRZA_WORKSPACE"]
+    if not env.get("MEASURE_DIR"):
+        root = git_root(here)
+        if root and os.path.isfile(os.path.join(root, HOOK)):
+            return root
+    return os.path.join(here, "..")
+
+
+WORKSPACE = workspace_root()
+MEASURE = os.path.normpath(os.path.join(WORKSPACE, HOOK))
+
+
+def norm_branch():
+    """A branch da norma do workspace do cwd (`[workspace].branch` do manifesto, pelo `brza_root` do `measure.py`), ou
+    None fora de um workspace: o `workstream_of` devolve esse nome no checkout da norma, que não guarda fatos."""
+    ws = measure.brza_root.find(os.getcwd())
+    return measure.brza_root.workspace_branch(ws.manifest) if ws else None
 
 
 def load_measure():
@@ -232,12 +272,14 @@ def main(argv=None):
         elif mode == "list":
             show(rows, a.list)
         else:
-            workstream = a.workstream
-            if not workstream:
-                workstream = measure.workstream_of(os.getcwd())
-                if not workstream:
-                    print("fact_outcome.py: o cwd não está num workstream; use --workstream <nome>|all",
-                          file=sys.stderr)
+            workstream = a.workstream or measure.workstream_of(os.getcwd())
+            print(f"fact_outcome.py: lendo {measure.LOG}; workstream {workstream or DASH}", file=sys.stderr)
+            if workstream and workstream == norm_branch():
+                print(f"fact_outcome.py: o workstream filtrado é {workstream}, a branch da norma, que não guarda fatos; "
+                      "use --workstream <nome>|all", file=sys.stderr)
+            elif not workstream:
+                print("fact_outcome.py: o cwd não está num workstream; use --workstream <nome>|all",
+                      file=sys.stderr)
             pending(rows, workstream, a.since)
     except Failure as e:
         print(f"fact_outcome.py: {e}", file=sys.stderr)

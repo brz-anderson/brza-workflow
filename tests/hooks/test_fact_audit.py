@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -48,6 +49,8 @@ def handback(message):
     return {"type": "tool_use", "id": "h", "name": "SubagentHandback", "input": {"message": message}}
 
 
+REAL_COLLECTOR = ("/Users/andepb/.claude/projects/-Users-andepb-Projects-brza-workspace--worktrees-studio/"
+                  "46242dd1-3e56-4dcf-9290-2b3f122d015a/subagents/agent-ab5aa7e0d74df08e7.jsonl")
 REAL_TRANSCRIPT = ("/Users/andepb/.claude/projects/-Users-andepb-Projects-brza-workspace--worktrees-workspace/"
                    "746b7a51-6fa4-47d9-95ef-35afb7fcc654/subagents/agent-a4e396c649819d3fd.jsonl")
 
@@ -164,10 +167,66 @@ class FactAuditTest(Base):
         self.assertIs(capture["unmarked"], True)
         self.assertEqual(capture["segment"], "first")
 
-    def test_text_of_a_fact_stops_at_300_characters(self):
-        self.append(user("x"), assistant(text("a" * 400 + " [F1 · lido · 90]")))
+    def test_text_of_a_fact_is_the_300_characters_that_end_at_the_mark(self):
+        claim = "a afirmação central fica aqui, perto do fim"
+        self.append(user("x"), assistant(text("b" * 400 + f" {claim} [F1 · lido · 90] e o que vem depois da marca")))
         self.run_hook()
-        self.assertEqual(len(self.events("fact")[0]["text"]), 300)
+        fact_text = self.events("fact")[0]["text"]
+        self.assertEqual(len(fact_text), 300)
+        self.assertTrue(fact_text.endswith(f"{claim} [F1 · lido · 90]"))  # termina na marca: o que vem depois fica fora
+
+    def test_text_of_a_fact_stays_inside_the_line_of_the_mark(self):
+        self.append(user("x"), assistant(text("linha anterior sem relação\numa linha curta [F1 · lido · 90]\nseguinte")))
+        self.run_hook()
+        self.assertEqual(self.events("fact")[0]["text"], "uma linha curta [F1 · lido · 90]")
+
+    def test_each_mark_of_a_long_line_carries_its_own_mark_in_the_text(self):
+        line = " ".join(f"frase {i} " + "x" * 150 + f" [F{i} · lido · 90]" for i in range(1, 4))
+        self.append(user("x"), assistant(text(line)))
+        self.run_hook()
+        for fact in self.events("fact"):
+            self.assertTrue(fact["text"].endswith(f"[{fact['fact_id']} · lido · 90]"), fact["text"])
+            self.assertLessEqual(len(fact["text"]), 300)
+
+    def test_real_collector_texts_all_carry_their_own_mark(self):
+        if not os.path.exists(REAL_COLLECTOR):
+            self.skipTest("transcript real ausente")
+        with open(REAL_COLLECTOR, encoding="utf-8") as f:
+            marks, _, _ = self.fa.marks_of(self.fa.sources_of(f.read().splitlines()))
+        self.assertGreater(len(marks), 20)
+        for fact_id, _, _, fact_text, _, context in marks:
+            self.assertIn(f"[{fact_id} ·", fact_text)
+            self.assertTrue(fact_text.endswith("]"), fact_id)
+            self.assertIn(f"[{fact_id} ·", context)
+            self.assertLessEqual(len(context), 2000)
+
+    def test_context_is_the_whole_paragraph_of_the_mark(self):
+        reply = ("# Título\n\nprimeiro parágrafo [F1 · lido · 90]\n\n"
+                 "início do segundo, que continua\nna linha de baixo, onde está a marca [F2 · doc · 80] e segue\n"
+                 "e termina aqui.\n  \nterceiro [F3 · rodado · 100]")
+        self.append(user("x"), assistant(text(reply)))
+        self.run_hook()
+        marks, _, _ = self.fa.marks_of([("reply", reply)])
+        self.assertEqual([m[5] for m in marks],
+                         ["primeiro parágrafo [F1 · lido · 90]",
+                          "início do segundo, que continua\nna linha de baixo, onde está a marca [F2 · doc · 80] e segue\n"
+                          "e termina aqui.",
+                          "terceiro [F3 · rodado · 100]"])
+        self.assertNotIn("context", self.events("fact")[0])  # o log leva só o `text`
+
+    def test_context_over_2000_characters_is_centered_on_the_mark(self):
+        reply = "a" * 1500 + " [F1 · lido · 90] " + "z" * 1500
+        (mark,), _, _ = self.fa.marks_of([("reply", reply)])
+        context = mark[5]
+        self.assertEqual(len(context), 2000)
+        self.assertIn("[F1 · lido · 90]", context)
+        self.assertAlmostEqual(context.index("[F1") + 8, 1000, delta=2)  # o centro da marca é o centro da janela
+
+    def test_context_window_stops_at_the_edge_of_the_paragraph(self):
+        reply = "[F1 · lido · 90] " + "z" * 3000
+        (mark,), _, _ = self.fa.marks_of([("reply", reply)])
+        self.assertEqual(len(mark[5]), 2000)
+        self.assertTrue(mark[5].startswith("[F1 · lido · 90]"))
 
     def test_only_the_last_text_message_of_the_segment_is_read(self):
         self.append(user("x"), assistant(text("rascunho [F1 · lido · 90]")),
@@ -280,6 +339,13 @@ class FactAuditTest(Base):
         c = self.events("fact_capture")[0]
         self.assertEqual((c["facts"], c["malformed"]), (0, 0))
 
+    def test_a_bare_id_cites_a_marked_fact_and_is_not_malformed(self):
+        self.append(user("x"), assistant(text(
+            "o hook só mede [F5 · lido · 95]. Como diz [F5]. e [F23] | e [C3]: nada novo; [F6 ·] segue malformada")))
+        self.run_hook()
+        self.assertEqual([f["fact_id"] for f in self.events("fact")], ["F5"])
+        self.assertEqual(self.events("fact_capture")[0]["malformed"], 1)
+
     def test_tolerance_does_not_leak_into_the_still_malformed_marks(self):
         self.append(user("x"), assistant(text(
             "[F4 · lido] [F5 · visto · 90] [F6 · lido · 120] [F7 · lido · 80-90] [F8 · lido · 90 ok] "
@@ -339,15 +405,18 @@ def bash_tool(tool_use_id, command):
     return {"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": {"command": command}}
 
 
-def make_spy(directory, stdout, exit_code=0, sleep=0):
-    """O `claude` trocado: grava os argumentos, o cwd, o ambiente e o arquivo da rodada, dorme e imprime o JSON fixo."""
+def make_spy(directory, stdout, exit_code=0, sleep=0, grandchild=0):
+    """O `claude` trocado: grava os argumentos, o cwd, o ambiente e o arquivo da rodada, dorme e imprime o stdout fixo.
+    Com `grandchild`, solta antes um neto que herda o pipe de saída e dorme esse tanto de segundos, e grava o pid dele em
+    `grandchild.pid`: é o que o servidor MCP do `claude -p` faz."""
     script = os.path.join(directory, "spy-claude")
     config = os.path.join(directory, "spy-config.json")
     with open(config, "w", encoding="utf-8") as f:
-        json.dump({"stdout": stdout, "exit": exit_code, "sleep": sleep, "record": os.path.join(directory, "spy.json")}, f)
+        json.dump({"stdout": stdout, "exit": exit_code, "sleep": sleep, "grandchild": grandchild,
+                   "record": os.path.join(directory, "spy.json"), "pid": os.path.join(directory, "grandchild.pid")}, f)
     with open(script, "w", encoding="utf-8") as f:
         f.write(f"""#!{sys.executable}
-import json, os, re, sys, time
+import json, os, re, subprocess, sys, time
 cfg = json.load(open({config!r}))
 args = sys.argv[1:]
 seen = None
@@ -356,6 +425,9 @@ for token in re.findall(r"\\S+\\.json", args[-1]):
         seen = json.load(open(token))
 json.dump({{"args": args, "cwd": os.getcwd(), "audit": os.environ.get("BRZA_FACT_AUDIT"), "file": seen}},
           open(cfg["record"], "w"))
+if cfg["grandchild"]:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(%d)" % cfg["grandchild"]])
+    open(cfg["pid"], "w").write(str(child.pid))
 time.sleep(cfg["sleep"])
 sys.stdout.write(cfg["stdout"])
 sys.exit(cfg["exit"])
@@ -364,12 +436,27 @@ sys.exit(cfg["exit"])
     return script
 
 
+DOC_URL = "https://example.org/doc"
 LINES = "\n".join([
-    json.dumps({"id": "F1", "verdict": "holds", "cite": "ok", "why": "a linha confere"}),
-    json.dumps({"id": "F2", "verdict": "holds", "cite": "off", "why": "verdadeiro, mas a linha citada é outra"}),
-    json.dumps({"id": "F3", "verdict": "fails", "cite": "ok", "why": "a saída gravada diz outra coisa"})])
+    json.dumps({"id": "F1", "verdict": "holds", "cite": "ok", "read": "src/a.py", "why": "a linha confere"}),
+    json.dumps({"id": "F2", "verdict": "holds", "cite": "off", "read": DOC_URL,
+                "why": "verdadeiro, mas a linha citada é outra"}),
+    json.dumps({"id": "F3", "verdict": "fails", "cite": "ok", "read": "runs", "why": "a saída gravada diz outra coisa"})])
 RESULT_OK = {"type": "result", "subtype": "success", "is_error": False, "result": LINES, "total_cost_usd": 0.0056,
              "num_turns": 4, "duration_ms": 9600}
+
+
+def stream(result, *tools):
+    """O stdout do `claude -p --output-format stream-json --verbose`: o `init`, um `assistant` por chamada de ferramenta
+    — `tools` são (nome, input) — e o `result` no fim."""
+    events = [{"type": "system", "subtype": "init", "tools": ["Read", "Grep"]}]
+    for i, (name, tool_input) in enumerate(tools):
+        events.append({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "abrindo"}, {"type": "tool_use", "id": f"u{i}", "name": name,
+                                                  "input": tool_input}]}})
+        events.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"u{i}", "content": "ok"}]}})
+    return "\n".join(json.dumps(e) for e in events + [result]) + "\n"
 
 
 class StopDispatchTest(Base):
@@ -398,6 +485,8 @@ class StopDispatchTest(Base):
         self.assertEqual([(f["id"], f["kind"], f["confidence"], f["source"]) for f in data["facts"]],
                          [("F1", "lido", 90, "reply"), ("F2", "doc", 75, "reply"), ("F3", "rodado", 100, "reply")])
         self.assertEqual(data["facts"][0]["text"], "a [F1 · lido · 90]")
+        self.assertEqual(data["facts"][2]["context"], "a [F1 · lido · 90]\nb [F2 · doc · 75]\nc [F3 · rodado · 100]\n"
+                                                      "d [F4 · inferido · 40]\ne [C1 · lido · 60]")  # um parágrafo só
         self.assertEqual(data["runs"], [])  # sem Bash no trecho
 
     def test_the_file_name_carries_the_offset_where_the_segment_starts(self):
@@ -454,7 +543,7 @@ class StopDispatchTest(Base):
 
     def test_real_process_is_not_waited_for(self):
         self.popen_patcher.stop()
-        spy = make_spy(self.tmp.name, stdout=json.dumps(RESULT_OK), sleep=2)
+        spy = make_spy(self.tmp.name, stdout=stream(RESULT_OK), sleep=2)
         self.append(user("x"), assistant(text("[F1 · lido · 90]")))
         with mock.patch.dict(os.environ, {"BRZA_FACT_AUDIT_CLAUDE": spy}):
             started = time.monotonic()
@@ -484,6 +573,28 @@ class RunTest(Base):
             json.dump({"agent_id": "a1", "agent_type": "designer", "session_id": "s1", "workstream": "workspace",
                        "cwd": self.cwd, "facts": facts, "runs": [{"command": "echo 1", "output": "1\n"}]}, f)
 
+    def stream(self, result, tools=None):
+        """O stream do espião; sem `tools`, a sessão abriu `src/a.py` (do cwd da rodada) e a URL do F2."""
+        if tools is None:
+            tools = [("Read", {"file_path": os.path.join(self.cwd, "src", "a.py")}), ("WebFetch", {"url": DOC_URL})]
+        return stream(result, *tools)
+
+    def audited(self, rows, tools=None, kinds=("lido", "doc", "rodado")):
+        """Roda a auditoria com o espião devolvendo `rows` (um dict por fato) e as `tools` abertas; devolve os
+        `fact_check` por id e o `fact_audit`."""
+        facts = [{"id": f"F{i}", "kind": k, "confidence": 90, "text": f"t{i}", "context": f"c{i}", "source": "reply"}
+                 for i, k in enumerate(kinds, 1)]
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"agent_id": "a1", "agent_type": "designer", "session_id": "s1", "workstream": "workspace",
+                       "cwd": self.cwd, "facts": facts, "runs": []}, f)
+        result = {**RESULT_OK, "result": "\n".join(json.dumps({"cite": "ok", "why": "x", **row}) for row in rows)}
+        self.spy(self.stream(result, tools))
+        if os.path.exists(self.fa.measure.LOG):
+            os.remove(self.fa.measure.LOG)  # o teste pode auditar mais de uma vez, e cada rodada começa sem eventos
+        self.run_audit()
+        (audit,) = self.events("fact_audit")
+        return {c["fact_id"]: c for c in self.events("fact_check")}, audit
+
     def spy(self, stdout, **kwargs):
         script = make_spy(self.tmp.name, stdout, **kwargs)
         patcher = mock.patch.dict(os.environ, {"BRZA_FACT_AUDIT_CLAUDE": script})
@@ -501,7 +612,7 @@ class RunTest(Base):
             return json.load(f)
 
     def test_success_writes_one_check_per_line_and_the_round_with_the_cost(self):
-        self.spy(json.dumps(RESULT_OK))
+        self.spy(self.stream(RESULT_OK))
         self.run_audit()
         checks = self.events("fact_check")
         self.assertEqual([(c["fact_id"], c["verdict"], c["cite"]) for c in checks],
@@ -509,15 +620,18 @@ class RunTest(Base):
         first = checks[0]
         self.assertEqual((first["agent_id"], first["agent_type"], first["session_id"], first["workstream"],
                           first["why"]), ("a1", "designer", "s1", "workspace", "a linha confere"))
+        self.assertEqual([(c["read"], c["read_ok"], "claimed" in c) for c in checks],
+                         [("src/a.py", True, False), (DOC_URL, True, False), ("runs", True, False)])
         self.assertIn("timestamp", first)
         (audit,) = self.events("fact_audit")
         self.assertEqual((audit["agent_id"], audit["agent_type"], audit["workstream"], audit["facts"], audit["checked"],
                           audit["ignored"], audit["cost_usd"], audit["num_turns"], audit["subtype"], audit["error"]),
                          ("a1", "designer", "workspace", 3, 3, 0, 0.0056, 4, "success", None))
+        self.assertEqual(audit["downgraded"], 0)
         self.assertIsInstance(audit["duration_s"], float)
 
     def test_the_spy_gets_the_command_the_cwd_and_the_env_and_the_file_is_deleted_after(self):
-        self.spy(json.dumps(RESULT_OK))
+        self.spy(self.stream(RESULT_OK))
         self.run_audit()
         seen = self.recorded()
         args = seen["args"]
@@ -525,7 +639,8 @@ class RunTest(Base):
         self.assertEqual(args[args.index("--model") + 1], "haiku")
         self.assertEqual(args[args.index("--tools") + 1], "Read,Grep,Glob,WebFetch")
         self.assertEqual(args[args.index("--add-dir") + 1], self.directory)
-        self.assertEqual(args[args.index("--output-format") + 1], "json")
+        self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", args)
         self.assertEqual(args[args.index("--max-budget-usd") + 1], "0.25")
         self.assertEqual(args[-1], self.fa.PROMPT.replace("{arquivo}", self.path))
         self.assertEqual(os.path.realpath(seen["cwd"]), os.path.realpath(self.cwd))
@@ -533,23 +648,102 @@ class RunTest(Base):
         self.assertEqual(seen["file"]["agent_id"], "a1")  # o arquivo existia quando o espião rodou
         self.assertFalse(os.path.exists(self.path))
 
-    def test_budget_is_twelve_thousandths_per_fact_with_a_floor_of_25_cents(self):
-        for count, expected in ((3, "0.25"), (20, "0.25"), (22, "0.26"), (24, "0.29"), (50, "0.60")):
+    def test_budget_is_two_cents_per_fact_with_a_floor_of_25_cents(self):
+        for count, expected in ((3, "0.25"), (12, "0.25"), (13, "0.26"), (21, "0.42"), (50, "1.00")):
             with self.subTest(facts=count):
                 facts = [{"id": f"F{i}", "kind": "lido", "confidence": 90, "text": f"t{i}", "source": "reply"}
                          for i in range(1, count + 1)]
                 with open(self.path, "w", encoding="utf-8") as f:
                     json.dump({"agent_id": "a1", "agent_type": "designer", "session_id": "s1", "workstream": "workspace",
                                "cwd": self.cwd, "facts": facts, "runs": []}, f)
-                self.spy(json.dumps(RESULT_OK))
+                self.spy(self.stream(RESULT_OK))
                 self.run_audit()
                 args = self.recorded()["args"]
                 self.assertEqual(args[args.index("--max-budget-usd") + 1], expected)
-        self.assertEqual((self.fa.BUDGET_PER_FACT, self.fa.BUDGET_MIN), (0.012, 0.25))
+        self.assertEqual((self.fa.BUDGET_PER_FACT, self.fa.BUDGET_MIN), (0.02, 0.25))
 
     def test_prompt_states_the_criteria(self):
-        for word in ("holds", "fails", "unknown", "cite", "off", "rodado", "lido", "doc", "runs", "{arquivo}"):
+        for word in ("holds", "fails", "unknown", "cite", "off", "rodado", "lido", "doc", "runs", "{arquivo}", "read", "context"):
             self.assertIn(word, self.fa.PROMPT)
+
+    def row(self, fact_id, verdict="holds", **fields):
+        return {"id": fact_id, "verdict": verdict, **fields}
+
+    def test_read_matches_a_read_of_the_same_file_absolute_or_relative_to_the_cwd(self):
+        absolute = os.path.join(self.cwd, "src", "a.py")
+        for read in ("src/a.py", absolute, "./src/../src/a.py", "src/a.py:38-47", f"{absolute}:12"):
+            with self.subTest(read=read):
+                checks, audit = self.audited([self.row("F1", read=read)], [("Read", {"file_path": absolute})],
+                                             kinds=("lido",))
+                self.assertEqual((checks["F1"]["verdict"], checks["F1"]["read_ok"], audit["downgraded"]),
+                                 ("holds", True, 0))
+                self.assertNotIn("claimed", checks["F1"])
+
+    def test_read_matches_a_file_inside_a_directory_that_went_through_the_grep(self):
+        checks, audit = self.audited(
+            [self.row("F1", read="pkg/deep/b.py"), self.row("F2", "fails", read=os.path.join(self.cwd, "pkg"))],
+            [("Grep", {"pattern": "x", "path": os.path.join(self.cwd, "pkg")})], kinds=("lido", "lido"))
+        self.assertEqual([(c["verdict"], c["read_ok"]) for c in checks.values()], [("holds", True), ("fails", True)])
+        self.assertEqual(audit["downgraded"], 0)
+
+    def test_a_grep_directory_does_not_cover_a_sibling_with_the_same_prefix(self):
+        checks, audit = self.audited([self.row("F1", read="pkg-other/b.py")],
+                                     [("Grep", {"pattern": "x", "path": os.path.join(self.cwd, "pkg")})],
+                                     kinds=("lido",))
+        self.assertEqual((checks["F1"]["verdict"], checks["F1"]["read_ok"], checks["F1"]["claimed"]),
+                         ("unknown", False, "holds"))
+
+    def test_read_matches_a_grep_on_the_file_itself(self):
+        checks, _ = self.audited([self.row("F1", read="src/a.py")],
+                                 [("Grep", {"pattern": "x", "path": os.path.join(self.cwd, "src", "a.py")})],
+                                 kinds=("lido",))
+        self.assertEqual((checks["F1"]["verdict"], checks["F1"]["read_ok"]), ("holds", True))
+
+    def test_read_matches_the_url_of_a_web_fetch_only_when_equal(self):
+        checks, audit = self.audited(
+            [self.row("F1", read=DOC_URL), self.row("F2", read=DOC_URL + "/outra")], [("WebFetch", {"url": DOC_URL})],
+            kinds=("doc", "doc"))
+        self.assertEqual([(c["verdict"], c["read_ok"]) for c in checks.values()], [("holds", True), ("unknown", False)])
+        self.assertEqual((checks["F2"]["claimed"], audit["downgraded"]), ("holds", 1))
+
+    def test_runs_is_valid_for_a_rodado_fact_and_only_for_it(self):
+        checks, audit = self.audited([self.row("F1", read="runs"), self.row("F2", "fails", read="runs")], tools=[],
+                                     kinds=("rodado", "lido"))
+        self.assertEqual((checks["F1"]["verdict"], checks["F1"]["read_ok"]), ("holds", True))
+        self.assertEqual((checks["F2"]["verdict"], checks["F2"]["read_ok"], checks["F2"]["claimed"]),
+                         ("unknown", False, "fails"))
+        self.assertEqual(audit["downgraded"], 1)
+
+    def test_a_verdict_without_a_matching_read_falls_to_unknown_and_keeps_what_was_claimed(self):
+        checks, audit = self.audited(
+            [self.row("F1", read="src/outro.py"), self.row("F2", "fails", read="/etc/hosts"),
+             self.row("F3", "unknown", read="src/a.py")],
+            [("Read", {"file_path": os.path.join(self.cwd, "src", "a.py")})], kinds=("lido", "lido", "lido"))
+        self.assertEqual([(c["verdict"], c["read"], c["read_ok"], c.get("claimed")) for c in checks.values()],
+                         [("unknown", "src/outro.py", False, "holds"), ("unknown", "/etc/hosts", False, "fails"),
+                          ("unknown", "src/a.py", True, None)])
+        self.assertEqual((audit["checked"], audit["downgraded"]), (3, 2))
+
+    def test_a_line_without_read_counts_as_read_not_ok(self):
+        checks, audit = self.audited([self.row("F1"), self.row("F2", "fails", read=""), self.row("F3", read=7)],
+                                     kinds=("lido", "lido", "lido"))
+        for c in checks.values():
+            self.assertEqual((c["verdict"], c["read"], c["read_ok"]), ("unknown", None, False))
+        self.assertEqual([c["claimed"] for c in checks.values()], ["holds", "fails", "holds"])
+        self.assertEqual(audit["downgraded"], 3)
+
+    def test_an_unknown_without_a_read_is_not_a_downgrade(self):
+        checks, audit = self.audited([self.row("F1", "unknown")], kinds=("lido",))
+        self.assertEqual((checks["F1"]["verdict"], checks["F1"]["read_ok"], checks["F1"]["claimed"]),
+                         ("unknown", False, "unknown"))
+        self.assertEqual(audit["downgraded"], 0)
+
+    def test_tool_uses_of_other_tools_and_without_the_field_do_not_open_anything(self):
+        checks, _ = self.audited(
+            [self.row("F1", read="src/a.py")],
+            [("Glob", {"pattern": "src/a.py", "path": self.cwd}), ("Grep", {"pattern": "x"}),
+             ("Read", {}), ("Bash", {"command": "cat src/a.py", "file_path": "src/a.py"})], kinds=("lido",))
+        self.assertEqual((checks["F1"]["verdict"], checks["F1"]["read_ok"]), ("unknown", False))
 
     def test_invalid_lines_are_ignored_and_counted(self):
         lines = "\n".join([
@@ -562,7 +756,7 @@ class RunTest(Base):
             json.dumps(["F3"]),
             json.dumps({"id": "F3", "verdict": "unknown", "cite": "ok", "why": "sem evidência"}),
             "```"])
-        self.spy(json.dumps({**RESULT_OK, "result": lines}))
+        self.spy(self.stream({**RESULT_OK, "result": lines}))
         self.run_audit()
         self.assertEqual([c["fact_id"] for c in self.events("fact_check")], ["F1", "F3"])
         self.assertEqual(len(self.events("fact_check")[0]["why"]), 300)
@@ -572,7 +766,7 @@ class RunTest(Base):
     def test_budget_error_with_exit_one_still_writes_the_round_with_the_cost(self):
         out = {"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "result": None,
                "total_cost_usd": 0.2612, "num_turns": 9, "duration_ms": 50000}
-        self.spy(json.dumps(out), exit_code=1)
+        self.spy(self.stream(out), exit_code=1)
         self.run_audit()
         self.assertEqual(self.events("fact_check"), [])
         (audit,) = self.events("fact_audit")
@@ -581,7 +775,7 @@ class RunTest(Base):
         self.assertFalse(os.path.exists(self.path))
 
     def test_exit_nonzero_with_a_result_still_records_the_checks_and_the_error(self):
-        self.spy(json.dumps({**RESULT_OK, "subtype": "error_max_turns", "is_error": True}), exit_code=1)
+        self.spy(self.stream({**RESULT_OK, "subtype": "error_max_turns", "is_error": True}), exit_code=1)
         self.run_audit()
         self.assertEqual(len(self.events("fact_check")), 3)
         self.assertEqual(self.events("fact_audit")[0]["error"], "error_max_turns")
@@ -607,7 +801,7 @@ class RunTest(Base):
         self.assertEqual(self.events("fact_audit")[0]["error"], "binary_not_found")
 
     def test_timeout_is_an_error_and_exits_zero(self):
-        self.spy(json.dumps(RESULT_OK), sleep=30)
+        self.spy(self.stream(RESULT_OK), sleep=30)
         self.fa.RUN_TIMEOUT = 1
         started = time.monotonic()
         self.run_audit()
@@ -616,6 +810,29 @@ class RunTest(Base):
         self.assertEqual((audit["error"], audit["checked"], audit["facts"]), ("timeout", 0, 3))
         self.assertFalse(os.path.exists(self.path))
 
+    def test_timeout_kills_the_whole_group_and_the_grandchild_does_not_hold_the_run(self):
+        # O neto herda o pipe de saída e dorme 25 s, como o servidor MCP que o `claude -p` sobe. Só o `killpg` do grupo
+        # (com o `start_new_session`) o mata; matar o processo sozinho deixa o `communicate` esperando o neto.
+        self.spy(self.stream(RESULT_OK), sleep=30, grandchild=25)
+        self.fa.RUN_TIMEOUT = 1
+        started = time.monotonic()
+        try:
+            self.run_audit()
+            took = time.monotonic() - started
+        finally:
+            self.reap_grandchild()
+        self.assertLess(took, 8)
+        (audit,) = self.events("fact_audit")
+        self.assertEqual(audit["error"], "timeout")
+        self.assertFalse(os.path.exists(self.path))
+
+    def reap_grandchild(self):
+        try:
+            with open(os.path.join(self.tmp.name, "grandchild.pid"), encoding="utf-8") as f:
+                os.kill(int(f.read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
     def test_unreadable_file_is_an_error_and_never_raises(self):
         os.remove(self.path)
         self.run_audit()
@@ -623,7 +840,7 @@ class RunTest(Base):
         self.assertIsNotNone(audit["error"])
 
     def test_exception_in_the_write_of_a_check_becomes_the_error_of_the_round(self):
-        self.spy(json.dumps(RESULT_OK))
+        self.spy(self.stream(RESULT_OK))
         real = self.fa.measure.write
 
         def flaky(line):

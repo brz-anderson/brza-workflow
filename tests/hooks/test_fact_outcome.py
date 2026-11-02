@@ -10,8 +10,13 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+import unittest.mock
+
+import repo_fixture
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "..", "core", "scripts", "fact_outcome.py")
@@ -27,6 +32,7 @@ def load(directory):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.measure.workstream_of = lambda cwd: "workspace"
+    module.norm_branch = lambda: "master"  # a branch da norma, sem manifesto no cwd do teste
     return module
 
 
@@ -243,6 +249,32 @@ class PendingTest(FactOutcomeTest):
         code, out, _ = self.run_cli("--pending", "--workstream", "all")
         self.assertEqual((code, out.strip()), (0, "nenhum fato a conferir"))
 
+    def test_pending_says_the_log_and_the_workstream_on_stderr(self):
+        code, out, err = self.run_cli("--pending")
+        self.assertEqual(err.strip(), f"fact_outcome.py: lendo {self.fo.measure.LOG}; workstream workspace")
+        code, _, err = self.run_cli("--pending", "--workstream", "all")
+        self.assertEqual(err.strip(), f"fact_outcome.py: lendo {self.fo.measure.LOG}; workstream all")
+        self.assertNotIn("use --workstream", err)
+
+    def test_master_filters_and_warns_to_pick_a_workstream(self):
+        self.fo.measure.workstream_of = lambda cwd: "master"
+        code, out, err = self.run_cli("--pending")
+        self.assertEqual((code, out.strip()), (0, "nenhum fato a conferir"))  # a R8.1: filtra, e avisa
+        self.assertIn(f"lendo {self.fo.measure.LOG}; workstream master", err)
+        self.assertIn("use --workstream <nome>|all", err)
+        _, _, err = self.run_cli("--pending", "--workstream", "master")  # o filtro explícito em master também avisa
+        self.assertIn("use --workstream <nome>|all", err)
+
+    def test_no_workstream_warns_too(self):
+        self.fo.measure.workstream_of = lambda cwd: None
+        _, _, err = self.run_cli("--pending")
+        self.assertIn("workstream —", err)
+        self.assertIn("use --workstream <nome>|all", err)
+
+    def test_list_and_register_stay_silent_on_stderr(self):
+        self.assertEqual(self.run_cli("--list", AGENT)[2], "")
+        self.assertEqual(self.run_cli(f"{AGENT}:F1", "holds", "ok")[2], "")
+
     def test_unreadable_log_exits_2(self):
         os.remove(self.fo.measure.LOG)
         os.mkdir(self.fo.measure.LOG)
@@ -253,6 +285,91 @@ class PendingTest(FactOutcomeTest):
     def test_workstream_and_since_need_pending(self):
         self.assertEqual(self.run_cli("--list", AGENT, "--workstream", "all")[0], 2)
         self.assertEqual(self.run_cli("--pending", "--list", AGENT)[0], 2)
+
+
+class RootTest(unittest.TestCase):
+    """A raiz sem a BRZA_WORKSPACE e sem a MEASURE_DIR sai do git, e não de `scripts/..`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(os.environ.pop, "MEASURE_DIR", None)
+        with open(SCRIPT, encoding="utf-8") as f:
+            source = f.read()
+        hooks = os.path.join(os.path.dirname(SCRIPT), "..", ".claude", "hooks")
+        files = {"scripts/fact_outcome.py": source, ".gitignore": ".measurements/\n"}
+        for name in ("measure.py", "brza_root.py"):  # o measure.py importa o brza_root do mesmo diretório
+            with open(os.path.join(hooks, name), encoding="utf-8") as f:
+                files[f".claude/hooks/{name}"] = f.read()
+        self.main, self.tree = repo_fixture.make(self.tmp.name, files)
+        self.fo = load(self.tmp.name)  # só para chamar workspace_root: o `scripts/` do teste não conta
+
+    def test_the_root_of_a_worktree_is_the_master_checkout(self):
+        scripts = os.path.join(self.tree, "scripts")
+        self.assertEqual(os.path.realpath(self.fo.workspace_root(scripts, {})), self.main)
+        self.assertEqual(os.path.realpath(self.fo.workspace_root(os.path.join(self.main, "scripts"), {})), self.main)
+
+    def test_the_variables_win_over_the_git(self):
+        scripts = os.path.join(self.tree, "scripts")
+        self.assertEqual(self.fo.workspace_root(scripts, {"BRZA_WORKSPACE": "/x/y"}), "/x/y")
+        self.assertEqual(os.path.normpath(self.fo.workspace_root(scripts, {"MEASURE_DIR": "/z"})), self.tree)
+
+    def test_a_failing_git_falls_back_to_the_directory_above_scripts(self):
+        outside = os.path.join(self.tmp.name, "fora", "scripts")
+        os.makedirs(outside)
+        self.assertEqual(os.path.normpath(self.fo.workspace_root(outside, {})), os.path.dirname(outside))
+        with unittest.mock.patch.object(self.fo.subprocess, "run", side_effect=OSError("sem git")):
+            self.assertEqual(os.path.normpath(self.fo.workspace_root(self.tree + "/scripts", {})), self.tree)
+
+    def test_a_master_without_the_hook_falls_back(self):
+        os.remove(os.path.join(self.main, ".claude", "hooks", "measure.py"))
+        scripts = os.path.join(self.tree, "scripts")
+        self.assertEqual(os.path.normpath(self.fo.workspace_root(scripts, {})), self.tree)
+
+    def test_the_norm_branch_is_the_one_of_the_manifest_and_not_a_literal_master(self):
+        manifest = os.path.join(self.main, ".brza", "workspace.toml")
+        os.makedirs(os.path.dirname(manifest))
+        with open(manifest, "w", encoding="utf-8") as f:
+            f.write('schema = 1\n[workspace]\nname = "w"\ntitle = "W"\nowner = "o"\nbranch = "norma"\n'
+                    '[code]\nname = "c"\npath = "/c"\ngithub = "o/c"\n')
+        os.makedirs(os.path.join(self.main, ".measurements"))
+        with open(os.path.join(self.main, ".measurements", "measurements.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(fact(AGENT, "F2", "inferido", 95)) + "\n")
+        _, _, err = self.run_script(self.tree, "--pending", "--workstream", "norma")
+        self.assertIn("norma, a branch da norma, que não guarda fatos; use --workstream <nome>|all", err)
+        _, _, err = self.run_script(self.tree, "--pending", "--workstream", "master")  # aqui é um workstream como outro
+        self.assertNotIn("branch da norma", err)
+
+    def run_script(self, cwd, *args):
+        done = subprocess.run([sys.executable, os.path.join(self.tree, "scripts", "fact_outcome.py"), *args],
+                              cwd=cwd, env=repo_fixture.clean_env(), capture_output=True, text=True)
+        return done.returncode, done.stdout, done.stderr
+
+    def test_the_script_run_from_the_worktree_reads_the_log_of_the_master(self):
+        live = [fact(AGENT, "F2", "inferido", 95), fact(AGENT, "F3", "rodado", 70)]
+        for directory, rows in ((self.main, live), (self.tree, [fact(STUDIO, "F1", "lido", 50)])):
+            os.makedirs(os.path.join(directory, ".measurements"))
+            with open(os.path.join(directory, ".measurements", "measurements.jsonl"), "w", encoding="utf-8") as f:
+                f.writelines(json.dumps(row) + "\n" for row in rows)  # o do worktree é o velho, que o bug lia
+        code, out, err = self.run_script(self.tree, "--pending", "--workstream", "all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("a4e396c6:F2", out)
+        self.assertIn("a4e396c6:F3", out)
+        self.assertNotIn("b77100aa", out)
+        self.assertIn(f"lendo {os.path.join(self.main, '.measurements', 'measurements.jsonl')};", err)
+        # sem `--workstream`, num repositório fora do workspace do hook, o cwd não é workstream: avisa
+        _, _, err = self.run_script(self.tree, "--pending")
+        self.assertIn("use --workstream <nome>|all", err)
+
+    def test_register_from_the_worktree_writes_in_the_master_log(self):
+        os.makedirs(os.path.join(self.main, ".measurements"))
+        with open(os.path.join(self.main, ".measurements", "measurements.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(fact(AGENT, "F2", "inferido", 95)) + "\n")
+        code, _, err = self.run_script(self.tree, f"{AGENT}:F2", "holds", "ok")
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(self.main, ".measurements", "measurements.jsonl"), encoding="utf-8") as f:
+            self.assertEqual([json.loads(line)["event"] for line in f], ["fact", "fact_outcome"])
+        self.assertFalse(os.path.exists(os.path.join(self.tree, ".measurements", "measurements.jsonl")))
 
 
 class ListTest(FactOutcomeTest):
