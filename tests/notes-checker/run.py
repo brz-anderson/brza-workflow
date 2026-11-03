@@ -73,6 +73,7 @@ def main():
         fails += check_description()
         fails += check_manifest_dates()
         fails += check_workstream_links()
+        fails += check_pln008_p1()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(1 if fails else 0)
@@ -654,6 +655,128 @@ def check_workstream_links():
                broken_solo)
     finally:
         cn.subprocess.run = subprocess.run
+        shutil.rmtree(tmp, ignore_errors=True)
+    return fails
+
+
+def check_pln008_p1():
+    """P1 do PLN-008: refs, depends_on, estimate_h na issue e aviso date no worklog."""
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    fails = 0
+
+    def expect(label, ok, detail=""):
+        nonlocal fails
+        print(("  ok  " if ok else "FALHA ") + label + ("" if ok else f": {detail}"))
+        fails += not ok
+
+    try:
+        origin, repo = os.path.join(tmp, "origin.git"), os.path.join(tmp, "ws")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "master", origin], check=True)
+        subprocess.run(["git", "clone", "-q", origin, repo], check=True, capture_output=True, env=GIT_ENV)
+        commit_branch(repo, "master", {"work/README.md": "# Norma\n"}, start=None)
+        git(repo, "push", "-q", "origin", "master")
+
+        # Workstream remoto/local com alvos e uma parte de ciclo entre branches
+        studio_notes = {
+            "plans/PLN-810-studio/PLN-810-plan.md": "---\nstatus: done\nopened: 2026-10-20\ncompleted: 2026-10-25\n"
+                                                    "depends_on:\n  - PLN-820\n---\n# PLN-810: Studio\n",
+            "work/issues/issue-remota.md": "---\nstatus: done\nopened: 2026-10-20\ncompleted: 2026-10-25\n---\n# Issue remota\n",
+            "work/reviews/REV-001-parecer.md": "---\nstatus: done\nopened: 2026-10-20\ncompleted: 2026-10-25\n---\n# REV-001: Parecer\n",
+            "work/issues/MIG-001-migracao.md": "---\nstatus: open\ntype: migration\nopened: 2026-10-27\n---\n# MIG-001: Migração\n",
+        }
+        commit_branch(repo, "workstream/studio", studio_notes)
+
+        tools_notes = {
+            "plans/PLN-800-ok/PLN-800-plan.md": "---\nstatus: done\nopened: 2026-10-20\ncompleted: 2026-10-25\n---\n# PLN-800: Ok\n",
+            "plans/PLN-820-ciclo-branch/PLN-820-plan.md": "---\nstatus: done\nopened: 2026-10-20\ncompleted: 2026-10-25\n"
+                                                          "depends_on:\n  - PLN-810\n---\n# PLN-820: Ciclo entre branches\n",
+            "work/issues/issue-local.md": "---\nstatus: open\nopened: 2026-10-27\nestimate_h: 2.5\n"
+                                          "depends_on:\n  - PLN-800\n  - issue:issue-remota\n  - MIG-001\n---\n# Issue local\n",
+            "work/issues/issue-hora-ruim.md": "---\nstatus: open\nopened: 2026-10-27\nestimate_h: 2,5\n---\n# Hora ruim\n",
+            "work/issues/issue-alvo-inexistente.md": "---\nstatus: open\nopened: 2026-10-27\n"
+                                                     "depends_on:\n  - PLN-999\n  - issue:nao-existe\n---\n# Alvo inexistente\n",
+            "work/issues/issue-auto.md": "---\nstatus: open\nopened: 2026-10-27\n"
+                                         "depends_on:\n  - issue:issue-auto\n---\n# Autorreferência\n",
+            "work/issues/ciclo-a.md": "---\nstatus: open\nopened: 2026-10-27\ndepends_on:\n  - issue:ciclo-b\n---\n# A\n",
+            "work/issues/ciclo-b.md": "---\nstatus: open\nopened: 2026-10-27\ndepends_on:\n  - issue:ciclo-a\n---\n# B\n",
+            "work/worklogs/2026-10-27-com-date.md": "---\nscope:\n  - workspace\ndate: 2026-10-27\ntags:\n  - tooling\n"
+                                                    "refs:\n  - PLN-800\n  - REV-001\n  - MIG-001\n  - issue:issue-remota\n---\n# Worklog ok\n",
+            "work/worklogs/2026-10-27-ref-invalido.md": "---\nscope:\n  - workspace\nrefs:\n  - PLN-999\n  - issue:fantasma\n---\n# Ref inválido\n",
+            "work/worklogs/2026-10-27-extracao.md": (
+                "---\nscope:\n  - workspace\n---\n\n# Extração\n\n"
+                "Prosa cita PLN-800/D1 e `REV-001`, além de [Issue local](../issues/issue-local.md)\n"
+                "e [Issue remota](../issues/issue-remota.md) e `MIG-001/P1`.\n"
+                "Menção histórica a ID inexistente PLN-404 gera aviso sem entrar.\n"
+                "```bash\n"
+                "# Em bloco cercado PLN-820 e MIG-999 não contam\n"
+                "echo PLN-820\n"
+                "```\n"
+            ),
+        }
+        commit_branch(repo, "workstream/tools-kit", tools_notes)
+
+        _, errors, warnings, _ = cn.check(repo)
+        err_by_file = {(r, w, t) for r, w, t in errors}
+        warn_by_file = {(r, w, t) for r, w, t in warnings}
+
+        # R9.1: estados de satisfação
+        expect("D2 R9.1: só status done satisfaz dependência",
+               getattr(cn, "dependency_satisfied", lambda _: None)("done") is True
+               and all(getattr(cn, "dependency_satisfied", lambda _: True)(s) is False
+                       for s in ("open", "in_progress", "in_review", "dropped", None)))
+
+        # R5.2: estimate_h opcional na issue
+        expect("issue com estimate_h numérico válido e depends_on entre branches passa",
+               not any(w == "work/issues/issue-local.md" for _, w, _ in err_by_file | warn_by_file),
+               [x for x in err_by_file | warn_by_file if x[1] == "work/issues/issue-local.md"])
+        expect("issue com estimate_h inválido é erro hours-not-a-number",
+               any(r == "hours-not-a-number" and w == "work/issues/issue-hora-ruim.md" for r, w, _ in err_by_file),
+               err_by_file)
+
+        # R5.3: date no worklog é aviso, tags continua válido
+        expect("date no worklog gera aviso date-on-worklog",
+               any(r == "date-on-worklog" and w == "work/worklogs/2026-10-27-com-date.md" for r, w, _ in warn_by_file),
+               warn_by_file)
+        expect("refs válidos (inclusive entre branches) em worklog não geram erro",
+               not any(w == "work/worklogs/2026-10-27-com-date.md" for _, w, _ in err_by_file),
+               err_by_file)
+
+        # D3 / R1.1: refs com ID inexistente é erro no checador
+        bad_refs = {t for r, w, t in err_by_file if r == "ref-not-found" and w == "work/worklogs/2026-10-27-ref-invalido.md"}
+        expect("ID inexistente no próprio refs gera erro ref-not-found",
+               bad_refs == {"PLN-999", "issue:fantasma"}, bad_refs)
+
+        # D2 / R9.2: depends_on com alvo inexistente, autorreferência e ciclo (local e entre branches)
+        bad_deps = {t for r, w, t in err_by_file if r == "depends-on-not-found" and w == "work/issues/issue-alvo-inexistente.md"}
+        expect("depends_on com alvo inexistente gera erro depends-on-not-found",
+               bad_deps == {"PLN-999", "issue:nao-existe"}, bad_deps)
+        expect("depends_on com autorreferência gera erro depends-on-cycle",
+               any(r == "depends-on-cycle" and w == "work/issues/issue-auto.md" and "issue:issue-auto -> issue:issue-auto" in t
+                   for r, w, t in err_by_file), err_by_file)
+        expect("depends_on com ciclo local gera erro depends-on-cycle",
+               any(r == "depends-on-cycle" and w == "work/issues/ciclo-a.md" and "issue:ciclo-a -> issue:ciclo-b -> issue:ciclo-a" in t
+                   for r, w, t in err_by_file), err_by_file)
+        expect("depends_on com ciclo entre branches gera erro depends-on-cycle",
+               any(r == "depends-on-cycle" and w == "plans/PLN-820-ciclo-branch/PLN-820-plan.md"
+                   and "PLN-820 -> PLN-810 -> PLN-820" in t for r, w, t in err_by_file), err_by_file)
+
+        # D3 / R10: extração fora de cercas, subitem, links, crases inline e aviso para ID desconhecido
+        expect("menção textual a ID inexistente fora de cerca gera aviso unknown-ref-mention com ID e linha",
+               any(r == "unknown-ref-mention" and w == "work/worklogs/2026-10-27-extracao.md"
+                   and "PLN-404" in t and "10" in t for r, w, t in warn_by_file)
+               and not any("PLN-820" in t or "MIG-999" in t for r, w, t in warn_by_file if w == "work/worklogs/2026-10-27-extracao.md"),
+               warn_by_file)
+        extractor = getattr(cn, "extract_worklog_refs", None)
+        if extractor:
+            ext_path = os.path.join(repo, "work/worklogs/2026-10-27-extracao.md")
+            refs_out, unk_out = extractor(open(ext_path, encoding="utf-8").read(), ext_path, repo)
+            expect("extract_worklog_refs extrai prosa, crases, subitem e links fora de cercas",
+                   refs_out == ["MIG-001", "PLN-800", "REV-001", "issue:issue-local", "issue:issue-remota"]
+                   and [(lineno, uid) for lineno, uid in unk_out] == [(10, "PLN-404")],
+                   (refs_out, unk_out))
+        else:
+            expect("extract_worklog_refs existe em check_notes.py", False)
+    finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return fails
 

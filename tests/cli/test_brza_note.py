@@ -811,11 +811,11 @@ class NoteManifestNamesTest(NoteFixture):
         code, out = self.run_note('new', 'issue', 'x', cwd=self.studio, workstream=None)
         self.assertEqual(code, 1, out)
         self.assertIn('a branch feat/sem-plano do casa-app não traz o plano', out)
-        self.assertNotIn('brza-studio', out)
+        self.assertNotIn('brza-studio', out.replace(str(self.base), ''))
         code, out = self.run_note('new', 'issue', 'x', cwd=self.base, workstream=None)
         self.assertEqual(code, 1, out)
         self.assertIn('nem do casa-app', out)
-        self.assertNotIn('brza-studio', out)
+        self.assertNotIn('brza-studio', out.replace(str(self.base), ''))
 
     def test_the_help_names_no_workspace_of_the_origin(self):
         code, out = self.run_note('new', '--help', workstream=None)
@@ -828,7 +828,101 @@ class NoteWithoutManifestNamesTest(NoteFixture):
         code, out = self.run_note('new', 'issue', 'x', cwd=self.base, workstream=None)
         self.assertEqual(code, 1, out)
         self.assertIn('nem do código', out)
-        self.assertNotIn('brza-studio', out)
+        self.assertNotIn('brza-studio', out.replace(str(self.base), ''))
+
+
+class NoteWorklogRefsTest(NoteFixture):
+    """P1 do PLN-008: preenchimento e validação de refs: no commit de worklogs."""
+
+    def write(self, rel: str, text: str = 'texto\n') -> Path:
+        path = self.tree / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def test_commit_fills_refs_from_prose_inline_subitems_links_and_branches_ignoring_fences(self):
+        tools = self.make_workstream('tools-kit')
+        self.add_plan(tools, 'PLN-002-remoto')
+        rev = tools / 'work' / 'reviews' / 'REV-001-parecer.md'
+        rev.parent.mkdir(parents=True, exist_ok=True)
+        rev.write_text('---\nstatus: done\nopened: 2026-10-28\ncompleted: 2026-10-28\n---\n\n# REV-001: Parecer\n')
+        git('add', '.', cwd=tools)
+        git('commit', '-q', '-m', 'docs: rev', cwd=tools)
+        git('push', '-q', cwd=tools)
+        git('fetch', '-q', 'origin', cwd=self.tree)
+
+        self.write('work/issues/MIG-001-mig.md',
+                   '---\nstatus: open\ntype: migration\ndescription: Mig.\nopened: 2026-10-28\n---\n\n# MIG-001: Mig\n')
+        self.write('work/issues/bug-local.md',
+                   '---\nstatus: open\ndescription: Bug.\nopened: 2026-10-28\n---\n\n# Bug local\n')
+        w_rel = 'work/worklogs/2026-10-28-dia.md'
+        self.write(w_rel, (
+            '---\nscope:\n  - workspace\ntags:\n  - tooling\n---\n\n# O dia\n\n'
+            'Mexemos em PLN-001/D1, `PLN-002/P3`, [Parecer](../reviews/REV-001-parecer.md), '
+            '`MIG-001` e [Bug local](../issues/bug-local.md).\n'
+            '```bash\n'
+            'echo PLN-999 MIG-999 REV-999\n'
+            '```\n'
+        ))
+        other_w = 'work/worklogs/2026-10-28-outro-sujo.md'
+        other_body = '---\nscope:\n  - workspace\n---\n\n# Outro sujo com PLN-001\n'
+        self.write(other_w, other_body)
+
+        code, out = self.run_note('commit', 'work/issues/MIG-001-mig.md', 'work/issues/bug-local.md', w_rel,
+                                  '-m', 'docs: worklog com refs', '--no-push')
+        self.assertEqual(code, 0, out)
+        written = (self.tree / w_rel).read_text()
+        self.assertIn(
+            'refs:\n  - MIG-001\n  - PLN-001\n  - PLN-002\n  - REV-001\n  - issue:bug-local\n',
+            written,
+        )
+        # Idempotência: recalcular sobre o texto já preenchido mantém os mesmos bytes
+        self.assertEqual((self.tree / other_w).read_text(), other_body)
+        self.assertEqual(sorted(self.committed_files()),
+                         ['work/issues/MIG-001-mig.md', 'work/issues/bug-local.md', w_rel])
+
+    def test_commit_rejects_invalid_existing_refs_before_recalculation_without_rewriting_file(self):
+        w_rel = 'work/worklogs/2026-10-28-ruim.md'
+        original = (
+            '---\nscope:\n  - workspace\nrefs:\n  - PLN-999\n---\n\n# Worklog\n\n'
+            'O corpo cita apenas PLN-001 válido, mas o refs antigo inválido não pode sumir no recálculo.\n'
+        )
+        self.write(w_rel, original)
+        head = git('rev-parse', 'HEAD', cwd=self.tree)
+        code, out = self.run_note('commit', w_rel, '-m', 'docs: ruim', '--no-push')
+        self.assertEqual(code, 1, out)
+        self.assertIn('PLN-999', out)
+        self.assertEqual((self.tree / w_rel).read_text(), original)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=self.tree), head)
+
+    def test_commit_warns_on_unknown_textual_id_and_omits_it_from_refs(self):
+        w_rel = 'work/worklogs/2026-10-28-aviso.md'
+        self.write(w_rel, (
+            '---\nscope:\n  - workspace\n---\n\n# Aviso\n\n'
+            'Exemplo hipotético PLN-404 na linha 8 e real PLN-001.\n'
+        ))
+        code, out = self.run_note('commit', w_rel, '-m', 'docs: aviso', '--no-push')
+        self.assertEqual(code, 0, out)
+        self.assertIn('aviso', out)
+        self.assertIn('PLN-404', out)
+        written = (self.tree / w_rel).read_text()
+        self.assertIn('refs:\n  - PLN-001\n', written)
+        self.assertNotIn('refs:\n  - PLN-404', written)
+
+    def test_commit_preserves_issue_identity_in_refs_after_rename(self):
+        self.write('work/issues/nome-original.md',
+                   '---\nstatus: open\ndescription: A issue.\nopened: 2026-10-28\n---\n\n# A issue\n')
+        code, out = self.run_note('commit', 'work/issues/nome-original.md', '-m', 'docs: cria issue')
+        self.assertEqual(code, 0, out)
+        git('mv', 'work/issues/nome-original.md', 'work/issues/nome-renomeado.md', cwd=self.tree)
+        code, out = self.run_note('commit', 'work/issues/nome-original.md', 'work/issues/nome-renomeado.md',
+                                  '-m', 'docs: renomeia issue')
+        self.assertEqual(code, 0, out)
+        w_rel = 'work/worklogs/2026-10-28-pos-rename.md'
+        self.write(w_rel, '---\nscope:\n  - workspace\n---\n\n# Pós rename\n\nVeja [A issue](../issues/nome-renomeado.md).\n')
+        code, out = self.run_note('commit', w_rel, '-m', 'docs: cita issue renomeada', '--no-push')
+        self.assertEqual(code, 0, out)
+        self.assertIn('refs:\n  - issue:nome-original\n', (self.tree / w_rel).read_text())
 
 
 class NoteOutsideTheWorkspaceTest(NoteFixture):

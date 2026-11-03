@@ -89,6 +89,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -106,11 +107,24 @@ INDEX_TRIES = 3
 # Os campos que, mudados, fazem uma linha `changed`; o resto (ts, commit, session) muda a cada commit
 INDEX_COMPARED = ('path', 'title', 'description', 'status', 'phase')
 PLAN_NOTE = re.compile(r'plans/(PLN-\d+)-[^/]+/\1-plan\.md')
+PLAN_FOLDER = re.compile(r'plans/(PLN-\d+)-[^/]+/')
+REV_NOTE = re.compile(r'work/reviews/(REV-\d+)-[^/]+\.md')
+MIG_NOTE = re.compile(r'work/issues/(MIG-\d+)-[^/]+\.md')
+COMMON_ISSUE_NOTE = re.compile(r'work/issues/(?!README\.md$)(?!MIG-\d+-)([^/]+)\.md')
+WORKLOG_NOTE = re.compile(r'work/worklogs/(?!README\.md$)([^/]+)\.md')
 NOTE_KINDS = (('issue', re.compile(r'work/issues/(?!README\.md$)([^/]+)\.md')),
               ('decision', re.compile(r'work/decisions/(?!README\.md$)([^/]+)\.md')))
 NOTE_ZONES = ('plans', 'work/issues', 'work/decisions')
 PLAN_PREFIX = re.compile(r'PLN-\d+:\s*')
 CHECKER = Path('.claude') / 'skills' / 'notes-checker' / 'scripts' / 'check_notes.py'
+FENCE_RE = re.compile(r'^(```|~~~)')
+INLINE_CODE_RE = re.compile(r'`[^`\n]*`')
+MD_LINK_RE = re.compile(r'!?\[(?:\\.|[^\[\]\n])*\]\(([^()\s]+)(?:\s+"[^"]*")?\)')
+MD_LINK_OUTSIDE_RE = re.compile(r'(!?\[(?:\\.|[^\[\]\n])*)\]\([^()\s]+(?:\s+"[^"]*")?\)')
+URI_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*:')
+TEXT_REF_RE = re.compile(
+    r'(?<![A-Za-z0-9_:-])(PLN-\d+|REV-\d+|MIG-\d+|issue:[a-z0-9]+(?:-[a-z0-9]+)*)(?:/[A-Za-z0-9_-]+)?(?![A-Za-z0-9_])'
+)
 
 WORKLOG = """---
 scope:
@@ -288,10 +302,288 @@ def dirty_memory(root: Path, given: list[str]) -> list[str]:
     return sorted(dirty)
 
 
+def parse_frontmatter(text: str) -> dict:
+    """YAML mínimo: chave: valor escalar e listas com '- ' ou '[...]'."""
+    if not text.startswith('---\n') or (end := text.find('\n---', 4)) < 0:
+        return {}
+    data, key = {}, None
+    for line in text[4:end].split('\n'):
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if m := re.match(r'^([A-Za-z_][\w-]*):\s*(.*)$', line):
+            key, val = m.group(1), m.group(2).strip()
+            if val.startswith('[') and val.endswith(']'):
+                data[key] = [v.strip().strip('\'"') for v in val[1:-1].split(',') if v.strip()]
+            elif val:
+                data[key] = val.strip('\'"')
+            else:
+                data[key] = []
+        elif (m := re.match(r'^\s+-\s*(.*)$', line)) and key is not None:
+            if not isinstance(data.get(key), list):
+                data[key] = [data[key]] if data.get(key) else []
+            data[key].append(m.group(1).strip().strip('\'"'))
+    return data
+
+
+def as_list(val) -> list[str]:
+    if isinstance(val, list):
+        return [str(v) for v in val if str(v)]
+    return [str(val)] if val else []
+
+
+def set_frontmatter_refs(text: str, refs: list[str], remove_date: bool = False) -> str:
+    """Atualiza de forma idempotente o campo refs: no frontmatter do worklog (e opcionalmente remove date:)."""
+    if not text.startswith('---\n') or (end := text.find('\n---', 4)) < 0:
+        if not refs:
+            return text
+        ref_lines = '\n'.join(['refs:', *(f'  - {r}' for r in refs)])
+        return f'---\n{ref_lines}\n---\n\n' + text.lstrip('\n')
+    fm_lines = text[4:end].split('\n')
+    blocks: list[tuple[str | None, list[str]]] = []
+    for line in fm_lines:
+        if m := re.match(r'^([A-Za-z_][\w-]*):', line):
+            blocks.append((m.group(1), [line]))
+        elif blocks:
+            blocks[-1][1].append(line)
+        else:
+            blocks.append((None, [line]))
+    out_lines: list[str] = []
+    placed_refs = False
+    ref_block = ['refs:', *(f'  - {r}' for r in refs)] if refs else []
+    for key, blines in blocks:
+        if remove_date and key == 'date':
+            continue
+        if key == 'refs':
+            if ref_block and not placed_refs:
+                out_lines.extend(ref_block)
+                placed_refs = True
+            continue
+        out_lines.extend(blines)
+    if ref_block and not placed_refs:
+        out_lines.extend(ref_block)
+    return '---\n' + '\n'.join(out_lines) + text[end:]
+
+
+def _index_issue_ids(root: Path) -> dict[str, str]:
+    """Mapa {path: id} das issues comuns conhecidas no índice (preservando identidade após rename)."""
+    state = {}
+    for repo in (root,):
+        try:
+            text = index_text(index_repo())
+            if text:
+                state = current_state(text)
+                break
+        except (Refused, runtime.BrzaError):
+            pass
+    if not state:
+        for ref in ('origin/master', 'master', 'HEAD'):
+            try:
+                raw = runtime.git('show', f'{ref}:{INDEX_PATH}', cwd=root)
+                state = current_state(raw)
+                if state:
+                    break
+            except runtime.BrzaError:
+                continue
+    return {
+        line['path']: id_
+        for id_, line in state.items()
+        if id_.startswith('issue:') and isinstance(line.get('path'), str)
+    }
+
+
+def _issue_canonical_id(root: Path, rel: str, index_by_path: dict[str, str]) -> str:
+    m = COMMON_ISSUE_NOTE.fullmatch(rel)
+    default_id = f'issue:{m.group(1)}' if m else f'issue:{Path(rel).stem}'
+    if rel in index_by_path:
+        return index_by_path[rel]
+    try:
+        added = runtime.git('log', '--follow', '--diff-filter=A', '--format=', '--name-only', '--', rel,
+                            cwd=root).splitlines()
+        if added:
+            first_rel = added[-1].strip()
+            if first_rel in index_by_path:
+                return index_by_path[first_rel]
+            if m_first := COMMON_ISSUE_NOTE.fullmatch(first_rel):
+                return f'issue:{m_first.group(1)}'
+    except runtime.BrzaError:
+        pass
+    return default_id
+
+
+def build_target_catalog(root: Path) -> dict:
+    """Constrói o catálogo de alvos válidos (PLN-NNN, REV-NNN, MIG-NNN, issue:<slug>) na árvore `root` e nas branches
+    workstream/* locais e remotas."""
+    root = root.resolve()
+    disk_rels: set[str] = set()
+    for zone in ('plans', 'work', 'wiki'):
+        zdir = root / zone
+        if zdir.is_dir():
+            for p in zdir.rglob('*'):
+                if p.is_file() and not any(part.startswith('.') for part in p.relative_to(root).parts):
+                    disk_rels.add(p.relative_to(root).as_posix())
+    ws_rels: set[str] = set()
+    try:
+        remote, _ = remote_and_branch()
+    except (Refused, runtime.BrzaError):
+        remote = 'origin'
+    ref_prefixes = ['refs/heads/workstream/', 'refs/remotes/origin/workstream/']
+    if f'refs/remotes/{remote}/workstream/' not in ref_prefixes:
+        ref_prefixes.append(f'refs/remotes/{remote}/workstream/')
+    try:
+        refs = runtime.git('for-each-ref', '--format=%(refname)', *ref_prefixes, cwd=root).split()
+        for ref in refs:
+            try:
+                names = runtime.git('ls-tree', '-r', '-z', '--name-only', ref, cwd=root).split('\0')
+                ws_rels.update(n for n in names if n)
+            except runtime.BrzaError:
+                continue
+    except runtime.BrzaError:
+        pass
+
+    index_by_path = _index_issue_ids(root)
+    all_rels = disk_rels | ws_rels
+    valid_refs: set[str] = set()
+    id_by_rel: dict[str, str] = {}
+    plans: set[str] = set()
+    for rel in sorted(all_rels):
+        if m := PLAN_NOTE.fullmatch(rel):
+            pid = m.group(1)
+            plans.add(pid)
+            valid_refs.add(pid)
+            id_by_rel[rel] = pid
+        elif m := REV_NOTE.fullmatch(rel):
+            rid = m.group(1)
+            valid_refs.add(rid)
+            id_by_rel[rel] = rid
+        elif m := MIG_NOTE.fullmatch(rel):
+            mid = m.group(1)
+            valid_refs.add(mid)
+            id_by_rel[rel] = mid
+        elif COMMON_ISSUE_NOTE.fullmatch(rel):
+            iid = _issue_canonical_id(root, rel, index_by_path)
+            valid_refs.add(iid)
+            id_by_rel[rel] = iid
+    for rel in sorted(all_rels):
+        if rel not in id_by_rel and (m := PLAN_FOLDER.match(rel)) and m.group(1) in plans:
+            id_by_rel[rel] = m.group(1)
+    return {'root': root, 'all_rels': all_rels, 'valid_refs': valid_refs, 'id_by_rel': id_by_rel}
+
+
+def extract_worklog_refs(text: str, worklog_path: Path, root: Path, catalog: dict | None = None) -> tuple[list[str], list[tuple[int, str]]]:
+    """D3: extrai refs do corpo de um worklog fora de blocos cercados, preservando crases inline, subitens e links."""
+    if catalog is None:
+        catalog = build_target_catalog(root)
+    root = catalog['root']
+    all_rels = catalog['all_rels']
+    valid_refs = catalog['valid_refs']
+    id_by_rel = catalog['id_by_rel']
+
+    body = text[text.find('\n---', 4) + 4:] if text.startswith('---\n') and text.find('\n---', 4) >= 0 else text
+    no_code_lines, fenced = [], False
+    for line in body.split('\n'):
+        if FENCE_RE.match(line.strip()):
+            fenced = not fenced
+            continue
+        if not fenced:
+            no_code_lines.append(INLINE_CODE_RE.sub('', line))
+    no_code = '\n'.join(no_code_lines)
+
+    refs_found: set[str] = set()
+    src_dir = worklog_path.resolve().parent
+    for m in MD_LINK_RE.finditer(no_code):
+        href = m.group(1).strip()
+        if URI_SCHEME_RE.match(href) or href.startswith(('#', '<')):
+            continue
+        path_part = unquote(href.split('#', 1)[0].split('?', 1)[0]).strip()
+        if not path_part:
+            continue
+        target_full = (src_dir / path_part).resolve()
+        try:
+            target_rel = target_full.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if (target_rel in all_rels or target_full.is_file()) and target_rel in id_by_rel:
+            refs_found.add(id_by_rel[target_rel])
+
+    lines = text.split('\n')
+    start_idx = 0
+    if text.startswith('---\n') and (end := text.find('\n---', 4)) >= 0:
+        start_idx = text[:end + 4].count('\n') + 1
+    unknown: list[tuple[int, str]] = []
+    fenced = False
+    for idx in range(start_idx, len(lines)):
+        line = lines[idx]
+        lineno = idx + 1
+        if FENCE_RE.match(line.strip()):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        parts = re.split(r'(`[^`\n]*`)', line)
+        for i in range(0, len(parts), 2):
+            parts[i] = MD_LINK_OUTSIDE_RE.sub(r'\1]', parts[i])
+        scan_line = ''.join(parts)
+        for m in TEXT_REF_RE.finditer(scan_line):
+            ref_id = m.group(1)
+            if ref_id in valid_refs:
+                refs_found.add(ref_id)
+            else:
+                unknown.append((lineno, ref_id))
+    return sorted(refs_found), unknown
+
+
+def requested_worklogs(root: Path, paths: list[str]) -> list[str]:
+    """Os worklogs existentes em `root` cobertos pelos `paths` pedidos no commit."""
+    found: set[str] = set()
+    for p in paths:
+        clean = p.rstrip('/')
+        full = root / clean
+        if WORKLOG_NOTE.fullmatch(clean) and full.is_file():
+            found.add(clean)
+        elif full.is_dir():
+            for child in full.rglob('*.md'):
+                rel = child.relative_to(root).as_posix()
+                if WORKLOG_NOTE.fullmatch(rel):
+                    found.add(rel)
+    return sorted(found)
+
+
+def prepare_worklog_refs(root: Path, paths: list[str], remove_date: bool = False) -> bool:
+    """Valida refs explícitos atuais dos worklogs pedidos antes de reescrever; se válidos, extrai e atualiza só eles."""
+    worklogs = requested_worklogs(root, paths)
+    if not worklogs:
+        return True
+    catalog = build_target_catalog(root)
+    valid_refs = catalog['valid_refs']
+    texts = {w: (root / w).read_text(encoding='utf-8') for w in worklogs}
+    invalid = []
+    for w, text in texts.items():
+        fm = parse_frontmatter(text)
+        if 'refs' in fm:
+            for ref_id in as_list(fm.get('refs')):
+                if ref_id not in valid_refs:
+                    invalid.append((w, ref_id))
+    if invalid:
+        for w, ref_id in invalid:
+            print(f'  ERRO  ref-not-found: {w} — {ref_id}')
+        return False
+    for w, text in texts.items():
+        refs, unknown = extract_worklog_refs(text, root / w, root, catalog)
+        for lineno, ref_id in unknown:
+            print(f'aviso: unknown-ref-mention: {w}:{lineno} — {ref_id}')
+        updated = set_frontmatter_refs(text, refs, remove_date=remove_date)
+        if updated != text:
+            (root / w).write_text(updated, encoding='utf-8')
+    return True
+
+
 def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
     branch = branch_of(root)
     if not branch or not branch.startswith(WORKSTREAM_PREFIX):
         print(f'recusado: {root} está em {branch or "detached"}, e a nota só se commita numa branch workstream/*')
+        return 1
+    if not prepare_worklog_refs(root, paths):
+        print('recusado: o checador achou erro; nada foi commitado')
         return 1
     if check(root) != 0:
         print('recusado: o checador achou erro; nada foi commitado')

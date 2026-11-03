@@ -62,7 +62,20 @@ WORKLOGS_LINK_FROM = "2026-10-28"
 POINTER_SECTIONS = {"worklog": ("## Worklogs",), "review": ("## Revisões",), "decision": ("## Decisões",),
                     "issue": ("## Pendências conhecidas", "### Fora de escopo")}
 # Molde que as notas citam e que mora na skill dona: entra só para resolver link, e não é conferido como nota
-SKILL_TEMPLATES = (".claude/skills/plan-runner/references/plan-template.md",)
+SKILL_TEMPLATES = (
+    ".claude/skills/plan-runner/references/plan-template.md",
+    ".claude/skills/migration-runner/references/migration-template.md",
+)
+ISSUE_TYPES = {"unknown", "migration"}
+PLAN_NOTE_RE = re.compile(r"^plans/(PLN-\d+)-[^/]+/\1-plan\.md$")
+PLAN_FOLDER_RE = re.compile(r"^plans/(PLN-\d+)-[^/]+/")
+REV_NOTE_RE = re.compile(r"^work/reviews/(REV-\d+)-[^/]+\.md$")
+MIG_NOTE_RE = re.compile(r"^work/issues/(MIG-\d+)-[^/]+\.md$")
+ISSUE_NOTE_RE = re.compile(r"^work/issues/(?!README\.md$)(?!MIG-\d+-)([^/]+)\.md$")
+TEXT_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_:-])(PLN-\d+|REV-\d+|MIG-\d+|issue:[a-z0-9]+(?:-[a-z0-9]+)*)(?:/[A-Za-z0-9_-]+)?(?![A-Za-z0-9_])"
+)
+MD_LINK_OUTSIDE = re.compile(r"(!?\[(?:\\.|[^\[\]\n])*)\]\([^()\s]+(?:\s+\"[^\"]*\")?\)")
 DEFAULT_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4))
 
 GENRES = {
@@ -81,6 +94,11 @@ MD_LINK = re.compile(r"!?\[(?:\\.|[^\[\]\n])*\]\(([^()\s]+)(?:\s+\"[^\"]*\")?\)"
 URI_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 FENCE = re.compile(r"^(```|~~~)")
 INLINE_CODE = re.compile(r"`[^`\n]*`")
+
+
+def dependency_satisfied(status):
+    """D2 (R9.1): somente status 'done' satisfaz uma dependência; open, in_progress, in_review, dropped ou ausente não."""
+    return status == "done"
 
 
 def walk(base, zone):
@@ -184,10 +202,12 @@ class WorkstreamIndex:
     def __init__(self, root):
         self.root = os.path.realpath(root)
         self._paths = None
+        self._ref_of_path = {}
         self._base = None
+        self._index_ids = None
 
     def _load(self):
-        self._paths, self._base = set(), self.root
+        self._paths, self._ref_of_path, self._base = set(), {}, self.root
         try:
             top = self._git("rev-parse", "--show-toplevel").strip()
             refs = self._git("for-each-ref", "--format=%(refname)", "refs/heads/workstream/",
@@ -200,13 +220,19 @@ class WorkstreamIndex:
                 names = self._git("ls-tree", "-r", "-z", "--name-only", ref).split("\0")
             except subprocess.CalledProcessError:
                 continue
-            self._paths.update(n for n in names if n)
+            for n in names:
+                if n:
+                    self._paths.add(n)
+                    if n not in self._ref_of_path or ref.startswith("refs/heads/"):
+                        self._ref_of_path[n] = ref
 
     def _git(self, *args):
         return subprocess.run(["git", "-C", self.root, *args], capture_output=True, text=True, check=True).stdout
 
     def _repo_path(self, full):
         """O caminho de `full` relativo à raiz do repositório, ou None quando cai fora dele."""
+        if self._paths is None:
+            self._load()
         rel = os.path.relpath(os.path.realpath(full), self._base).replace(os.sep, "/")
         return None if rel == ".." or rel.startswith("../") else rel
 
@@ -223,6 +249,236 @@ class WorkstreamIndex:
             self._load()
         rel = self._repo_path(full_prefix)
         return rel is not None and any(p.startswith(rel) for p in self._paths)
+
+    def all_paths(self):
+        if self._paths is None:
+            self._load()
+        return set(self._paths)
+
+    def show(self, rel):
+        if self._paths is None:
+            self._load()
+        ref = self._ref_of_path.get(rel)
+        if not ref:
+            return None
+        try:
+            return self._git("show", f"{ref}:{rel}")
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    def issue_id_for_path(self, rel):
+        """Preserva a identidade issue:<slug_original> da issue após rename, via .brza/index.jsonl ou git log --follow."""
+        m = ISSUE_NOTE_RE.match(rel)
+        if not m:
+            return None
+        default_id = f"issue:{m.group(1)}"
+        if self._index_ids is None:
+            self._index_ids = self._load_index_ids()
+        if rel in self._index_ids:
+            return self._index_ids[rel]
+        try:
+            added = self._git("log", "--follow", "--diff-filter=A", "--format=", "--name-only", "--", rel).splitlines()
+            if added:
+                first_rel = added[-1].strip()
+                if first_rel in self._index_ids:
+                    return self._index_ids[first_rel]
+                m_first = ISSUE_NOTE_RE.match(first_rel)
+                if m_first:
+                    return f"issue:{m_first.group(1)}"
+        except (OSError, subprocess.CalledProcessError):
+            pass
+        return default_id
+
+    def _load_index_ids(self):
+        by_id = {}
+        raw_text = None
+        for ref in ("origin/master", "master", "HEAD"):
+            try:
+                raw_text = self._git("show", f"{ref}:.brza/index.jsonl")
+                break
+            except (OSError, subprocess.CalledProcessError):
+                continue
+        if raw_text is None:
+            idx_file = os.path.join(self.root, ".brza", "index.jsonl")
+            if os.path.isfile(idx_file):
+                try:
+                    with open(idx_file, encoding="utf-8") as f:
+                        raw_text = f.read()
+                except OSError:
+                    raw_text = ""
+        if not raw_text:
+            return {}
+        for line in raw_text.splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            ts = str(item.get("ts") or "")
+            if item["id"] not in by_id or ts >= by_id[item["id"]][0]:
+                by_id[item["id"]] = (ts, item)
+        return {
+            entry["path"]: id_
+            for id_, (_, entry) in by_id.items()
+            if id_.startswith("issue:") and isinstance(entry.get("path"), str)
+        }
+
+
+class TargetCatalog:
+    """Catálogo de alvos de refs e depends_on na árvore atual e nas branches workstream/*."""
+
+    def __init__(self, root, on_disk=None, workstreams=None, texts_on_disk=None):
+        self.root = os.path.realpath(root)
+        self.on_disk = on_disk if on_disk is not None else files(self.root)
+        self.workstreams = workstreams if workstreams is not None else WorkstreamIndex(self.root)
+        self.texts_on_disk = texts_on_disk if texts_on_disk is not None else {}
+        self.full_paths = {os.path.normpath(p) for p in self.on_disk.values()}
+        self.valid_refs = set()
+        self.dep_targets = {}
+        self.id_by_rel = {}
+        self._fm_cache = {}
+        self._build()
+
+    def _build(self):
+        disk_rels = set(self.on_disk.keys())
+        all_rels = disk_rels | self.workstreams.all_paths()
+        plans = set()
+        for rel in sorted(all_rels):
+            on_disk = rel in disk_rels
+            if m := PLAN_NOTE_RE.match(rel):
+                pid = m.group(1)
+                plans.add(pid)
+                self.valid_refs.add(pid)
+                self.dep_targets[pid] = (rel, on_disk)
+                self.id_by_rel[rel] = pid
+            elif m := REV_NOTE_RE.match(rel):
+                rid = m.group(1)
+                self.valid_refs.add(rid)
+                self.id_by_rel[rel] = rid
+            elif m := MIG_NOTE_RE.match(rel):
+                mid = m.group(1)
+                self.valid_refs.add(mid)
+                self.dep_targets[mid] = (rel, on_disk)
+                self.id_by_rel[rel] = mid
+            elif ISSUE_NOTE_RE.match(rel):
+                iid = self.workstreams.issue_id_for_path(rel) if not on_disk else self._disk_issue_id(rel)
+                self.valid_refs.add(iid)
+                self.dep_targets[iid] = (rel, on_disk)
+                self.id_by_rel[rel] = iid
+        for rel in sorted(all_rels):
+            if rel not in self.id_by_rel and (m := PLAN_FOLDER_RE.match(rel)) and m.group(1) in plans:
+                self.id_by_rel[rel] = m.group(1)
+
+    def _disk_issue_id(self, rel):
+        m = ISSUE_NOTE_RE.match(rel)
+        default_id = f"issue:{m.group(1)}" if m else None
+        resolved = self.workstreams.issue_id_for_path(rel)
+        return resolved or default_id
+
+    def resolves_path(self, target_full):
+        return resolves_md_link("", target_full, self.full_paths, self.workstreams) if False else (
+            os.path.normpath(target_full) in self.full_paths
+            or os.path.isfile(target_full)
+            or self.workstreams.has(target_full)
+        )
+
+    def rel_path(self, target_full):
+        rel = os.path.relpath(os.path.realpath(target_full), self.root).replace(os.sep, "/")
+        if rel != ".." and not rel.startswith("../"):
+            return rel
+        return self.workstreams._repo_path(target_full)
+
+    def frontmatter_of(self, target_id):
+        if target_id in self._fm_cache:
+            return self._fm_cache[target_id]
+        info = self.dep_targets.get(target_id)
+        if not info:
+            self._fm_cache[target_id] = {}
+            return {}
+        rel, on_disk = info
+        text = None
+        if on_disk:
+            if rel in self.texts_on_disk:
+                text = self.texts_on_disk[rel]
+            elif rel in self.on_disk and os.path.isfile(self.on_disk[rel]):
+                with open(self.on_disk[rel], encoding="utf-8") as f:
+                    text = f.read()
+        else:
+            text = self.workstreams.show(rel)
+        fm = frontmatter(text) if text else {}
+        self._fm_cache[target_id] = fm
+        return fm
+
+    def deps_of(self, target_id):
+        return as_list(self.frontmatter_of(target_id).get("depends_on"))
+
+
+def _strip_link_hrefs_outside_inline_code(line):
+    parts = re.split(r"(`[^`\n]*`)", line)
+    for i in range(0, len(parts), 2):
+        parts[i] = MD_LINK_OUTSIDE.sub(r"\1]", parts[i])
+    return "".join(parts)
+
+
+def extract_worklog_refs(text, src_full, root, catalog=None):
+    """D3: extrai refs de um worklog (prosa, crases inline, subitens e links relativos resolvidos fora de cercas).
+    Retorna (refs_ordenados, avisos_id_desconhecido_como_lista_de_(lineno, id))."""
+    if catalog is None:
+        catalog = TargetCatalog(root)
+    refs_found = set()
+    unknown = []
+    body = body_of(text)
+    for _, path_part in md_link_targets(body):
+        target_full = os.path.normpath(os.path.join(os.path.dirname(src_full), path_part))
+        if catalog.resolves_path(target_full):
+            target_rel = catalog.rel_path(target_full)
+            if target_rel and target_rel in catalog.id_by_rel:
+                refs_found.add(catalog.id_by_rel[target_rel])
+
+    lines = text.split("\n")
+    start_idx = 0
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end >= 0:
+            start_idx = text[:end + 4].count("\n") + 1
+    fenced = False
+    for idx in range(start_idx, len(lines)):
+        line = lines[idx]
+        lineno = idx + 1
+        if FENCE.match(line.strip()):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        scan_line = _strip_link_hrefs_outside_inline_code(line)
+        for m in TEXT_REF_RE.finditer(scan_line):
+            ref_id = m.group(1)
+            if ref_id in catalog.valid_refs:
+                refs_found.add(ref_id)
+            else:
+                unknown.append((lineno, ref_id))
+    return sorted(refs_found), unknown
+
+
+def _find_dependency_cycle(start_id, first_dep, catalog):
+    def dfs(curr, trail, visited):
+        if curr in trail:
+            idx = trail.index(curr)
+            return trail[idx:] + [curr]
+        if curr in visited:
+            return None
+        visited.add(curr)
+        trail.append(curr)
+        for nxt in catalog.deps_of(curr):
+            if nxt in catalog.dep_targets:
+                found = dfs(nxt, trail, visited)
+                if found:
+                    return found
+        trail.pop()
+        return None
+
+    return dfs(first_dep, [start_id], set())
 
 
 def resolves_md_link(path_part, src_full, full_paths, workstreams=None):
@@ -383,6 +639,14 @@ def check(root):
     open_plans, linking = [], defaultdict(list)
     full_paths = {os.path.normpath(p) for p in on_disk.values()}
     workstreams = WorkstreamIndex(root)
+    texts_on_disk = {}
+    catalog = None
+
+    def get_catalog():
+        nonlocal catalog
+        if catalog is None:
+            catalog = TargetCatalog(root, on_disk, workstreams, texts_on_disk)
+        return catalog
 
     names = defaultdict(list)
     for rel in all_files:
@@ -400,6 +664,7 @@ def check(root):
         src_full = on_disk[rel]
         with open(src_full, encoding="utf-8") as f:
             text = f.read()
+        texts_on_disk[rel] = text
 
         linked = text
         for wl in wikilink_targets(linked):
@@ -414,9 +679,37 @@ def check(root):
             linking[genre].append((rel, src_full, {os.path.dirname(p) for p in linked_paths(linked, src_full)}))
         if genre is None:
             continue  # o README.md de cada zona é a norma, sem gênero
+        if genre == "worklog":
+            _, unknown_mentions = extract_worklog_refs(text, src_full, root, get_catalog())
+            for lineno, ref_id in unknown_mentions:
+                warnings.append(("unknown-ref-mention", rel, f"{ref_id} (linha {lineno})"))
         fm = frontmatter(text)
         if not fm:
             continue
+        if genre == "worklog":
+            if "date" in fm:
+                warnings.append(("date-on-worklog", rel, str(fm["date"])))
+            if "refs" in fm:
+                cat = get_catalog()
+                for ref_id in as_list(fm.get("refs")):
+                    if ref_id not in cat.valid_refs:
+                        errors.append(("ref-not-found", rel, ref_id))
+        if genre == "issue" and "estimate_h" in fm:
+            try:
+                float(fm["estimate_h"])
+            except (TypeError, ValueError):
+                errors.append(("hours-not-a-number", rel, f"estimate_h: {fm['estimate_h']}"))
+        if genre in ("plan", "issue") and (genre != "plan" or rel.endswith("-plan.md")) and "depends_on" in fm:
+            cat = get_catalog()
+            own_id = cat.id_by_rel.get(rel)
+            for dep in as_list(fm.get("depends_on")):
+                if dep not in cat.dep_targets:
+                    errors.append(("depends-on-not-found", rel, dep))
+                elif own_id:
+                    cycle = _find_dependency_cycle(own_id, dep, cat)
+                    if cycle:
+                        errors.append(("depends-on-cycle", rel, " -> ".join(cycle)))
+
         recent = (date_of(fm) or "") >= CUTOFF
         required = errors if recent else warnings
         if (
@@ -457,7 +750,7 @@ def check(root):
         if kind is not None:
             if kind == "unknown" and genre not in (None, "issue"):
                 warnings.append(("type-unknown-outside-issue", rel, kind))
-            elif kind != "unknown":
+            elif kind not in ISSUE_TYPES or genre not in (None, "issue"):
                 warnings.append(("type-redundant-or-invalid", rel, kind))
 
         tags = fm.get("tags") or []
