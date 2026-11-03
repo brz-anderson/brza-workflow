@@ -27,6 +27,104 @@ def make(path=':memory:'):
     return q.Queue(path)
 
 
+class ReservationTest(unittest.TestCase):
+    """`admit_next` escolhe e reserva no mesmo lock (P2 O-A1, F-A1)."""
+
+    def limits(self, **config):
+        from brza_mcp import limits as lim
+        return lim.Limits(config, machine=lambda: {})
+
+    def test_the_chosen_request_takes_the_slot_before_the_rest_is_judged(self):
+        queue, limits = make(), self.limits(**{'orchestrator.max_workers': 1})
+        first = queue.enqueue(task='a', role='consultant')
+        second = queue.enqueue(task='b', role='consultant')
+        chosen = queue.admit_next(limits)
+        self.assertEqual((chosen['id'], chosen['state']), (first, 'running'))
+        self.assertEqual(queue.running_count(), 1)
+        pend = queue.pending()
+        self.assertEqual([(p['id'], p['held_by']) for p in pend], [(second, 'workspace')])
+        self.assertIsNone(queue.admit_next(limits))
+        self.assertEqual(queue.running_count(), 1)
+
+    def test_next_admissible_also_judges_the_rest_with_the_chosen_in_a_slot_and_leaves_no_trace(self):
+        queue, limits = make(), self.limits(**{'orchestrator.max_workers': 1})
+        first = queue.enqueue(task='a', role='consultant')
+        second = queue.enqueue(task='b', role='consultant')
+        self.assertEqual(queue.next_admissible(limits)['id'], first)
+        self.assertEqual(queue.get(first)['state'], 'queued')
+        self.assertEqual(queue.running_count(), 0)
+        self.assertEqual(queue.get(second)['held_by'], 'workspace')
+
+    def test_every_request_over_the_ceiling_is_held_not_only_the_first_after_the_chosen(self):  # P2 r2 A1
+        queue, limits = make(), self.limits(**{'orchestrator.max_workers': 2})
+        ids = [queue.enqueue(task=f't{i}', role='consultant') for i in range(4)]
+        self.assertEqual(queue.next_admissible(limits)['id'], ids[0])
+        self.assertEqual([(p['id'], p['held_by']) for p in queue.pending()],
+                         [(ids[0], None), (ids[1], None), (ids[2], 'workspace'), (ids[3], 'workspace')])
+        self.assertEqual(queue.running_count(), 0)  # a passada não deixa rastro
+        self.assertEqual([queue.get(i)['state'] for i in ids], ['queued'] * 4)
+
+    def test_the_same_with_the_sessions_ceiling_of_an_account(self):  # P2 r2 A1
+        queue, limits = make(), self.limits(**{'quota.max_sessions_per_account': 2})
+        ids = [queue.enqueue(task=f't{i}', role='consultant', account='a1', runtime='claude') for i in range(4)]
+        other = queue.enqueue(task='o', role='consultant', account='a2', runtime='claude')
+        queue.next_admissible(limits)
+        held = {p['id']: p['held_by'] for p in queue.pending()}
+        self.assertEqual(held, {ids[0]: None, ids[1]: None, ids[2]: 'account_sessions', ids[3]: 'account_sessions',
+                                other: None})
+
+    def test_admit_next_keeps_only_the_first_one_reserved(self):  # P2 r2 A1
+        queue, limits = make(), self.limits(**{'orchestrator.max_workers': 2})
+        ids = [queue.enqueue(task=f't{i}', role='consultant') for i in range(3)]
+        self.assertEqual(queue.admit_next(limits)['id'], ids[0])
+        self.assertEqual((queue.running_count(), queue.get(ids[1])['state']), (1, 'queued'))
+        self.assertEqual(queue.admit_next(limits)['id'], ids[1])
+        self.assertIsNone(queue.admit_next(limits))
+        self.assertEqual(queue.get(ids[2])['held_by'], 'workspace')
+
+    def test_mark_running_refuses_a_request_that_is_not_queued(self):
+        queue = make()
+        rid = queue.enqueue(task='a', role='consultant')
+        queue.mark_running(rid)
+        with self.assertRaises(ValueError):
+            queue.mark_running(rid)
+        self.assertEqual(queue.running_count(), 1)
+        with self.assertRaises(ValueError):
+            queue.mark_running(999)
+
+    def test_release_gives_the_slot_back_and_the_request_goes_to_the_queue(self):
+        queue, limits = make(), self.limits()
+        rid = queue.enqueue(task='a', role='consultant')
+        queue.admit_next(limits)
+        queue.release(rid)
+        self.assertEqual((queue.get(rid)['state'], queue.running_count()), ('queued', 0))
+
+    def test_an_explicit_empty_blocks_is_not_replaced_by_the_index(self):  # P2 F-A2
+        queue = make()
+        rid = queue.enqueue(task='t', role='consultant', ref='R', blocks=[], index=lambda r: {'blocks': ['P']})
+        self.assertEqual(queue.get(rid)['blocks'], [])
+        other = queue.enqueue(task='t', role='consultant', ref='R', index=lambda r: {'blocks': ['P']})
+        self.assertEqual(queue.get(other)['blocks'], ['P'])
+
+    def test_running_count_filters_by_account_alone_or_runtime_alone(self):  # P2 F-A4
+        queue = make()
+        queue.mark_running(queue.enqueue(task='t', role='r', account='a1', runtime='claude'))
+        queue.mark_running(queue.enqueue(task='t', role='r', account='a2', runtime='claude'))
+        queue.mark_running(queue.enqueue(task='t', role='r', account='a1', runtime='codex'))
+        self.assertEqual(queue.running_count(), 3)
+        self.assertEqual(queue.running_count(account='a1'), 2)
+        self.assertEqual(queue.running_count(runtime='claude'), 2)
+        self.assertEqual(queue.running_count('a1', 'claude'), 1)
+
+    def test_the_deadline_is_one_iso_date_only(self):  # P2 O-A8
+        queue = make()
+        for bad in ('20261201', '2026-W49-2', '2026-12-1'):
+            with self.assertRaises(ValueError, msg=bad):
+                queue.enqueue(task='t', role='r', deadline=bad)
+        rid = queue.enqueue(task='t', role='r', deadline='2026-12-01')
+        self.assertEqual(queue.get(rid)['deadline'], '2026-12-01')
+
+
 class PersistenceTest(unittest.TestCase):
     def test_default_path_is_orchestrator_db_in_the_brza_home(self):
         import os
@@ -184,6 +282,14 @@ class IndexTest(unittest.TestCase):
         self.assertEqual(by_path, {})
         self.assertEqual(q.index_fields('PLN-404', '/ws', reader=self.reader), {})
         self.assertEqual(q.index_fields(None, '/ws', reader=self.reader), {})
+
+    def test_lookup_by_path_returns_the_fields_of_that_line(self):  # P2 O-A10
+        self.assertEqual(q.index_fields('plans/PLN-003/PLN-003-plan.md', '/ws', reader=self.reader),
+                         {'priority': 'medium'})
+
+    def test_an_alternative_iso_deadline_in_the_index_is_dropped(self):  # P2 O-A8
+        text = json.dumps({'id': 'PLN-9', 'deadline': '20261201'})
+        self.assertEqual(q.index_fields('PLN-9', '/ws', reader=lambda w: text), {})
 
     def test_the_fields_are_accepted_when_the_index_brings_them(self):
         text = json.dumps({'id': 'PLN-9', 'priority': 'high', 'blocks': ['a', 'b'], 'deadline': '2026-12-01'})

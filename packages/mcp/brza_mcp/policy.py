@@ -22,7 +22,7 @@ DEFAULTS = {
     'mcp.port': 4242,
     'orchestrator.max_workers': 6,
     'policy.enforce': True,
-    'policy.suggest_to_main': True,
+    'policy.suggest_to_main': False,  # até haver sinal do que a sessão principal faz (R6.4)
     'policy.roles.consultant.model': 'sonnet', 'policy.roles.consultant.effort': 'low',
     'policy.roles.executor.model': 'sonnet', 'policy.roles.executor.effort': 'medium',
     'policy.roles.architect.model': 'opus', 'policy.roles.architect.effort': 'high',
@@ -154,7 +154,7 @@ class Policy:
     def suggestion(self) -> dict | None:
         """A sugestão de modelo para a sessão principal (R6.4), por aviso; None com a chave desligada."""
         config = self.config()
-        if not config.get('policy.enforce', True) or not config.get('policy.suggest_to_main', True):
+        if not config.get('policy.enforce', True) or not config.get('policy.suggest_to_main', False):
             return None
         row = self.role_row('architect', config)
         if row is None:

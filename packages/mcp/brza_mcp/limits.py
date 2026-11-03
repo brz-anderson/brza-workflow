@@ -3,7 +3,7 @@
 A configuração chega como dicionário com as chaves do `brza.toml` (D4), planas (`'quota.hard_cap_percent'`) ou
 aninhadas (`{'quota': {...}}`); o leitor do TOML é do P4. O uso da conta chega por um provedor injetável
 `usage(account, runtime) -> {account, runtime, windows: [{name, usedPercent, resetsAt}]} | None` (o leitor do
-`orca account list` é do P5), e a máquina por `machine() -> {free_mem_gb, swap_used_gb, cpu_percent}`.
+`orca account list` é do P5), e a máquina por `machine() -> {free_mem_gb, swap_gb, cpu_percent}`.
 """
 from __future__ import annotations
 
@@ -11,9 +11,12 @@ import os
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 DEFAULT_HARD_CAP = 90.0
+MIN_SLOPE_SPAN_MS = 10 * 60_000  # sem `windowMinutes`, a inclinação só vale com 10 min de amostras
+MIN_SLOPE_WINDOW_FRACTION = 20   # com ele, com 1/20 da janela: o `usedPercent` é inteiro e dá degraus
 CEILINGS = ('workspace', 'account_sessions', 'account_quota', 'machine')
 
 
@@ -80,7 +83,7 @@ def _capture(cmd):
 def read_machine():
     """Os três sinais da máquina; o que não se lê vem None."""
     return {'free_mem_gb': parse_vm_stat(_capture(['vm_stat'])),
-            'swap_used_gb': parse_swapusage(_capture(['sysctl', 'vm.swapusage'])),
+            'swap_gb': parse_swapusage(_capture(['sysctl', 'vm.swapusage'])),
             'cpu_percent': cpu_percent()}
 
 
@@ -91,16 +94,42 @@ def _now_ms():
 
 
 class Limits:
-    def __init__(self, config=None, usage=None, machine=read_machine, clock=_now_ms):
+    def __init__(self, config=None, usage=None, machine=read_machine, clock=_now_ms, active=None):
         self.config = config or {}
         self.usage = usage or (lambda account, runtime: None)
         self.machine = machine
         self.clock = clock
+        self.active = active or (lambda: None)  # o id da conta ativa do cliente: a do pedido sem `account`
         self.last_decision = None
         self.last_measures = {}
+        self._cache = None
+
+    @contextmanager
+    def scope(self):
+        """Uma passada: o uso de cada (conta, runtime) e a máquina se leem uma vez, por mais pedidos que ela julgue.
+        Quem a abre (a `Queue`) segura o lock dela, então as passadas não se cruzam."""
+        outer = self._cache
+        if outer is None:
+            self._cache = {}
+        try:
+            yield
+        finally:
+            if outer is None:
+                self._cache = None
+
+    def _once(self, key, read):
+        if self._cache is None:
+            return read()
+        if key not in self._cache:
+            self._cache[key] = read()
+        return self._cache[key]
 
     def get(self, key):
         return _get(self.config, key)
+
+    def hard_cap(self) -> float:
+        """O teto de uso das janelas, como a decisão o lê: `quota.hard_cap_percent`, ou o padrão de 90%."""
+        return float(self.get('quota.hard_cap_percent') or DEFAULT_HARD_CAP)
 
     def decide(self, request, queue) -> Decision:
         """`admit`, ou o teto que segura. A ordem dos tetos é a da R9.3; todo resultado leva as medidas."""
@@ -123,9 +152,15 @@ class Limits:
         if cap is not None and running >= cap:
             return Decision(False, 'workspace', f'{running} workers abertos, orchestrator.max_workers = {cap}')
 
+    def _account(self, request) -> str:
+        """A conta do pedido; sem ela, é a ativa do cliente (o worker abre nela)."""
+        return request.get('account') or self._once('active', lambda: self.active()) or ''
+
     def _sessions(self, request, queue, measures):
-        account, runtime = request.get('account') or '', request.get('runtime') or ''
+        account, runtime = self._account(request), request.get('runtime') or ''
         sessions, cap = queue.running_count(account, runtime), self.get('quota.max_sessions_per_account')
+        if account and account == self._once('active', lambda: self.active()):
+            sessions += queue.running_count('', runtime)  # o worker aberto sem `account` também é da ativa
         measures['account'] = {'account': account, 'runtime': runtime, 'sessions': sessions, 'max_sessions': cap}
         if cap is not None and sessions >= cap:
             return Decision(False, 'account_sessions',
@@ -133,27 +168,47 @@ class Limits:
                             f'quota.max_sessions_per_account = {cap}')
 
     def _quota(self, request, queue, measures):
-        account, runtime = request.get('account') or '', request.get('runtime') or ''
-        cap = float(self.get('quota.hard_cap_percent') or DEFAULT_HARD_CAP)
-        snapshot = self.usage(account, runtime)
+        account, runtime = self._account(request), request.get('runtime') or ''
+        cap = self.hard_cap()
+        snapshot = self._once(('usage', account, runtime), lambda: self.usage(account, runtime))
         windows = [w for w in (snapshot or {}).get('windows') or [] if w.get('usedPercent') is not None]
         if not windows:
             measures['quota'] = {'known': False, 'cap': cap, 'windows': []}  # R2.5: só o teto de sessões vale
             return None
-        now = self.clock()
-        queue.record_usage({'account': account, 'runtime': runtime, 'windows': windows}, now)
-        report, over = [], None
-        for w in windows:
-            projected = self._project(queue.samples(account, runtime, w['name'], w.get('resetsAt')), w, now)
-            report.append({'name': w['name'], 'used': w['usedPercent'], 'resets_at': w.get('resetsAt'),
-                           'projected': projected})
-            if over is None and w['usedPercent'] >= cap:
-                over = f'janela {w["name"]} já em {w["usedPercent"]:g}%, quota.hard_cap_percent = {cap:g}'
-            elif over is None and projected >= cap:
-                over = f'janela {w["name"]} projeta {projected:.0f}% no reset, quota.hard_cap_percent = {cap:g}'
+        report, over = self._report(account, runtime, windows, queue, self.clock()), None
+        for w in report:
+            if over is None and w['used'] >= cap:
+                over = f'janela {w["name"]} já em {w["used"]:g}%, quota.hard_cap_percent = {cap:g}'
+            elif over is None and w['projected'] >= cap:
+                over = f'janela {w["name"]} projeta {w["projected"]:.0f}% no reset, quota.hard_cap_percent = {cap:g}'
         measures['quota'] = {'known': True, 'cap': cap, 'windows': report}
         if over:
             return Decision(False, 'account_quota', over)
+
+    def _report(self, account, runtime, windows, queue, now):
+        """Grava a amostra de cada janela e devolve `used` e `projected` delas: a conta que a decisão e a escolha de
+        conta (`pick_account`) fazem é a mesma."""
+        self._once(('recorded', account, runtime),
+                   lambda: queue.record_usage({'account': account, 'runtime': runtime, 'windows': windows}, now))
+        return [{'name': w['name'], 'used': w['usedPercent'], 'resets_at': w.get('resetsAt'),
+                 'projected': self._project(queue.samples(account, runtime, w['name'], w.get('resetsAt')), w, now)}
+                for w in windows]
+
+    def soft_cap(self):
+        value = self.get('quota.soft_cap_percent')
+        return float(value) if value is not None else None
+
+    def pick_account(self, snapshots, queue, runtime='claude') -> dict:
+        """A conta de menor uso entre as `snapshots` (`{conta: instantâneo}`), pela regra do `choose_account` sobre o
+        maior entre o uso e a projeção de cada janela, com o `quota.soft_cap_percent` e o `quota.hard_cap_percent`."""
+        from .resolver import choose_account
+        now, candidates = self.clock(), {}
+        for account, snapshot in snapshots.items():
+            windows = [w for w in (snapshot or {}).get('windows') or [] if w.get('usedPercent') is not None]
+            if windows:
+                report = self._report(account, runtime, windows, queue, now)
+                candidates[account] = [max(w['used'], w['projected']) for w in report]
+        return choose_account(candidates, self.hard_cap(), soft_cap=self.soft_cap())
 
     @staticmethod
     def _project(samples, window, now):
@@ -162,18 +217,19 @@ class Limits:
         if resets is None or len(samples) < 2:
             return used
         (t0, u0), (t1, u1) = samples[0], samples[-1]
-        if t1 <= t0:
-            return used
+        window_ms = (window.get('windowMinutes') or 0) * 60_000
+        if t1 - t0 < (window_ms / MIN_SLOPE_WINDOW_FRACTION if window_ms else MIN_SLOPE_SPAN_MS):
+            return used  # poucas amostras e muito juntas: o degrau de 1 ponto não é uma inclinação
         slope = (u1 - u0) / (t1 - t0)  # pontos por ms
         return max(used, u1 + slope * max(resets - t1, 0))
 
     def _machine(self, measures):
-        values = self.machine() or {}
+        values = self._once('machine', lambda: self.machine() or {})
         rules = (('machine.min_free_mem_gb', 'free_mem_gb', lambda v, c: v < c, 'memória livre'),
-                 ('machine.max_swap_gb', 'swap_used_gb', lambda v, c: v > c, 'swap'),
+                 ('machine.max_swap_gb', 'swap_gb', lambda v, c: v > c, 'swap'),
                  ('machine.max_cpu_percent', 'cpu_percent', lambda v, c: v > c, 'CPU'))
         limits = {key: self.get(key) for key, *_ in rules}
-        measures['machine'] = {**{k: values.get(k) for k in ('free_mem_gb', 'swap_used_gb', 'cpu_percent')},
+        measures['machine'] = {**{k: values.get(k) for k in ('free_mem_gb', 'swap_gb', 'cpu_percent')},
                                'enforced': any(v is not None for v in limits.values())}
         for key, name, breached, label in rules:
             cap, value = limits[key], values.get(name)

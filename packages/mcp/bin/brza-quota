@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from brza_mcp import accounts, limits, queue  # noqa: E402
+from brza_mcp import accounts, limits, paths, policy, queue, tools  # noqa: E402
 
 
 def render(report):
@@ -44,7 +44,14 @@ def main(argv=None, reader=None, db=None):
         return 3
     q = queue.Queue(db)
     try:
-        report = accounts.quota_report(data, q, limits.Limits())
+        # a configuração é a do servidor: o `brza.toml` do workspace, e por cima as sobreposições do `brza mcp config`
+        q.conn.executescript(tools.GATES_SCHEMA)
+        try:
+            config = {**policy.Policy(paths.workspace_root()).load(), **tools.get_overrides(q)}
+        except policy.PolicyError as e:
+            print(f'brza quota: {e}', file=sys.stderr)
+            return 2
+        report = accounts.quota_report(data, q, limits.Limits(config))
     finally:
         q.close()
     print(json.dumps({'accounts': report}, ensure_ascii=False, indent=2) if a.json else render(report))

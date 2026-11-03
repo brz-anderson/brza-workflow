@@ -25,7 +25,7 @@ LOG_DIR = '.measurements'
 LOG_FILE = 'measurements.jsonl'
 WORKSTREAM_PREFIX = 'workstream/'
 _UNSET = object()
-_MACHINE_KEYS = (('free_mem_gb', 'free_mem_gb'), ('swap_gb', 'swap_used_gb'), ('cpu_percent', 'cpu_percent'))
+_MACHINE_KEYS = (('free_mem_gb', 'free_mem_gb'), ('swap_gb', 'swap_gb'), ('cpu_percent', 'cpu_percent'))
 
 
 def _now():
@@ -37,7 +37,7 @@ def _stderr(message):
 
 
 def machine_of(measures):
-    """O bloco `machine` da linha, das medidas do `Limits` (`swap_used_gb` vira `swap_gb`, como no D5)."""
+    """O bloco `machine` da linha, das medidas do `Limits` (o `swap_gb` é o do D5)."""
     machine = (measures or {}).get('machine')
     if not machine:
         return None
@@ -62,6 +62,8 @@ class Telemetry:
     def workstream(self):
         if self._workstream is _UNSET:
             self._workstream = None
+            if not self.workspace:
+                return None
             try:
                 out = subprocess.run(['git', '-C', self.workspace, 'rev-parse', '--abbrev-ref', 'HEAD'],
                                      capture_output=True, text=True, timeout=5)

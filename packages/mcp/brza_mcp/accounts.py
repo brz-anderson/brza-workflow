@@ -7,6 +7,7 @@ ativa vem de `rateLimits.claude` e as outras de `rateLimits.inactiveClaudeAccoun
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -95,7 +96,7 @@ class Accounts:
             spec = clients.CLIENTS[name]
             env = {k: v for k, v in os.environ.items() if not k.startswith('ORCA_')}
             env['ORCA_USER_DATA_PATH'] = spec['user_data']
-            code, out, err = self.run([spec['cli'], 'account', 'list', '--json'], env, 30)
+            code, out, err = self.run([clients.cli_path(name), 'account', 'list', '--json'], env, 30)
             try:
                 if code != 0:
                     raise ValueError(err.strip() or out.strip())
@@ -113,6 +114,14 @@ class Accounts:
         if not name:
             return next((a for a in accounts if a['active']), None)
         return next((a for a in accounts if name in (a['id'], a['email'], a['label'])), None)
+
+    def active_id(self):
+        """O id da conta ativa do cliente, ou None se não se lê."""
+        try:
+            found = self.find(None)
+        except AccountError:
+            return None
+        return found['id'] if found else None
 
     def usage(self, account, runtime):
         """O provedor do `Limits`: o instantâneo da conta, ou None (sem uso, sem conta ou sem cliente)."""
@@ -174,8 +183,8 @@ def switch_chat_account(session_id, account_id, client='studio', rpc=None):
     try:
         with _client_env(clients.CLIENTS[client]['user_data']):
             page = call('agentSession.history', {'sessionId': session_id, 'direction': 'tail', 'limit': 1})['page']
-            import hashlib
-            payload = _canonical({'method': 'agentSession.switchAccount', 'sessionId': session_id, 'fields': fields})
+            payload = _runtime_module().canonicalize(
+                {'method': 'agentSession.switchAccount', 'sessionId': session_id, 'fields': fields})
             result = call('agentSession.switchAccount', {
                 'envelope': {'sessionId': session_id, 'clientOperationId': f'{int(time.time() * 1000)}-{uuid.uuid4().hex}',
                              'expectedRuntimeFence': page['fence'],
@@ -183,22 +192,13 @@ def switch_chat_account(session_id, account_id, client='studio', rpc=None):
                 **fields})
     except Exception as e:  # BrzaError do runtime, ou o que o `rpc` injetado levantar
         message = str(e)
-        if 'turnActive' in message or 'agent_session_operation_invalid' in message:
+        if 'turnActive' in message:
             raise AccountError(f'a sessão {session_id} está em turno ativo: a troca de conta só vale em repouso; '
                                'espere o turno acabar e peça de novo') from None
         raise AccountError(f'a troca de conta da sessão {session_id} falhou: {message}') from None
     if isinstance(result, dict) and result.get('kind') == 'not-done':
         raise AccountError(f'o app recusou a troca de conta: {result.get("notice")}')
     return result
-
-
-def _canonical(value) -> str:
-    if isinstance(value, list):
-        return '[' + ','.join(_canonical(v) for v in value) + ']'
-    if isinstance(value, dict):
-        return '{' + ','.join(f'{json.dumps(k, ensure_ascii=False)}:{_canonical(v)}'
-                              for k, v in sorted(value.items())) + '}'
-    return json.dumps(value, ensure_ascii=False)
 
 
 # ---- o relatório do `brza quota` ----
@@ -208,7 +208,7 @@ def quota_report(data, queue, limits, now_ms=None) -> list:
     como o `Limits` faz a cada decisão, para a inclinação ter história."""
     from .limits import Limits
     now = int(time.time() * 1000) if now_ms is None else now_ms
-    cap = float(limits.get('quota.hard_cap_percent') or 90.0)
+    cap = limits.hard_cap()
     report = []
     for a in data['accounts']:
         snap = data['usage'].get(a['id'])

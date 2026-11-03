@@ -1,230 +1,243 @@
 {
- "rateLimits": {
-  "claude": {
-   "provider": "claude",
-   "session": {
-    "usedPercent": 10,
-    "windowMinutes": 300,
-    "resetsAt": 1793701800586,
-    "resetDescription": "7:30 AM"
-   },
-   "weekly": {
-    "usedPercent": 29,
-    "windowMinutes": 10080,
-    "resetsAt": 1794114000586,
-    "resetDescription": "Sun 2:00 AM"
-   },
-   "fableWeekly": {
-    "usedPercent": 0,
-    "windowMinutes": 10080,
-    "resetsAt": 1794114000000,
-    "resetDescription": "Sun 2:00 AM"
-   },
-   "monthly": null,
-   "extraUsage": null,
-   "updatedAt": 1793686921684,
-   "error": null,
-   "status": "ok",
-   "usageMetadata": {}
-  },
-  "codex": {
-   "provider": "codex",
-   "session": {
-    "usedPercent": 77,
-    "windowMinutes": 300,
-    "resetsAt": 1793697776000,
-    "resetDescription": "6:22 AM"
-   },
-   "weekly": {
-    "usedPercent": 29,
-    "windowMinutes": 10080,
-    "resetsAt": 1794014480000,
-    "resetDescription": "Fri 10:21 PM"
-   },
-   "rateLimitResetCredits": {
-    "availableCount": 2,
-    "nextExpiresAt": 1796069857000
-   },
-   "updatedAt": 1793686921916,
-   "error": null,
-   "status": "ok",
-   "usageMetadata": {}
-  },
-  "gemini": {
-   "provider": "gemini",
-   "session": null,
-   "weekly": null,
-   "updatedAt": 1793686921356,
-   "error": "Gemini CLI OAuth is disabled in settings",
-   "status": "unavailable"
-  },
-  "opencodeGo": {
-   "provider": "opencode-go",
-   "session": null,
-   "weekly": null,
-   "monthly": null,
-   "updatedAt": 1793686921382,
-   "error": "No OpenCode Go API key or session cookie configured",
-   "status": "unavailable",
-   "usageMetadata": {
-    "failureKind": "missing-credentials"
-   }
-  },
-  "kimi": {
-   "provider": "kimi",
-   "session": null,
-   "weekly": null,
-   "updatedAt": 1793686921367,
-   "error": "Not signed in to Kimi Code",
-   "status": "unavailable"
-  },
-  "antigravity": {
-   "provider": "antigravity",
-   "session": {
-    "usedPercent": 12,
-    "windowMinutes": 300,
-    "resetsAt": 1793700502000,
-    "resetDescription": null
-   },
-   "weekly": {
-    "usedPercent": 67,
-    "windowMinutes": 10080,
-    "resetsAt": 1794280193000,
-    "resetDescription": null
-   },
-   "buckets": [
-    {
-     "name": "Gemini Models \u00b7 Weekly Limit Remaining",
-     "group": "Gemini Models",
-     "windowName": "Weekly Limit Remaining",
-     "usedPercent": 5,
-     "windowMinutes": 10080,
-     "resetsAt": 1793768495000,
-     "resetDescription": null
+ "id": "req_0001",
+ "ok": true,
+ "result": {
+  "rateLimits": {
+   "claude": {
+    "provider": "claude",
+    "session": {
+     "usedPercent": 10,
+     "windowMinutes": 300,
+     "resetsAt": 1793701800586,
+     "resetDescription": "7:30 AM"
     },
-    {
-     "name": "Gemini Models \u00b7 Five Hour Limit Remaining",
-     "group": "Gemini Models",
-     "windowName": "Five Hour Limit Remaining",
+    "weekly": {
+     "usedPercent": 29,
+     "windowMinutes": 10080,
+     "resetsAt": 1794114000586,
+     "resetDescription": "Sun 2:00 AM"
+    },
+    "fableWeekly": {
+     "usedPercent": 0,
+     "windowMinutes": 10080,
+     "resetsAt": 1794114000000,
+     "resetDescription": "Sun 2:00 AM"
+    },
+    "monthly": null,
+    "extraUsage": null,
+    "updatedAt": 1793686921684,
+    "error": null,
+    "status": "ok",
+    "usageMetadata": {}
+   },
+   "codex": {
+    "provider": "codex",
+    "session": {
+     "usedPercent": 77,
+     "windowMinutes": 300,
+     "resetsAt": 1793697776000,
+     "resetDescription": "6:22 AM"
+    },
+    "weekly": {
+     "usedPercent": 29,
+     "windowMinutes": 10080,
+     "resetsAt": 1794014480000,
+     "resetDescription": "Fri 10:21 PM"
+    },
+    "rateLimitResetCredits": {
+     "availableCount": 2,
+     "nextExpiresAt": 1796069857000
+    },
+    "updatedAt": 1793686921916,
+    "error": null,
+    "status": "ok",
+    "usageMetadata": {}
+   },
+   "gemini": {
+    "provider": "gemini",
+    "session": null,
+    "weekly": null,
+    "updatedAt": 1793686921356,
+    "error": "Gemini CLI OAuth is disabled in settings",
+    "status": "unavailable"
+   },
+   "opencodeGo": {
+    "provider": "opencode-go",
+    "session": null,
+    "weekly": null,
+    "monthly": null,
+    "updatedAt": 1793686921382,
+    "error": "No OpenCode Go API key or session cookie configured",
+    "status": "unavailable",
+    "usageMetadata": {
+     "failureKind": "missing-credentials"
+    }
+   },
+   "kimi": {
+    "provider": "kimi",
+    "session": null,
+    "weekly": null,
+    "updatedAt": 1793686921367,
+    "error": "Not signed in to Kimi Code",
+    "status": "unavailable"
+   },
+   "antigravity": {
+    "provider": "antigravity",
+    "session": {
      "usedPercent": 12,
      "windowMinutes": 300,
      "resetsAt": 1793700502000,
      "resetDescription": null
     },
-    {
-     "name": "Claude and GPT models \u00b7 Weekly Limit Remaining",
-     "group": "Claude and GPT models",
-     "windowName": "Weekly Limit Remaining",
-     "usedPercent": 37,
-     "windowMinutes": 10080,
-     "resetsAt": 1794030447000,
-     "resetDescription": null
-    },
-    {
-     "name": "Claude and GPT models \u00b7 Five Hour Limit Remaining",
-     "group": "Claude and GPT models",
-     "windowName": "Five Hour Limit Remaining",
-     "usedPercent": 0,
-     "windowMinutes": 300,
-     "resetsAt": 1793704924000,
-     "resetDescription": null
-    },
-    {
-     "name": "Gemini 4 Argon",
-     "group": "Gemini 4 Argon",
-     "windowName": "Gemini 4 Argon Weekly Limit",
+    "weekly": {
      "usedPercent": 67,
      "windowMinutes": 10080,
      "resetsAt": 1794280193000,
      "resetDescription": null
+    },
+    "buckets": [
+     {
+      "name": "Gemini Models · Weekly Limit Remaining",
+      "group": "Gemini Models",
+      "windowName": "Weekly Limit Remaining",
+      "usedPercent": 5,
+      "windowMinutes": 10080,
+      "resetsAt": 1793768495000,
+      "resetDescription": null
+     },
+     {
+      "name": "Gemini Models · Five Hour Limit Remaining",
+      "group": "Gemini Models",
+      "windowName": "Five Hour Limit Remaining",
+      "usedPercent": 12,
+      "windowMinutes": 300,
+      "resetsAt": 1793700502000,
+      "resetDescription": null
+     },
+     {
+      "name": "Claude and GPT models · Weekly Limit Remaining",
+      "group": "Claude and GPT models",
+      "windowName": "Weekly Limit Remaining",
+      "usedPercent": 37,
+      "windowMinutes": 10080,
+      "resetsAt": 1794030447000,
+      "resetDescription": null
+     },
+     {
+      "name": "Claude and GPT models · Five Hour Limit Remaining",
+      "group": "Claude and GPT models",
+      "windowName": "Five Hour Limit Remaining",
+      "usedPercent": 0,
+      "windowMinutes": 300,
+      "resetsAt": 1793704924000,
+      "resetDescription": null
+     },
+     {
+      "name": "Gemini 4 Argon",
+      "group": "Gemini 4 Argon",
+      "windowName": "Gemini 4 Argon Weekly Limit",
+      "usedPercent": 67,
+      "windowMinutes": 10080,
+      "resetsAt": 1794280193000,
+      "resetDescription": null
+     }
+    ],
+    "updatedAt": 1793686924496,
+    "error": null,
+    "status": "ok",
+    "usageMetadata": {
+     "source": "cli",
+     "attemptedSources": [
+      "cli"
+     ],
+     "lastSuccessfulSource": "cli",
+     "credentialSource": "antigravity-cli"
+    }
+   },
+   "minimax": {
+    "provider": "minimax",
+    "session": null,
+    "weekly": null,
+    "updatedAt": 1793686921356,
+    "error": "MiniMax session cookie not configured",
+    "status": "unavailable",
+    "usageMetadata": {
+     "failureKind": "missing-credentials",
+     "source": "web"
+    }
+   },
+   "grok": {
+    "provider": "grok",
+    "session": null,
+    "weekly": null,
+    "updatedAt": 1793686921355,
+    "error": "Not signed in to Grok — run grok login",
+    "status": "unavailable"
+   },
+   "cursor": {
+    "provider": "cursor",
+    "session": null,
+    "weekly": null,
+    "updatedAt": 1793686921405,
+    "error": "No Cursor sign-in on this computer — sign in with Cursor IDE or `cursor-agent login`",
+    "status": "unavailable",
+    "usageMetadata": {
+     "failureKind": "missing-credentials"
+    }
+   },
+   "zcode": {
+    "provider": "zcode",
+    "session": null,
+    "weekly": null,
+    "monthly": null,
+    "updatedAt": 1793686921355,
+    "error": "ZCode Coding Plan credentials are not configured",
+    "status": "unavailable",
+    "usageMetadata": {
+     "source": "web",
+     "failureKind": "missing-credentials"
+    }
+   },
+   "minimaxCookieConfigured": false,
+   "minimaxApiKeyConfigured": false,
+   "zcodePlanApiKeyConfigured": false,
+   "opencodeGoApiKeyConfigured": false,
+   "grokAuthConfigured": false,
+   "cursorAuthConfigured": false,
+   "claudeTarget": {
+    "runtime": "host",
+    "wslDistro": null
+   },
+   "codexTarget": {
+    "runtime": "host",
+    "wslDistro": null
+   },
+   "inactiveClaudeAccounts": [],
+   "inactiveCodexAccounts": []
+  },
+  "accounts": {
+   "opencode": [],
+   "devin": [],
+   "claude": [
+    {
+     "id": "8eee0e1b-f5d7-40ba-8337-8cae0df3a062",
+     "authMethod": "subscription-oauth",
+     "email": "conta-1@example.com",
+     "organization": "Org Exemplo",
+     "home": "/Users/x/Library/Application Support/brza-studio/claude-profiles/8eee0e1b/home"
+    },
+    {
+     "id": "c2e4f85c-388a-4603-8edc-a0844496c902",
+     "authMethod": "subscription-oauth",
+     "email": "conta-2@example.com",
+     "organization": "Org Exemplo",
+     "home": "/Users/x/Library/Application Support/brza-studio/claude-profiles/c2e4f85c/home"
     }
    ],
-   "updatedAt": 1793686924496,
-   "error": null,
-   "status": "ok",
-   "usageMetadata": {
-    "source": "cli",
-    "attemptedSources": [
-     "cli"
-    ],
-    "lastSuccessfulSource": "cli",
-    "credentialSource": "antigravity-cli"
-   }
-  },
-  "minimax": {
-   "provider": "minimax",
-   "session": null,
-   "weekly": null,
-   "updatedAt": 1793686921356,
-   "error": "MiniMax session cookie not configured",
-   "status": "unavailable",
-   "usageMetadata": {
-    "failureKind": "missing-credentials",
-    "source": "web"
-   }
-  },
-  "grok": {
-   "provider": "grok",
-   "session": null,
-   "weekly": null,
-   "updatedAt": 1793686921355,
-   "error": "Not signed in to Grok \u2014 run grok login",
-   "status": "unavailable"
-  },
-  "cursor": {
-   "provider": "cursor",
-   "session": null,
-   "weekly": null,
-   "updatedAt": 1793686921405,
-   "error": "No Cursor sign-in on this computer \u2014 sign in with Cursor IDE or `cursor-agent login`",
-   "status": "unavailable",
-   "usageMetadata": {
-    "failureKind": "missing-credentials"
-   }
-  },
-  "zcode": {
-   "provider": "zcode",
-   "session": null,
-   "weekly": null,
-   "monthly": null,
-   "updatedAt": 1793686921355,
-   "error": "ZCode Coding Plan credentials are not configured",
-   "status": "unavailable",
-   "usageMetadata": {
-    "source": "web",
-    "failureKind": "missing-credentials"
-   }
-  },
-  "minimaxCookieConfigured": false,
-  "minimaxApiKeyConfigured": false,
-  "zcodePlanApiKeyConfigured": false,
-  "opencodeGoApiKeyConfigured": false,
-  "grokAuthConfigured": false,
-  "cursorAuthConfigured": false,
-  "claudeTarget": {
-   "runtime": "host",
-   "wslDistro": null
-  },
-  "codexTarget": {
-   "runtime": "host",
-   "wslDistro": null
-  },
-  "inactiveClaudeAccounts": [],
-  "inactiveCodexAccounts": []
+   "codex": []
+  }
  },
- "accounts": {
-  "opencode": [],
-  "devin": [],
-  "claude": [
-   {
-    "id": "8eee0e1b-f5d7-40ba-8337-8cae0df3a062",
-    "authMethod": "subscription-oauth"
-   },
-   {
-    "id": "c2e4f85c-388a-4603-8edc-a0844496c902",
-    "authMethod": "subscription-oauth"
-   }
-  ],
-  "codex": []
+ "_meta": {
+  "runtimeId": "runtime-exemplo"
  }
 }

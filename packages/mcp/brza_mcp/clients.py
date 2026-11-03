@@ -5,6 +5,7 @@ o binário do CLI e o `ORCA_USER_DATA_PATH` que o H4 exige no `env` do subproces
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,8 +13,28 @@ SUPPORT = Path.home() / 'Library' / 'Application Support'
 CLIENTS = {
     'studio': {'cli': '/Applications/BrzA Studio.app/Contents/Resources/bin/brza',
                'user_data': str(SUPPORT / 'brza-studio'), 'process': 'BrzA Studio.app/Contents/MacOS/BrzA Studio'},
-    'orca': {'cli': 'orca', 'user_data': str(SUPPORT / 'orca'), 'process': 'Orca.app/Contents/MacOS/Orca'},
+    'orca': {'cli': '/Applications/Orca.app/Contents/Resources/bin/orca', 'path_name': 'orca', 'user_data': str(SUPPORT / 'orca'), 'process': 'Orca.app/Contents/MacOS/Orca'},
 }
+
+
+def cli_path(name) -> str:
+    """O binário do CLI do cliente: o do app, e o do PATH como reserva. O agente do launchd não tem `/Applications/...`
+    no PATH, então o nome solto (`orca`) não se acha lá."""
+    spec = CLIENTS[name]
+    if Path(spec['cli']).exists() or not spec.get('path_name'):
+        return spec['cli']  # o `brza` do Studio não tem reserva: no PATH `brza` é o CLI do workflow
+    return shutil.which(spec['path_name']) or spec['cli']
+
+
+def from_header(value) -> str | None:
+    """O cliente do `X-Brza-Client`: o nome (`studio`, `orca`) ou o `${ORCA_USER_DATA_PATH}` do cliente, de onde sai o
+    nome pela pasta (`brza-studio`, `orca`). Outro valor não é cliente."""
+    if value in CLIENTS:
+        return value
+    if isinstance(value, str) and value.startswith('/'):
+        folder = Path(value.rstrip('/')).name
+        return next((n for n, spec in CLIENTS.items() if Path(spec['user_data']).name == folder), None)
+    return None
 
 
 def detect(run=None) -> str | None:

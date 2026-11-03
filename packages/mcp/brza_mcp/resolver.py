@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import time
 import urllib.request
 
@@ -46,13 +47,16 @@ def post_ollama(url, body, timeout):
 
 def run_claude(argv, input, env, timeout):  # noqa: A002
     """O `claude` real (custa dinheiro: os testes trocam esta função); FileNotFoundError quando não está no PATH."""
-    done = subprocess.run(argv, input=input, capture_output=True, text=True, env=env, timeout=timeout)
+    # fora do workspace: o `claude -p` carrega o CLAUDE.md e as regras do cwd, e a classificação não precisa delas
+    done = subprocess.run(argv, input=input, capture_output=True, text=True, env=env, timeout=timeout,
+                          cwd=tempfile.gettempdir())
     return done.returncode, done.stdout
 
 
 def claude_env():
     """O ambiente mínimo do H2: a conta `systemDefault` vai sem `CLAUDE_CONFIG_DIR`."""
-    return {k: os.environ[k] for k in ('HOME', 'PATH', 'LANG') if k in os.environ}
+    from .accounts import claude_env as account_env
+    return account_env(None, {k: os.environ[k] for k in ('HOME', 'PATH', 'LANG') if k in os.environ})
 
 
 class Resolver:
@@ -64,13 +68,23 @@ class Resolver:
         value = self.config().get(key)
         return default if value is None else value
 
+    def _limit(self):
+        """O limiar do `tev1`, em número; texto que não é número (o `brza.toml` aceita qualquer tipo) vale como ausente."""
+        value = self._get('resolver.tev1_min_confidence')
+        if isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def classify(self, text) -> dict:
         start = self.clock()
         tev1_conf, reason = None, None
         tev1 = self._tev1(text)
         if tev1 is not None:
             tev1_conf = tev1['confidence']
-            limit = self._get('resolver.tev1_min_confidence')
+            limit = self._limit()
             if limit is None:
                 reason = 'sem resolver.tev1_min_confidence: tudo vai ao Haiku'
             elif tev1_conf < limit:
@@ -115,17 +129,21 @@ class Resolver:
         return choice if choice in LAYERS else None
 
 
-def choose_account(candidates, hard_cap=90.0, margin=5.0) -> dict:
+def choose_account(candidates, hard_cap=90.0, margin=5.0, soft_cap=None) -> dict:
     """A cota é da tabela, não do modelo (M11): `candidates` = `{conta: [usedPercent, ...]}` das janelas (5 h, semanal).
 
     Fora quem tem alguma janela no teto ou acima; entre os demais, a de menor janela mais cheia; dentro da margem de
     `margin` pontos do melhor, empata e a ordem alfabética decide, para a resposta não mudar com a ordem da entrada.
-    Todas no teto: `account` None.
+    Todas no teto: `account` None. Conta sem janela fica de fora (sem leitura, a cota é do teto de sessões). Com
+    `soft_cap`, as contas abaixo dele passam à frente: só se nenhuma está abaixo é que as acima dele concorrem.
+    Os valores são o maior entre o uso e a projeção de cada janela (`Limits.pick_account`).
     """
-    usage = {name: max(windows) for name, windows in candidates.items()}
+    usage = {name: max(windows) for name, windows in candidates.items() if windows}
     open_ = {n: u for n, u in usage.items() if u < hard_cap}
     if not open_:
         return {'account': None, 'reason': f'todas as contas no teto de {hard_cap:g}%'}
+    if soft_cap is not None:
+        open_ = {n: u for n, u in open_.items() if u < soft_cap} or open_
     best = min(open_.values())
     tied = sorted(n for n, u in open_.items() if u - best <= margin)
     return {'account': tied[0], 'reason': f'menor uso {best:g}%' + (f', empate na margem de {margin:g} pontos'

@@ -65,7 +65,7 @@ def is_loaded() -> bool:
 
 def health(port: int | None = None, timeout: float = 1.0) -> dict | None:
     """O corpo do /health, ou None se o servidor não responde."""
-    req = urllib.request.Request(f'http://127.0.0.1:{port or paths.default_port()}/health',
+    req = urllib.request.Request(f'http://127.0.0.1:{port or paths.active_port()}/health',
                                  headers={'Authorization': f'Bearer {paths.read_token()}'})
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
@@ -76,8 +76,9 @@ def health(port: int | None = None, timeout: float = 1.0) -> dict | None:
 
 def wait_health(timeout: float) -> dict | None:
     deadline = time.monotonic() + timeout
+    port = paths.default_port()  # o agente sobe com o ambiente de quem o carregou, e o mcp.json velho não vale
     while True:
-        data = health()
+        data = health(port)
         if data or time.monotonic() >= deadline:
             return data
         time.sleep(0.1)

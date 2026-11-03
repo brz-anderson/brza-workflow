@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from mcp_support import HomeCase, paths  # noqa: F401
@@ -46,7 +47,7 @@ class WorkspaceCase(ToolsCase):
 
 
 class LineTest(WorkspaceCase):
-    machine = staticmethod(lambda: {'free_mem_gb': 9.1, 'swap_used_gb': 0.4, 'cpu_percent': 31})
+    machine = staticmethod(lambda: {'free_mem_gb': 9.1, 'swap_gb': 0.4, 'cpu_percent': 31})
 
     def test_a_queued_request_writes_the_d5_line(self):
         _, out = self.call('dispatch', {'task': 'ler o plano', 'role': 'consultant'}, session='sess-1')
@@ -255,6 +256,11 @@ class WorkstreamTest(HomeCase):
         t = telemetry.Telemetry(str(self.tmp / 'repo'))
         t.emit('queued', {'id': 1})
         self.assertEqual(read_lines(self.tmp / 'repo')[0]['workstream'], 'tools-kit')
+
+    def test_without_a_workspace_the_workstream_is_null_and_git_is_not_called(self):  # P6 F-A1
+        with patch('brza_mcp.telemetry.subprocess.run', side_effect=AssertionError('sem workspace não há git')):
+            self.assertIsNone(telemetry.Telemetry(None).workstream())
+            self.assertIsNone(telemetry.Telemetry('').workstream())
 
     def test_without_git_the_workstream_is_null(self):
         t = telemetry.Telemetry(str(self.tmp))

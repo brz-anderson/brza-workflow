@@ -128,9 +128,54 @@ class RoutingTest(unittest.TestCase):
         self.assertLessEqual(set(env), {'HOME', 'PATH', 'LANG'})
 
 
+class ChooseAccountTest(unittest.TestCase):
+    def test_an_account_without_windows_is_left_out(self):  # P4 F-A2
+        out = res.choose_account({'conta-a': [50], 'conta-nova': []})
+        self.assertEqual(out['account'], 'conta-a')
+        self.assertIsNone(res.choose_account({'conta-nova': []})['account'])
+
+    def test_the_soft_cap_prefers_the_accounts_under_it(self):  # P4 O-A8
+        out = res.choose_account({'conta-a': [56], 'conta-b': [52]}, soft_cap=55)
+        self.assertEqual(out['account'], 'conta-b')
+        self.assertEqual(res.choose_account({'conta-a': [60], 'conta-b': [58]}, soft_cap=55)['account'], 'conta-a')
+
+    def test_the_projection_counts_like_in_the_limits(self):  # P4 O-A8
+        from brza_mcp import limits as lim, queue as q
+        resets = 2_000_000_000_000
+        now = [resets - 10 * 3_600_000]
+        limits = lim.Limits({'quota.soft_cap_percent': 55}, clock=lambda: now[0])
+        queue = q.Queue(':memory:')
+
+        def snap(account, used):
+            return {'account': account, 'runtime': 'claude',
+                    'windows': [{'name': 'session', 'usedPercent': used, 'resetsAt': resets, 'windowMinutes': 300}]}
+        limits.pick_account({'conta-a': snap('conta-a', 10), 'conta-b': snap('conta-b', 40)}, queue)
+        now[0] += 60 * 60_000
+        # a conta-a subiu 10 pontos em 1 h: projeta 110% no reset e sai, embora esteja em 20%
+        out = limits.pick_account({'conta-a': snap('conta-a', 20), 'conta-b': snap('conta-b', 40)}, queue)
+        self.assertEqual(out['account'], 'conta-b')
+
+    def test_the_haiku_runs_outside_the_workspace(self):  # P4 O-A10
+        import tempfile
+        from subprocess import CompletedProcess
+        from unittest.mock import patch
+        with patch('brza_mcp.resolver.subprocess.run', return_value=CompletedProcess([], 0, '', '')) as run:
+            res.run_claude(['claude', '-p'], 'texto', {}, 5)
+        self.assertEqual(run.call_args.kwargs['cwd'], tempfile.gettempdir())
+
+
+class TextLimitTest(unittest.TestCase):
+    def test_a_limit_in_text_does_not_break_the_classification(self):  # P4 F-A3
+        for limit in ('alto', '', [], {}):
+            out = make({'resolver.tev1_min_confidence': limit}).classify('qualquer tarefa')
+            self.assertEqual(out['path'], 'haiku', limit)
+        out = make({'resolver.tev1_min_confidence': '0.5'}).classify(CASES['layers'][0]['text'])
+        self.assertEqual(out['path'], 'tev1')
+
+
 class M11CasesTest(unittest.TestCase):
-    def test_the_fixture_has_the_ten_layer_and_the_five_account_cases(self):
-        self.assertEqual((len(CASES['layers']), len(CASES['accounts'])), (10, 5))
+    def test_the_fixture_has_the_ten_layer_and_the_nine_account_cases(self):
+        self.assertEqual((len(CASES['layers']), len(CASES['accounts'])), (10, 9))
         self.assertEqual({c['layer'] for c in CASES['layers']}, {'alta', 'media', 'rapida'})
 
     def test_the_layer_cases_through_the_tev1_double_and_through_the_haiku_double(self):
@@ -144,8 +189,38 @@ class M11CasesTest(unittest.TestCase):
         for case in CASES['accounts']:
             for order in (list(case['candidates']), list(reversed(case['candidates']))):
                 ordered = {name: case['candidates'][name] for name in order}
-                out = res.choose_account(ordered, CASES['hard_cap'], CASES['margin'])
+                out = res.choose_account(ordered, CASES['hard_cap'], CASES['margin'], case.get('soft_cap'))
                 self.assertEqual(out['account'], case['account'], f'{case["id"]} {order}')
+
+
+    def test_the_fixture_records_what_the_real_tev1_answered_for_each_layer_case(self):  # P4 O-A11
+        for case in CASES['layers']:
+            self.assertIn(case['tev1']['choice'], res.LAYERS, case['id'])
+            self.assertTrue(0 <= case['tev1']['confidence'] <= 1, case['id'])
+        right = sum(c['tev1']['choice'] == c['layer'] for c in CASES['layers'])
+        self.assertEqual(right, 9)  # o 9/10 medido na máquina; o L7 a calibração do limiar tem de pegar
+
+
+def ollama_has_tev1():
+    import urllib.request
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                'http://127.0.0.1:11434/api/tags', timeout=0.5) as r:
+            return 'tev1:4b' in {m['name'] for m in json.load(r)['models']}
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+@unittest.skipUnless(ollama_has_tev1(), 'sem Ollama com o tev1:4b na máquina')
+class RealTev1Test(unittest.TestCase):
+    """O `tev1` de verdade (local, sem custo): a escolha é determinística, e a confiança fica perto da registrada."""
+
+    def test_the_real_model_repeats_the_recorded_choice_and_confidence(self):
+        resolver = res.Resolver(config=lambda: {})
+        for case in CASES['layers']:
+            got = resolver._tev1(case['text'])
+            self.assertEqual(got['choice'], case['tev1']['choice'], case['id'])
+            self.assertAlmostEqual(got['confidence'], case['tev1']['confidence'], delta=0.1, msg=case['id'])
 
 
 if __name__ == '__main__':

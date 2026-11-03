@@ -27,7 +27,7 @@ class ToolsCase(ServerCase):
 
     def call(self, name, arguments=None, session=None, client=None):
         """(isError, conteúdo): o JSON do texto quando decodifica, senão o texto."""
-        headers = {'X-Brza-Session': session} if session else {}
+        headers = {'X-Brza-Session': session} if session is not None else {}
         if client:
             headers['X-Brza-Client'] = client
         headers = headers or None

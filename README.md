@@ -14,7 +14,7 @@ a parte que é só do workspace.
 | `core/` | A norma: `AGENTS.md`, `CLAUDE.md`, `plans/README.md`, `work/README.md`, as skills e os papéis em `.claude/`, os hooks de medição e da trava do `/compact`, os scripts da medição | Sim, pelo `brza sync`, renderizado com o manifesto |
 | `templates/` | O que o `brza init` escreve uma vez: o manifesto, o `settings.json`, o `README.md`, a `.claude/rules/workspace.md`, as pastas de notas, o índice vazio | Sim, só no init; depois é local |
 | `packages/client/` | O pacote opcional do cliente — o `claude-brza` do chat, o `brza-sessions`, o `brza-run`, o `brza-doctor`, o `brza-print`, o `brza-devices` e o bloco do shell | Só com `packages = ["client"]` no manifesto |
-| `packages/mcp/` | O servidor MCP residente — o `brza-mcp` (`serve`, `start`, `stop`, `status`, `url`, `token`), em Python stdlib, sob o launchd; `brza mcp <verbo>` chega a ele pelo despacho `brza-<sub>` | Não: roda deste checkout, ligado pelo `brza install --mcp` |
+| `packages/mcp/` | O servidor MCP residente — o `brza-mcp` (`serve`, `start`, `stop`, `status`, `url`, `token`, `config`), em Python stdlib, sob o launchd, com a política no `<BRZA_WORKSPACE>/brza.toml` e as sobreposições do `brza mcp config`; `brza mcp <verbo>` chega a ele pelo despacho `brza-<sub>` | Não: roda deste checkout, ligado pelo `brza install --mcp` |
 | `bin/` | O CLI: `brza init`, `brza sync`, `brza note`, `brza register`, `brza where`, `brza install`, `brza agents` | Não: roda deste checkout |
 | `tests/` | Os testes do CLI, dos hooks, do MCP e do checador de notas | Não |
 

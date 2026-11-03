@@ -23,10 +23,15 @@ AGENT = 'claude'
 DEFAULT_INTERVAL = 15.0
 TASK_DONE = ('completed',)
 TASK_FAILED = ('failed',)
+POLL_FAILURES = 3  # as consultas seguidas que falham antes de perguntar ao cliente se o worker ainda existe
 
 
 class CycleError(RuntimeError):
-    pass
+    """`code` e `body` vêm do erro que o CLI respondeu (`{ok: false, error: {code}}`); sem eles, o CLI nem respondeu."""
+
+    def __init__(self, message, code=None, body=None):
+        super().__init__(message)
+        self.code, self.body = code, body
 
 
 class NoClient(CycleError):
@@ -88,6 +93,7 @@ class Scheduler:
         self.thread = None
         self.tick_lock = threading.Lock()
         self.errors = {}
+        self.poll_failures = {}
 
     # ---- o CLI ----
 
@@ -106,7 +112,7 @@ class Scheduler:
         return env
 
     def cli(self, client, env, *args):
-        argv = [clients_mod.CLIENTS[client]['cli'], 'orchestration', *args, '--json']
+        argv = [clients_mod.cli_path(client), 'orchestration', *args, '--json']
         code, out, err = self.run(argv, env, 120)
         try:
             body = json.loads(out)
@@ -114,13 +120,17 @@ class Scheduler:
             body = None
         if code != 0 or not isinstance(body, dict) or body.get('ok') is False:
             detail = json.dumps(body.get('error', body)) if isinstance(body, dict) else (err.strip() or out.strip())
-            raise CycleError(f'orchestration {args[0]} falhou: {detail}')
+            error = body.get('error') if isinstance(body, dict) else None
+            raise CycleError(f'orchestration {args[0]} falhou: {detail}',
+                             code=error.get('code') if isinstance(error, dict) else None,
+                             body=body if isinstance(body, dict) else None)
         return body.get('result', body)
 
     # ---- abrir ----
 
-    def open(self, request):
-        """run-create, task-create e worker-start; devolve o estado do worker, que vai à coluna `session`."""
+    def open(self, request, save=None):
+        """run-create, task-create e worker-start; devolve o estado do worker, que vai à coluna `session`. `save(estado)`
+        grava o que já existe antes do `worker-start`, para uma queda no meio não deixar run e task sem dono."""
         client = self.client_of(request)
         env = self.env_for(request, client)
         run = find_key(self.cli(client, env, 'run-create', '--objective', request['task']), 'runId', 'run_id')
@@ -131,14 +141,35 @@ class Scheduler:
                                  '--spec', request['task']), 'taskId', 'task_id')
         if not task:
             raise CycleError('task-create não devolveu o taskId')
+        state = {'client': client, 'run': run, 'task': task, 'dispatch': None}
+        if save:
+            save(dict(state))
         args = ['worker-start', '--task', task, '--run', run, '--agent', AGENT]
         if request.get('model'):
             args += ['--model', request['model']]
             if request.get('effort'):  # o CLI exige --model com --effort
                 args += ['--effort', request['effort']]
-        started = self.cli(client, env, *args)
-        return {'client': client, 'run': run, 'task': task,
-                'dispatch': find_key(started, 'dispatchId', 'dispatch_id')}
+        try:
+            started = self.cli(client, env, *args)
+        except CycleError as e:
+            dispatch = find_key(e.body, 'dispatchId', 'dispatch_id') if e.body else None
+            if e.code == 'start_outcome_unknown':  # o worker pode estar de pé: o poll decide, e ninguém o relança
+                state['dispatch'] = dispatch
+                return state
+            self._abandon(client, env, task, dispatch)
+            raise
+        state['dispatch'] = find_key(started, 'dispatchId', 'dispatch_id')
+        return state
+
+    def _abandon(self, client, env, task, dispatch):
+        """O `worker-start` falhou de vez: o que ele deixou se libera e a task fecha como `failed`, sem pendurar."""
+        steps = ([('worker-release', '--dispatch', dispatch)] if dispatch else []) + [
+            ('task-update', '--id', task, '--status', 'failed')]
+        for step in steps:
+            try:
+                self.cli(client, env, *step)
+            except CycleError as e:
+                self.log(f'limpeza depois do worker-start: {e}')
 
     def poll(self, request, state):
         """'done', 'failed' ou None (segue em curso), pela task do worker."""
@@ -158,40 +189,70 @@ class Scheduler:
         """Fecha os workers que terminaram e abre os pedidos que os tetos admitem. Devolve os ids abertos."""
         with self.tick_lock:
             self._finish()
-            opened = []
+            opened, skipped = [], set()
             while True:
                 if self.prepare:
                     self.prepare()
-                request = self.queue.next_admissible(self.limits)
+                request = self.queue.admit_next(self.limits, exclude=skipped)  # a vaga já sai reservada
                 if request is None:
                     return opened
+                rid = request['id']
                 try:
-                    state = self.open(request)
-                except NoClient as e:
-                    self.errors[request['id']] = str(e)
-                    return opened  # fica na fila, e a próxima volta tenta de novo
-                except CycleError as e:  # o CLI respondeu e falhou: o pedido falhou, e o teto não se ocupa
-                    self.errors[request['id']] = str(e)
-                    self.log(f'pedido {request["id"]}: {e}')
-                    self.queue.mark_done(request['id'], failed=True)
-                    self._route('failed', request['id'], str(e))
+                    state = self.open(request, save=lambda s, rid=rid: self.queue.set_session(rid, json.dumps(s)))
+                except NoClient as e:  # fica na fila, e o próximo admissível tenta: este não segura a fila
+                    self.queue.release(rid)
+                    skipped.add(rid)
+                    if self.errors.get(rid) != str(e):
+                        self.log(f'pedido {rid}: {e}')
+                    self.errors[rid] = str(e)
+                    self.queue.set_error(rid, str(e))
                     continue
-                self.queue.mark_running(request['id'], session=json.dumps(state))
-                opened.append(request['id'])
+                except CycleError as e:  # o CLI respondeu e falhou: o pedido falhou, e o teto não se ocupa
+                    self.errors[rid] = str(e)
+                    self.log(f'pedido {rid}: {e}')
+                    self.queue.mark_done(rid, failed=True, error=str(e))
+                    self._route('failed', rid, str(e))
+                    continue
+                self.queue.set_session(rid, json.dumps(state))
+                self.queue.set_error(rid, None)
+                self.errors.pop(rid, None)
+                opened.append(rid)
 
     def _finish(self):
         rows = self.queue._all("SELECT request_id, session FROM workers WHERE state = 'running' AND session IS NOT NULL")
         for row in rows:
+            rid, state = row['request_id'], None
             try:
                 state = json.loads(row['session'])
-                request = self.queue.get(row['request_id'])
+                request = self.queue.get(rid)
                 outcome = self.poll(request, state)
             except (ValueError, KeyError, CycleError) as e:
-                self.errors[row['request_id']] = str(e)
+                self.errors[rid] = str(e)
+                self.poll_failures[rid] = self.poll_failures.get(rid, 0) + 1
+                if self.poll_failures[rid] >= POLL_FAILURES and self._gone(rid, state):
+                    self.queue.mark_done(rid, failed=True, error=f'o worker sumiu do cliente (a consulta falhou '
+                                                                 f'{self.poll_failures[rid]} vezes): {e}')
+                    self._route('failed', rid, f'worker sumiu do cliente: {e}')
+                    self.poll_failures.pop(rid, None)
                 continue
+            self.poll_failures.pop(rid, None)
             if outcome:
-                self.queue.mark_done(row['request_id'], failed=outcome == 'failed')
-                self._route(outcome, row['request_id'], f'task {outcome} no worker')
+                self.queue.mark_done(rid, failed=outcome == 'failed',
+                                     error='a task do worker terminou como failed' if outcome == 'failed' else None)
+                self._route(outcome, rid, f'task {outcome} no worker')
+
+    def _gone(self, request_id, state):
+        """O cliente responde que não conhece o worker: só então ele se dá por perdido. Cliente fora do ar, ou sem o
+        `dispatchId` para perguntar, mantém o pedido `running`."""
+        dispatch = (state or {}).get('dispatch')
+        if not dispatch:
+            return False
+        try:
+            env = self.env_for(self.queue.get(request_id), state['client'])
+            self.cli(state['client'], env, 'worker-show', '--dispatch', dispatch)
+        except (CycleError, KeyError) as e:
+            return isinstance(e, CycleError) and e.body is not None
+        return False
 
     def _route(self, decision, request_id, reason):
         if self.telemetry:
@@ -212,6 +273,8 @@ class Scheduler:
             self.wake.clear()
 
     def start(self):
+        for request_id in self.queue.orphan_workers():  # a queda de antes veio entre a reserva e o cliente
+            self.queue.release(request_id)
         self.thread = threading.Thread(target=self._loop, name='brza-mcp-cycle', daemon=True)
         self.thread.start()
 

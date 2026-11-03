@@ -6,52 +6,92 @@
     {
       "id": "L1",
       "text": "Desenhar a arquitetura do módulo de filas e decidir entre SQLite e arquivos planos",
-      "layer": "alta"
+      "layer": "alta",
+      "tev1": {
+        "choice": "alta",
+        "confidence": 0.9726
+      }
     },
     {
       "id": "L2",
       "text": "Decidir qual das duas alternativas de cache cabe no plano, com o custo de cada uma",
-      "layer": "alta"
+      "layer": "alta",
+      "tev1": {
+        "choice": "alta",
+        "confidence": 0.8977
+      }
     },
     {
       "id": "L3",
       "text": "Revisar de forma adversária o plano de migração antes da execução",
-      "layer": "alta"
+      "layer": "alta",
+      "tev1": {
+        "choice": "alta",
+        "confidence": 0.9924
+      }
     },
     {
       "id": "L4",
       "text": "Julgar se a divergência entre o desenho e o disco pede uma rodada com quem pediu",
-      "layer": "alta"
+      "layer": "alta",
+      "tev1": {
+        "choice": "alta",
+        "confidence": 0.9404
+      }
     },
     {
       "id": "L5",
       "text": "Implementar a função que lê o brza.toml, com testes unitários",
-      "layer": "media"
+      "layer": "media",
+      "tev1": {
+        "choice": "media",
+        "confidence": 0.7751
+      }
     },
     {
       "id": "L6",
       "text": "Levantar em todos os arquivos de hooks onde o brza_root é importado e agregar a lista",
-      "layer": "media"
+      "layer": "media",
+      "tev1": {
+        "choice": "media",
+        "confidence": 0.112
+      }
     },
     {
       "id": "L7",
       "text": "Rodar a suíte tests/cli e reportar as falhas por arquivo",
-      "layer": "media"
+      "layer": "media",
+      "tev1": {
+        "choice": "alta",
+        "confidence": 0.1787
+      }
     },
     {
       "id": "L8",
       "text": "Extrair de dez notas do plano os campos priority e deadline para uma tabela",
-      "layer": "media"
+      "layer": "media",
+      "tev1": {
+        "choice": "media",
+        "confidence": 0.2778
+      }
     },
     {
       "id": "L9",
       "text": "Listar os arquivos .md de uma pasta",
-      "layer": "rapida"
+      "layer": "rapida",
+      "tev1": {
+        "choice": "rapida",
+        "confidence": 0.4879
+      }
     },
     {
       "id": "L10",
       "text": "Contar quantas linhas tem o arquivo de log",
-      "layer": "rapida"
+      "layer": "rapida",
+      "tev1": {
+        "choice": "rapida",
+        "confidence": 0.5561
+      }
     }
   ],
   "accounts": [
@@ -126,6 +166,67 @@
         "conta-b": [
           60,
           62
+        ]
+      },
+      "account": "conta-b"
+    },
+    {
+      "id": "A6",
+      "title": "empate na margem: a de menor uso vem depois na ordem alfabética",
+      "candidates": {
+        "conta-a": [
+          53,
+          10
+        ],
+        "conta-b": [
+          50,
+          10
+        ]
+      },
+      "account": "conta-a"
+    },
+    {
+      "id": "A7",
+      "title": "janela em exatamente o teto sai, mesmo a uma margem da outra",
+      "candidates": {
+        "conta-a": [
+          90,
+          10
+        ],
+        "conta-b": [
+          88,
+          10
+        ]
+      },
+      "account": "conta-b"
+    },
+    {
+      "id": "A8",
+      "title": "diferença de exatamente a margem empata",
+      "candidates": {
+        "conta-a": [
+          55,
+          0
+        ],
+        "conta-b": [
+          50,
+          0
+        ]
+      },
+      "account": "conta-a"
+    },
+    {
+      "id": "A9",
+      "title": "abaixo do soft cap vence o empate da margem",
+      "soft_cap": 55,
+      "candidates": {
+        "conta-a": [
+          56,
+          0
+        ],
+        "conta-b": [
+          52,
+          0
         ]
       },
       "account": "conta-b"

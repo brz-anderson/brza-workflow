@@ -1,7 +1,9 @@
 """Onde cada coisa mora: a base (~/.brza, ou a BRZA_HOME), o runtime, o token e o agente do launchd."""
 from __future__ import annotations
 
+import json
 import os
+import plistlib
 import secrets
 import sys
 from pathlib import Path
@@ -71,9 +73,10 @@ def _read_toml(path: Path) -> dict:
     return tomllib.loads(text)
 
 
-def workspace_port() -> int | None:
-    """O `[mcp] port` do <workspace>/brza.toml, ou None sem workspace, sem arquivo ou sem a chave."""
-    root = workspace_root()
+def workspace_port(root: Path | None = None) -> int | None:
+    """O `[mcp] port` do <workspace>/brza.toml (o `root`, ou o do ambiente), ou None sem workspace, sem arquivo ou sem
+    a chave."""
+    root = root if root is not None else workspace_root()
     if root is None or not (root / 'brza.toml').is_file():
         return None
     try:
@@ -90,6 +93,36 @@ def default_port(port: int | None = None) -> int:
     if os.environ.get('BRZA_MCP_PORT'):
         return int(os.environ['BRZA_MCP_PORT'])
     return workspace_port() or DEFAULT_PORT
+
+
+def _plist_env() -> dict:
+    try:
+        env = plistlib.loads(plist_path().read_bytes()).get('EnvironmentVariables')
+    except Exception:  # noqa: BLE001 - sem plist legível, vale o resto da cadeia
+        return {}
+    return env if isinstance(env, dict) else {}
+
+
+def active_port() -> int:
+    """A porta do servidor que já roda, para `status` e `config` fora do workspace: o `mcp.json` que o `serve` grava,
+    depois o agente carregado (`BRZA_MCP_PORT` ou o `[mcp] port` do `BRZA_WORKSPACE` dele) e, por fim, o `default_port`."""
+    try:
+        port = json.loads(info_path().read_text()).get('port')
+        if isinstance(port, int) and not isinstance(port, bool):
+            return port
+    except (OSError, ValueError, AttributeError):
+        pass
+    env = _plist_env()
+    try:
+        if env.get('BRZA_MCP_PORT'):
+            return int(env['BRZA_MCP_PORT'])
+    except (TypeError, ValueError):
+        pass
+    if env.get('BRZA_WORKSPACE'):
+        port = workspace_port(Path(env['BRZA_WORKSPACE']).expanduser())
+        if port:
+            return port
+    return default_port()
 
 
 def ensure_runtime() -> Path:

@@ -331,6 +331,48 @@ class LifecycleTest(HomeCase):
         self.fake.loaded = True
         self.assertEqual(self.main('status')[0], 3)
 
+    def plist_with(self, **env):
+        paths.plist_path().parent.mkdir(parents=True, exist_ok=True)
+        paths.plist_path().write_bytes(plistlib.dumps({'Label': 'x', 'EnvironmentVariables': env}))
+
+    def test_status_outside_the_workspace_finds_the_port_in_the_runtime_info(self):  # P1 r2 A1
+        self.fake.loaded = True
+        self.live_server()
+        port = os.environ.pop('BRZA_MCP_PORT')
+        paths.ensure_runtime()
+        paths.info_path().write_text(json.dumps({'pid': 1, 'port': int(port)}))
+        code, out, _ = self.main('status')
+        self.assertEqual(code, 0, out)
+        self.assertIn('health: responde', out)
+
+    def test_status_outside_the_workspace_finds_the_port_in_the_plist(self):  # P1 r2 A1
+        self.fake.loaded = True
+        self.live_server()
+        self.plist_with(BRZA_MCP_PORT=os.environ.pop('BRZA_MCP_PORT'))
+        self.assertEqual(self.main('status')[0], 0)
+
+    def test_status_outside_the_workspace_finds_the_toml_port_of_the_plist_workspace(self):  # P1 r2 A1
+        self.fake.loaded = True
+        self.live_server()
+        ws = self.tmp / 'ws'
+        ws.mkdir()
+        (ws / 'brza.toml').write_text(f'[mcp]\nport = {os.environ.pop("BRZA_MCP_PORT")}\n')
+        self.plist_with(BRZA_WORKSPACE=str(ws))
+        self.assertEqual(self.main('status')[0], 0)
+
+    def test_stop_with_a_failing_bootout_is_an_error_without_a_traceback(self):  # P1 r2 A2
+        self.fake.loaded = True
+        real = self.fake
+
+        def failing(*args):
+            if args[0] == 'bootout':
+                return CompletedProcess(args, 5, '', 'Boot-out failed: 5')
+            return real(*args)
+        with patch.object(launchd, 'run_launchctl', failing):
+            code, _, err = self.main('stop')
+        self.assertEqual(code, 1)
+        self.assertIn('Boot-out failed', err)
+
     def test_start_refuses_python_below_3_10_before_any_launchctl_call(self):  # A4
         with patch.object(sys, 'version_info', (3, 9, 6, 'final', 0)):
             code, _, err = self.main('start')
@@ -418,6 +460,11 @@ class ProcessTest(HomeCase):
                 time.sleep(0.1)
         self.assertIsNotNone(body, proc.poll())
         self.assertEqual(body['pid'], proc.pid)
+        req = urllib.request.Request(f'http://127.0.0.1:{port}/mcp', headers={
+            'Authorization': f'Bearer {token_file.read_text().strip()}', 'Content-Type': 'application/json'},
+            data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}).encode())
+        listed = json.load(opener.open(req, timeout=5))['result']['tools']  # P3 O-A6: o serve liga as ferramentas
+        self.assertEqual({t['name'] for t in listed}, {'dispatch', 'status', 'config'})
         info = json.loads((self.home / 'runtime' / 'mcp.json').read_text())
         self.assertEqual((info['pid'], info['port']), (proc.pid, port))
         self.assertIn('started', info)

@@ -8,7 +8,7 @@ import os
 import unittest
 from pathlib import Path
 
-from mcp_support import ServerCase
+from mcp_support import HomeCase, ServerCase
 
 from brza_mcp import cli  # noqa: E402
 from brza_mcp import limits as lim  # noqa: E402
@@ -20,6 +20,17 @@ from test_mcp_cycle import FakeCli  # noqa: E402
 class NoAccounts:
     def usage(self, account, runtime):
         return None
+
+
+class ServeDefaultsTest(HomeCase):
+    def test_the_serve_limits_carry_the_d4_defaults_without_a_brza_toml(self):  # P2 O-A5
+        from brza_mcp.registry import ToolRegistry
+        queue = q.Queue(':memory:')
+        self.addCleanup(queue.close)
+        service, _ = cli.build(ToolRegistry(), queue=queue, accounts=NoAccounts(), run=None)
+        self.assertEqual(service.limits.get('quota.max_sessions_per_account'), 2)
+        self.assertEqual(service.limits.get('orchestrator.max_workers'), 6)
+        self.assertEqual(service.limits.get('quota.hard_cap_percent'), 90)
 
 
 class EndToEndTest(ServerCase):
@@ -39,7 +50,7 @@ class EndToEndTest(ServerCase):
             raise AssertionError('o claude real não pode rodar')
         self.queue = q.Queue(':memory:')
         self.addCleanup(self.queue.close)
-        limits = lim.Limits({'orchestrator.max_workers': 1}, machine=lambda: {'free_mem_gb': 8.0, 'swap_used_gb': 0.1,
+        limits = lim.Limits({'orchestrator.max_workers': 1}, machine=lambda: {'free_mem_gb': 8.0, 'swap_gb': 0.1,
                                                                               'cpu_percent': 20})
         resolver = res.Resolver(config=lambda: {'resolver.tev1_min_confidence': 0.5}, ollama=ollama, claude=claude)
         self.service, self.scheduler = cli.build(self.registry, queue=self.queue, accounts=NoAccounts(),

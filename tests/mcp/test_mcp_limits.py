@@ -3,6 +3,7 @@
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp -v
 """
 import json
+import sys
 import unittest
 from pathlib import Path
 
@@ -41,7 +42,7 @@ class Usage:
 
 
 def machine(free=16.0, swap=0.0, cpu=10.0):
-    return lambda: {'free_mem_gb': free, 'swap_used_gb': swap, 'cpu_percent': cpu}
+    return lambda: {'free_mem_gb': free, 'swap_gb': swap, 'cpu_percent': cpu}
 
 
 def setup(config, usage=None, mach=None, clock=None):
@@ -150,15 +151,46 @@ class QuotaTest(unittest.TestCase):
         usage.snapshot = snap(11)  # 1 ponto/h: projeta 20%
         self.assertIsNotNone(queue.next_admissible(limits))
 
-    def test_samples_of_another_reset_are_not_mixed(self):
+    def test_samples_of_another_reset_are_not_mixed(self):  # P2 F-A3 = O-A9
         clock = Clock(RESETS - 3_600_000)
-        usage = Usage(snap(80, resets=RESETS - 1))
+        usage = Usage(snap(2, resets=RESETS - 1_800_000))  # a janela velha, em 2%
         queue, limits = setup({'quota.hard_cap_percent': 90}, usage=usage, clock=clock)
         add(queue)
         queue.next_admissible(limits)
         clock.advance(10)
-        usage.snapshot = snap(2, resets=RESETS)  # a janela virou
+        usage.snapshot = snap(80, resets=RESETS)  # a janela virou: misturadas as duas projetam acima de 90
         self.assertIsNotNone(queue.next_admissible(limits))
+
+    def test_the_same_reset_within_a_second_is_the_same_group(self):  # P2 O-A4
+        clock = Clock(RESETS - 10 * 3_600_000)
+        usage = Usage(snap(10, resets=RESETS))
+        queue, limits = setup({'quota.hard_cap_percent': 90}, usage=usage, clock=clock)
+        add(queue)
+        queue.next_admissible(limits)
+        clock.advance(60)
+        usage.snapshot = snap(20, resets=RESETS + 500)  # o cliente devolve o resetsAt com ms de diferença
+        self.assertIsNone(queue.next_admissible(limits))  # 10 pontos/h: projeta 110%, mesma janela
+        self.assertEqual(len(queue.samples('a1', 'claude', 'session', RESETS)), 2)
+
+    def test_a_one_point_step_in_seconds_does_not_hold_the_account(self):  # P2 O-A3
+        clock = Clock(RESETS - 10 * 3_600_000)
+        usage = Usage({'account': 'a1', 'runtime': 'claude', 'windows': [
+            {'name': 'session', 'usedPercent': 10, 'resetsAt': RESETS, 'windowMinutes': 300}]})
+        queue, limits = setup({'quota.hard_cap_percent': 90}, usage=usage, clock=clock)
+        add(queue)
+        queue.next_admissible(limits)
+        clock.advance(0.5)
+        usage.snapshot['windows'][0]['usedPercent'] = 11  # o inteiro do `usedPercent` deu um degrau
+        self.assertIsNotNone(queue.next_admissible(limits))
+        self.assertEqual(limits.last_measures['quota']['windows'][0]['projected'], 11)
+
+    def test_a_vanished_window_is_pruned_on_the_next_record(self):  # P2 O-A12
+        queue = q.Queue(':memory:')
+        queue.record_usage(snap(5, resets=1_000_000), 900_000)
+        self.assertEqual(len(queue.samples('a1', 'claude', 'session', 1_000_000)), 1)
+        queue.record_usage(snap(7, resets=RESETS), 5_000_000)  # o reset da primeira já passou
+        self.assertEqual(queue.samples('a1', 'claude', 'session', 1_000_000), [])
+        self.assertEqual(len(queue.samples('a1', 'claude', 'session', RESETS)), 1)
 
     def test_any_window_over_the_cap_holds(self):
         usage = Usage({'account': 'a1', 'runtime': 'claude', 'windows': [
@@ -175,8 +207,9 @@ class QuotaTest(unittest.TestCase):
         add(queue)
         got = queue.next_admissible(limits)
         self.assertEqual(got['id'], first)
-        self.assertEqual(limits.last_decision.reason, 'quota_unknown')
-        self.assertTrue(limits.last_decision.admit)
+        decision = limits.decide(queue.get(first), queue)  # a última da passada é a do segundo, que a vaga do primeiro segura
+        self.assertEqual(decision.reason, 'quota_unknown')
+        self.assertTrue(decision.admit)
         queue.mark_running(first)
         self.assertIsNone(queue.next_admissible(limits))
         self.assertEqual(queue.pending()[0]['held_by'], 'account_sessions')
@@ -189,8 +222,9 @@ class QuotaTest(unittest.TestCase):
 
     def test_the_orca_fixture_shapes_a_snapshot(self):
         data = json.loads(FIXTURE.read_text())
-        self.assertNotIn('@', FIXTURE.read_text())
-        claude = data['rateLimits']['claude']
+        self.assertEqual(set(data), {'id', 'ok', 'result', '_meta'})  # o envelope do `--json`
+        self.assertTrue(all(e['email'].endswith('@example.com') for e in data['result']['accounts']['claude']))
+        claude = data['result']['rateLimits']['claude']
         windows = [{'name': n, 'usedPercent': claude[n]['usedPercent'], 'resetsAt': claude[n]['resetsAt']}
                    for n in ('session', 'weekly', 'fableWeekly') if claude.get(n)]
         usage = Usage({'account': 'a1', 'runtime': 'claude', 'windows': windows})
@@ -206,7 +240,7 @@ class MachineTest(unittest.TestCase):
         add(queue)
         self.assertIsNotNone(queue.next_admissible(limits))
         m = limits.last_measures['machine']
-        self.assertEqual((m['free_mem_gb'], m['swap_used_gb'], m['cpu_percent']), (0.1, 50, 100))
+        self.assertEqual((m['free_mem_gb'], m['swap_gb'], m['cpu_percent']), (0.1, 50, 100))
         self.assertFalse(m['enforced'])
 
     def test_low_free_memory_holds(self):
@@ -237,7 +271,7 @@ class MachineTest(unittest.TestCase):
 
     def test_an_unreadable_measure_does_not_hold(self):
         queue, limits = setup({'machine.min_free_mem_gb': 4},
-                              mach=lambda: {'free_mem_gb': None, 'swap_used_gb': None, 'cpu_percent': None})
+                              mach=lambda: {'free_mem_gb': None, 'swap_gb': None, 'cpu_percent': None})
         add(queue)
         self.assertIsNotNone(queue.next_admissible(limits))
 
@@ -264,7 +298,46 @@ class MachineReadersTest(unittest.TestCase):
 
     def test_the_real_reader_returns_the_three_keys(self):
         m = lim.read_machine()
-        self.assertEqual(set(m), {'free_mem_gb', 'swap_used_gb', 'cpu_percent'})
+        self.assertEqual(set(m), {'free_mem_gb', 'swap_gb', 'cpu_percent'})
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'vm_stat e sysctl são do macOS')  # P2 O-A14
+    def test_the_real_reader_reads_the_three_values_on_macos(self):
+        m = lim.read_machine()
+        self.assertTrue(all(v is not None for v in m.values()), m)
+
+
+class PassTest(unittest.TestCase):
+    """Uma passada de `next_admissible` lê o uso de cada (conta, runtime) e a máquina uma vez só (P2 O-A12, P3 O-A9)."""
+
+    def test_the_usage_and_the_machine_are_read_once_per_pass(self):
+        calls = {'usage': [], 'machine': 0}
+
+        def usage(account, runtime):
+            calls['usage'].append((account, runtime))
+            return snap(10, account=account)
+
+        def mach():
+            calls['machine'] += 1
+            return {'free_mem_gb': 16.0, 'swap_gb': 0.0, 'cpu_percent': 10.0}
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.max_sessions_per_account': 9}, usage=usage, machine=mach, clock=Clock())
+        for account in ('a1', 'a1', 'a1', 'a2'):
+            add(queue, account=account)
+        queue.next_admissible(limits)
+        self.assertEqual(sorted(calls['usage']), [('a1', 'claude'), ('a2', 'claude')])
+        self.assertEqual(calls['machine'], 1)
+        self.assertEqual(len(queue.samples('a1', 'claude', 'session', RESETS)), 1)
+
+    def test_the_held_by_is_written_only_when_it_changes(self):  # P3 O-A9
+        queue, limits = setup({'orchestrator.max_workers': 1}, usage=Usage(None))
+        queue.mark_running(add(queue))
+        waiting = add(queue)
+        queue.next_admissible(limits)
+        updated = queue.get(waiting)['updated_at']
+        before = queue._all('SELECT total_changes()')[0][0]
+        queue.next_admissible(limits)
+        self.assertEqual(queue._all('SELECT total_changes()')[0][0], before)
+        self.assertEqual(queue.get(waiting)['updated_at'], updated)
 
 
 class MeasuresTest(unittest.TestCase):

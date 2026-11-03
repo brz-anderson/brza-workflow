@@ -5,6 +5,7 @@
 Uma conexão só, com `check_same_thread=False` e um RLock: o servidor é um ThreadingHTTPServer e cada requisição roda
 numa thread. Os tetos que decidem a admissão são do `limits.py`; aqui só se percorre a fila.
 """
+import contextlib
 import json
 import re
 import sqlite3
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS requests (
     task TEXT NOT NULL, role TEXT NOT NULL, target TEXT, runtime TEXT, model TEXT, effort TEXT, account TEXT,
     ref TEXT, deadline TEXT, blocks TEXT NOT NULL DEFAULT '[]', priority TEXT, caller TEXT, client TEXT,
     state TEXT NOT NULL DEFAULT 'queued', held_by TEXT, held_reason TEXT,
-    created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL
+    created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL, error TEXT
 );
 CREATE TABLE IF NOT EXISTS workers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,14 +51,29 @@ def default_db_path() -> Path:
     return paths.brza_home() / 'orchestrator.db'
 
 
+_DEADLINE = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def normalize_deadline(deadline) -> str:
+    """A data `AAAA-MM-DD` e só ela: a fila ordena o `deadline` como texto, e `20261201` ou `2026-W49-2`, que o
+    `date.fromisoformat` aceita, ordenariam errado."""
+    try:
+        if not (isinstance(deadline, str) and _DEADLINE.fullmatch(deadline)):
+            raise ValueError
+        return date.fromisoformat(deadline).isoformat()
+    except ValueError:
+        raise ValueError(f'deadline inválido: {deadline!r} (data ISO, AAAA-MM-DD)') from None
+
+
 def _check_values(priority, deadline):
     if priority is not None and priority not in PRIORITIES:
         raise ValueError(f'priority inválida: {priority!r} (high, medium ou low)')
-    if deadline is not None:
-        try:
-            date.fromisoformat(deadline)
-        except (TypeError, ValueError):
-            raise ValueError(f'deadline inválido: {deadline!r} (data ISO, AAAA-MM-DD)') from None
+    return normalize_deadline(deadline) if deadline is not None else None
+
+
+def _bucket(resets_at):
+    """O `resetsAt` ao minuto mais próximo: o cliente o devolve com milissegundos que mudam a cada leitura."""
+    return None if resets_at is None else round(resets_at / 60_000) * 60_000
 
 
 def _row(r):
@@ -83,8 +99,10 @@ class Queue:
         self.conn.row_factory = sqlite3.Row
         with self.lock:
             self.conn.executescript(SCHEMA)
-            if 'client' not in {r['name'] for r in self.conn.execute('PRAGMA table_info(requests)')}:
-                self.conn.execute('ALTER TABLE requests ADD COLUMN client TEXT')  # banco do P2 a P4
+            columns = {r['name'] for r in self.conn.execute('PRAGMA table_info(requests)')}
+            for name in ('client', 'error'):  # o banco do P2 a P4 não os tem
+                if name not in columns:
+                    self.conn.execute(f'ALTER TABLE requests ADD COLUMN {name} TEXT')
             self.conn.commit()
 
     def close(self):
@@ -108,12 +126,12 @@ class Queue:
         """Grava o pedido. O que veio no `dispatch` vence o índice; `index(ref)` completa o que faltou."""
         if state not in STATES:
             raise ValueError(f'state inválido: {state!r}')
-        if ref and index is not None and (deadline is None or not blocks or priority is None):
+        if ref and index is not None and (deadline is None or blocks is None or priority is None):
             found = index(ref) or {}
             deadline = deadline if deadline is not None else found.get('deadline')
-            blocks = blocks if blocks else found.get('blocks')
+            blocks = blocks if blocks is not None else found.get('blocks')
             priority = priority if priority is not None else found.get('priority')
-        _check_values(priority, deadline)
+        deadline = _check_values(priority, deadline)
         now = time.time()
         cur = self._run(
             'INSERT INTO requests (task, role, target, runtime, model, effort, account, ref, deadline, blocks,'
@@ -138,68 +156,131 @@ class Queue:
 
     def next_admissible(self, limits):
         """Percorre a fila na ordem da R9.2 e devolve o primeiro que os tetos admitem; no resto grava o teto que
-        segura. Não muda o estado do escolhido: quem o abre chama `mark_running`."""
+        segura, julgando-o com o escolhido já numa vaga. Não deixa rastro no escolhido: quem o abre chama
+        `admit_next`, ou `mark_running` depois deste."""
         with self.lock:
-            chosen = None
-            for request in self.pending():
-                decision = limits.decide(request, self)
-                if self.on_decision:
-                    self.on_decision(request, decision, decision.admit and chosen is None)
-                if decision.admit:
-                    held = (None, None)
-                    chosen = chosen or request
-                else:
-                    held = (decision.ceiling, decision.reason)
-                self._run('UPDATE requests SET held_by = ?, held_reason = ? WHERE id = ?', (*held, request['id']))
-            return self.get(chosen['id']) if chosen else None
+            return self._admit(limits, reserve=False)
 
-    def mark_running(self, request_id, session=None, counts_as_worker=True):
-        """Abre o worker. O desempatador entra com `counts_as_worker=False` (R2.3) e não pesa nos tetos."""
+    def admit_next(self, limits, session=None, exclude=()):
+        """Escolhe o primeiro pedido que os tetos admitem e o abre no mesmo lock: o pedido vira `running` e ganha o
+        worker, então duas chamadas seguidas não admitem a mesma vaga duas vezes. `release` desfaz."""
+        with self.lock:
+            return self._admit(limits, reserve=True, session=session, exclude=exclude)
+
+    def _admit(self, limits, reserve, session=None, exclude=()):
+        scope = getattr(limits, 'scope', None)
+        chosen, virtual = None, []
+        try:
+            with (scope() if scope else contextlib.nullcontext()):
+                for request in self.pending():
+                    if request['id'] in exclude:  # o ciclo já tentou abri-lo nesta volta
+                        continue
+                    decision = limits.decide(request, self)
+                    first = decision.admit and chosen is None
+                    if self.on_decision:
+                        self.on_decision(request, decision, first)
+                    if decision.admit:
+                        held = (None, None)
+                        if first:
+                            chosen = request
+                            self._open(request['id'], session, True)
+                        else:
+                            self._open(request['id'], None, True)  # cada admissível ocupa uma vaga para os de trás
+                            virtual.append(request['id'])
+                    else:
+                        held = (decision.ceiling, decision.reason)
+                    if held != (request['held_by'], request['held_reason']):
+                        self._run('UPDATE requests SET held_by = ?, held_reason = ? WHERE id = ?', (*held, request['id']))
+        finally:
+            for request_id in virtual + ([chosen['id']] if chosen and not reserve else []):
+                self.release(request_id)
+        return self.get(chosen['id']) if chosen else None
+
+    def _open(self, request_id, session, counts_as_worker):
         with self.lock:
             request = self.get(request_id)
             now = time.time()
-            self._run("UPDATE requests SET state = 'running', held_by = NULL, held_reason = NULL, started_at = ?,"
-                      ' updated_at = ? WHERE id = ?', (now, now, request_id))
+            cur = self._run("UPDATE requests SET state = 'running', held_by = NULL, held_reason = NULL,"
+                            " started_at = ?, updated_at = ? WHERE id = ? AND state = 'queued'", (now, now, request_id))
+            if cur.rowcount != 1:
+                raise ValueError(f'o pedido {request_id} não está queued: {request["state"] if request else "não existe"}')
             self._run('INSERT INTO workers (request_id, account, runtime, session, counts_as_worker, started_at)'
                       ' VALUES (?,?,?,?,?,?)', (request_id, request['account'] or '', request['runtime'] or '',
                                                 session, 1 if counts_as_worker else 0, now))
 
-    def mark_done(self, request_id, failed=False):
-        """Fecha o worker e libera o teto: é o gancho do `worker_done` (P5)."""
+    def release(self, request_id):
+        """Desfaz a abertura de um pedido que não chegou a abrir (sem cliente, por exemplo): o pedido volta à fila e a
+        vaga se livra."""
+        with self.lock:
+            self._run("DELETE FROM workers WHERE request_id = ? AND state = 'running'", (request_id,))
+            self._run("UPDATE requests SET state = 'queued', started_at = NULL, updated_at = ? WHERE id = ?"
+                      " AND state = 'running'", (time.time(), request_id))
+
+    def set_error(self, request_id, error):
+        """O motivo que o `status` mostra: de um pedido que espera sem poder abrir, ou de um que terminou mal."""
+        self._run('UPDATE requests SET error = ? WHERE id = ?', (error, request_id))
+
+    def recent_finished(self, caller, limit=10):
+        """Os pedidos `done` e `failed` mais recentes do chamador, com o erro de quem falhou."""
+        rows = self._all("SELECT * FROM requests WHERE caller = ? AND state IN ('done', 'failed')"
+                         ' ORDER BY finished_at DESC, id DESC LIMIT ?', (caller, limit))
+        return [_row(r) for r in rows]
+
+    def orphan_workers(self):
+        """Os workers reservados que não chegaram a ter sessão: a queda veio entre a reserva e o cliente."""
+        return [r['request_id'] for r in self._all("SELECT request_id FROM workers WHERE state = 'running'"
+                                                   ' AND counts_as_worker = 1 AND session IS NULL')]
+
+    def set_session(self, request_id, session):
+        """O estado do worker (a coluna `session`), depois que o cliente o abriu."""
+        self._run("UPDATE workers SET session = ? WHERE request_id = ? AND state = 'running'", (session, request_id))
+
+    def mark_running(self, request_id, session=None, counts_as_worker=True):
+        """Abre o worker de um pedido `queued`. O desempatador entra com `counts_as_worker=False` (R2.3) e não pesa
+        nos tetos. Pedido em outro estado levanta `ValueError`."""
+        self._open(request_id, session, counts_as_worker)
+
+    def mark_done(self, request_id, failed=False, error=None):
+        """Fecha o worker e libera o teto: é o gancho do `worker_done` (P5). `error` é o motivo de quem falhou."""
         with self.lock:
             now = time.time()
-            self._run('UPDATE requests SET state = ?, finished_at = ?, updated_at = ? WHERE id = ?',
-                      ('failed' if failed else 'done', now, now, request_id))
+            self._run('UPDATE requests SET state = ?, finished_at = ?, updated_at = ?, error = ? WHERE id = ?',
+                      ('failed' if failed else 'done', now, now, error, request_id))
             self._run("UPDATE workers SET state = ?, finished_at = ? WHERE request_id = ? AND state = 'running'",
                       ('failed' if failed else 'done', now, request_id))
 
     def running_count(self, account=None, runtime=None):
-        """Os workers abertos que contam nos tetos; com `account` e `runtime`, só os da conta naquele runtime."""
+        """Os workers abertos que contam nos tetos; com `account` e/ou `runtime`, só os que casam com o que veio."""
         sql, args = "SELECT COUNT(*) FROM workers WHERE state = 'running' AND counts_as_worker = 1", []
-        if account is not None or runtime is not None:
-            sql += ' AND account = ? AND runtime = ?'
-            args += [account or '', runtime or '']
+        if account is not None:
+            sql += ' AND account = ?'
+            args.append(account)
+        if runtime is not None:
+            sql += ' AND runtime = ?'
+            args.append(runtime)
         return self._all(sql, args)[0][0]
 
     # ---- amostras de uso ----
 
     def record_usage(self, snapshot, ts_ms):
-        """Guarda uma amostra por janela do instantâneo normalizado {account, runtime, windows: [...]}."""
+        """Guarda uma amostra por janela do instantâneo normalizado {account, runtime, windows: [...]} e apaga as
+        amostras das janelas que já viraram (o `resetsAt` passou)."""
         with self.lock:
+            self.conn.execute('DELETE FROM usage_samples WHERE resets_at IS NOT NULL AND resets_at < ?', (int(ts_ms),))
             for w in snapshot.get('windows') or []:
                 if w.get('usedPercent') is None:
                     continue
                 self.conn.execute(
                     'INSERT INTO usage_samples (account, runtime, window, used_percent, resets_at, ts)'
                     ' VALUES (?,?,?,?,?,?)', (snapshot.get('account') or '', snapshot.get('runtime') or '',
-                                              w['name'], w['usedPercent'], w.get('resetsAt'), int(ts_ms)))
+                                              w['name'], w['usedPercent'], _bucket(w.get('resetsAt')), int(ts_ms)))
             self.conn.commit()
 
     def samples(self, account, runtime, window, resets_at):
-        """As amostras da janela com o mesmo `resetsAt`, da mais antiga à mais nova: [(ts_ms, usedPercent)]."""
+        """As amostras da janela com o mesmo `resetsAt` (ao minuto), da mais antiga à mais nova: [(ts_ms, usedPercent)]."""
         rows = self._all('SELECT ts, used_percent FROM usage_samples WHERE account = ? AND runtime = ?'
                          ' AND window = ? AND resets_at IS ? ORDER BY ts, id',
-                         (account or '', runtime or '', window, resets_at))
+                         (account or '', runtime or '', window, _bucket(resets_at)))
         return [(r['ts'], r['used_percent']) for r in rows]
 
 
@@ -250,8 +331,7 @@ def index_fields(ref, workspace, reader=git_index_reader) -> dict:
         fields['blocks'] = [str(b) for b in blocks]
     try:
         if entry.get('deadline'):
-            date.fromisoformat(entry['deadline'])
-            fields['deadline'] = entry['deadline']
-    except (TypeError, ValueError):
+            fields['deadline'] = normalize_deadline(entry['deadline'])
+    except ValueError:
         pass
     return fields

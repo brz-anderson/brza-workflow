@@ -2,6 +2,7 @@
 
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp -v
 """
+import threading
 import unittest
 
 from tools_support import ToolsCase
@@ -74,6 +75,62 @@ class GateTest(ToolsCase):
         self.assertFalse(self.call('dispatch', {'task': 't', 'role': 'executor', 'approved': gate['id']},
                                    session='s1')[0])
 
+    def test_two_simultaneous_approvals_admit_the_request_once(self):  # P3 F-A1 = O-A1
+        gate = self.gate({'task': 't', 'role': 'executor'})
+        barriers = {'SELECT * FROM gates': threading.Barrier(2), 'SELECT * FROM requests WHERE id': threading.Barrier(2)}
+        real = self.queue._all
+
+        def meeting(sql, args=()):
+            rows = real(sql, args)
+            for start, barrier in barriers.items():  # as duas leem o gate e o pedido antes de qualquer uma os gastar
+                if sql.startswith(start):
+                    try:
+                        barrier.wait(0.5)
+                    except threading.BrokenBarrierError:
+                        pass
+            return rows
+        self.queue._all = meeting
+        results = []
+
+        def approve():
+            results.append(self.call_approve(gate['id']))
+        threads = [threading.Thread(target=approve) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(len(self.queue.pending()), 1)
+        self.assertEqual(len(self.queue._all('SELECT id FROM gates WHERE approved_at IS NOT NULL')), 1)
+
+    def call_approve(self, gate_id):
+        from brza_mcp.registry import CallContext
+        out = self.service.dispatch({'task': 't', 'role': 'executor', 'approved': gate_id}, CallContext('s1'))
+        return 'isError' not in out
+
+    def test_the_gate_and_its_request_are_written_together(self):  # P3 F-A2
+        real = self.queue._run
+
+        def failing(sql, args=()):
+            if sql.startswith('INSERT INTO gates'):
+                raise RuntimeError('disco cheio')
+            return real(sql, args)
+        self.queue._run = failing
+        with self.assertRaises(RuntimeError):
+            self.service.dispatch({'task': 't', 'role': 'executor'}, __import__('brza_mcp.registry').registry.CallContext('s1'))
+        self.assertEqual(self.queue._all("SELECT id FROM requests WHERE state = 'gated'"), [])
+
+    def test_approval_with_another_task_role_or_account_is_refused(self):  # P3 O-A7
+        gate = self.gate({'task': 'faz isso', 'role': 'executor'})
+        for args in ({'task': 'faz aquilo', 'role': 'executor'}, {'task': 'faz isso', 'role': 'architect'},
+                     {'task': 'faz isso', 'role': 'executor', 'account': 'outra'}):
+            err, out = self.call('dispatch', {**args, 'approved': gate['id']}, session='s1')
+            self.assertTrue(err, args)
+            self.assertIn('proposta', out)
+        self.assertEqual(self.queue.pending(), [])
+        self.assertFalse(self.call('dispatch', {'task': 'faz isso', 'role': 'executor', 'approved': gate['id']},
+                                   session='s1')[0])
+
     def test_the_gate_survives_the_service(self):
         gate = self.gate({'task': 't', 'role': 'executor'})
         from brza_mcp import tools
@@ -111,6 +168,42 @@ class ConfigTest(ToolsCase):
         self.assertTrue(self.call('config', {'key': 'policy.enforce', 'value': 'sim'})[0])
         self.assertTrue(self.call('config', {'key': 'orchestrator.max_workers', 'value': 'muitos'})[0])
         self.assertTrue(self.call('config', {'key': 'orchestrator.max_workers', 'value': True})[0])
+
+    def test_a_mistyped_key_of_the_quota_family_is_refused(self):  # P3 O-A5
+        for key in ('quota.hard_cap_percnt', 'machine.max_swapp_gb', 'resolver.tev1_modle', 'orchestrator.max_worker'):
+            err, out = self.call('config', {'key': key, 'value': 1})
+            self.assertTrue(err, key)
+            self.assertIn(key, out)
+        self.assertEqual(self.service.get_overrides(), {})
+
+    def test_every_d4_key_is_accepted_with_its_type(self):  # P3 O-A5
+        good = {'policy.enforce': True, 'policy.suggest_to_main': False, 'orchestrator.max_workers': 4,
+                'quota.soft_cap_percent': 50, 'quota.hard_cap_percent': 85.5, 'quota.max_sessions_per_account': 2,
+                'machine.min_free_mem_gb': 4, 'machine.max_swap_gb': 2.5, 'machine.max_cpu_percent': 80,
+                'resolver.ollama_url': 'http://127.0.0.1:11434', 'resolver.tev1_model': 'tev1:4b',
+                'resolver.tev1_keep_alive': '1m', 'resolver.tev1_min_confidence': 0.7,
+                'resolver.haiku_max_budget_usd': 0.02}
+        for key, value in good.items():
+            self.assertFalse(self.call('config', {'key': key, 'value': value})[0], key)
+        self.assertEqual(self.service.get_overrides(), good)
+
+    def test_a_number_out_of_range_is_refused(self):  # P3 O-A8, P4 F-A3
+        bad = [('quota.hard_cap_percent', 0), ('quota.hard_cap_percent', -1), ('quota.hard_cap_percent', 101),
+               ('quota.soft_cap_percent', float('nan')), ('quota.hard_cap_percent', float('inf')),
+               ('orchestrator.max_workers', -1), ('orchestrator.max_workers', 1.5),
+               ('quota.max_sessions_per_account', -1), ('machine.min_free_mem_gb', -1),
+               ('machine.max_swap_gb', float('nan')), ('machine.max_cpu_percent', 0),
+               ('resolver.tev1_min_confidence', 1.5), ('resolver.haiku_max_budget_usd', 0),
+               ('resolver.tev1_model', 3), ('resolver.ollama_url', '')]
+        for key, value in bad:
+            self.assertTrue(self.call('config', {'key': key, 'value': value})[0], (key, value))
+        self.assertEqual(self.service.get_overrides(), {})
+
+    def test_status_reads_the_hard_cap_like_the_limits(self):  # P3 O-A8
+        self.assertEqual(self.call('status')[1]['ceilings']['quota.hard_cap_percent'], 90)
+        self.call('config', {'key': 'quota.hard_cap_percent', 'value': 80})
+        self.assertEqual(self.call('status')[1]['ceilings']['quota.hard_cap_percent'], 80)
+        self.assertEqual(self.limits.hard_cap(), 80)
 
     def test_null_removes_the_override(self):
         self.call('config', {'key': 'quota.hard_cap_percent', 'value': 80})

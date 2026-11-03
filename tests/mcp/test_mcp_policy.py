@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from mcp_support import HomeCase
@@ -156,8 +157,13 @@ class DecideModelTest(WorkspaceCase):
 
 
 class SuggestionTest(WorkspaceCase, ToolsCase):
+    def test_the_suggestion_is_born_off_until_there_is_a_signal_of_what_the_main_session_does(self):  # P4 O-A7
+        self.assertFalse(pol.DEFAULTS['policy.suggest_to_main'])
+        self.assertIsNone(self.call('status')[1]['suggestion'])
+
     def test_status_brings_the_suggestion_for_the_main_session_by_notice(self):
         self.workspace_dir = None
+        self.call('config', {'key': 'policy.suggest_to_main', 'value': True})
         _, out = self.call('status')
         suggestion = out['suggestion']
         self.assertEqual((suggestion['model'], suggestion['effort']), ('opus', 'high'))
@@ -186,6 +192,88 @@ class SuggestionTest(WorkspaceCase, ToolsCase):
         self.assertEqual(self.limits.get('orchestrator.max_workers'), 2)
 
 
+class BrokenTomlTest(WorkspaceCase, HomeCase):  # P4 O-A1, O-A2
+    def service(self, text='[mcp\nport = '):
+        from brza_mcp import limits as lim, queue as q, tools
+        from brza_mcp.registry import ToolRegistry
+        from brza_mcp.telemetry import Telemetry
+        self.registry = ToolRegistry()
+        self.queue = q.Queue(':memory:')
+        self.addCleanup(self.queue.close)
+        self.ws = self.workspace(text)
+        return tools.install(self.registry, queue=self.queue, limits=lim.Limits(machine=lambda: {}), workspace=self.ws,
+                             index_reader=lambda w: '', telemetry=Telemetry(None))
+
+    def call(self, name, args=None):
+        from brza_mcp.registry import CallContext
+        out = self.registry.call(name, args or {}, CallContext('s1'))
+        return out.get('isError', False), out['content'][0]['text']
+
+    def test_a_broken_brza_toml_does_not_stop_the_service_from_starting_and_each_tool_names_the_file(self):
+        service = self.service()
+        self.assertEqual(service.limits.get('orchestrator.max_workers'), 6)  # sobe com os padrões
+        for name, args in (('status', {}), ('dispatch', {'task': 't', 'role': 'consultant'}), ('config', {})):
+            is_error, text = self.call(name, args)
+            self.assertTrue(is_error, name)
+            self.assertIn(str(Path(self.ws) / 'brza.toml'), text)
+        self.assertEqual(self.queue.pending(), [])
+
+    def test_config_does_not_write_and_answer_an_error_at_once(self):
+        service = self.service()
+        is_error, _ = self.call('config', {'key': 'policy.enforce', 'value': False})
+        self.assertTrue(is_error)
+        self.assertEqual(service.get_overrides(), {})
+
+    def test_the_tools_come_back_when_the_file_is_fixed(self):
+        self.service()
+        (Path(self.ws) / 'brza.toml').write_text('[orchestrator]\nmax_workers = 2\n')
+        self.assertFalse(self.call('status')[0])
+        self.assertFalse(self.call('config', {'key': 'policy.enforce', 'value': False})[0])
+
+    def test_the_serve_builds_the_service_with_the_real_resolver(self):  # P4 O-A6
+        seen = {}
+
+        class Stop(Exception):
+            pass
+
+        def fake_build(registry, **kwargs):
+            seen.update(kwargs)
+            raise Stop
+        with patch.object(cli, 'build', fake_build):
+            with self.assertRaises(Stop):
+                cli.serve(0)
+        self.assertTrue(seen['with_resolver'])
+
+    def test_build_with_the_resolver_instantiates_it_over_the_policy_config(self):  # P4 O-A6
+        from brza_mcp import queue as q
+        from brza_mcp.registry import ToolRegistry
+        queue = q.Queue(':memory:')
+        self.addCleanup(queue.close)
+        service, _ = cli.build(ToolRegistry(), queue=queue, accounts=type('A', (), {'usage': lambda *a: None})(),
+                               with_resolver=True)
+        self.assertEqual(service.resolver.config()['resolver.tev1_model'], 'tev1:4b')
+
+
+class GateProposalTest(ToolsCase):  # P4 F-A1 = O-A3
+    def test_the_gate_proposal_is_the_stored_row_after_the_policy_and_carries_its_reason(self):
+        _, out = self.call('dispatch', {'task': 'faz', 'role': 'executor', 'model': 'haiku', 'effort': 'max'},
+                           session='s1')
+        gate = out['gate']
+        row = self.queue._all("SELECT * FROM requests WHERE state = 'gated'")[0]
+        self.assertEqual(row['model'], 'sonnet')  # a política manda no executor
+        for key in ('task', 'role', 'model', 'effort'):
+            self.assertEqual(gate['proposal'][key], row[key], key)
+        self.assertEqual(gate['proposal']['reason'], 'policy')
+
+    def test_the_reply_of_dispatch_carries_model_effort_and_the_policy_reason(self):
+        _, out = self.call('dispatch', {'task': 't', 'role': 'consultant', 'model': 'opus'}, session='s1')
+        self.assertEqual((out['model'], out['effort'], out['reason']), ('sonnet', 'low', 'policy'))
+        _, gate = self.call('dispatch', {'task': 't', 'role': 'executor'}, session='s1')
+        _, approved = self.call('dispatch', {'task': 't', 'role': 'executor', 'approved': gate['gate']['id']},
+                                session='s1')
+        self.assertEqual((approved['model'], approved['effort']), ('sonnet', 'medium'))
+
+
 class ConfigVerbTest(ToolsCase):
     def run_cli(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -207,6 +295,13 @@ class ConfigVerbTest(ToolsCase):
         self.assertIn('policy.enforce', self.run_cli()[1])
         self.run_cli('policy.enforce', 'null')
         self.assertEqual(self.service.get_overrides(), {})
+
+    def test_a_refused_token_is_not_reported_as_stopped(self):  # P4 O-A9
+        (Path(os.environ['BRZA_HOME']) / 'runtime' / 'mcp.token').write_text('outro-token\n')
+        code, _, err = self.run_cli('policy.enforce', 'false')
+        self.assertEqual(code, 1)
+        self.assertIn('401', err)
+        self.assertNotIn('parado', err)
 
     def test_a_server_error_exits_with_the_message(self):
         code, _, _ = self.run_cli('foo', '1')

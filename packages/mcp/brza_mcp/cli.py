@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+import urllib.error
 import urllib.request
 
 from . import accounts as accounts_mod
@@ -22,8 +23,8 @@ def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=c
     fica a linha do `consultant`."""
     accounts = accounts or accounts_mod.Accounts()
     queue = queue if queue is not None else queue_mod.Queue()
-    limits = limits or limits_mod.Limits(usage=accounts.usage)
-    service = tools.install(registry, queue=queue, limits=limits, resolver=resolver)
+    limits = limits or limits_mod.Limits(usage=accounts.usage, active=getattr(accounts, 'active_id', None))
+    service = tools.install(registry, queue=queue, limits=limits, resolver=resolver, accounts=accounts)
     if with_resolver and resolver is None:
         service.resolver = resolver_mod.Resolver(config=service.policy.config)
     scheduler = cycle.Scheduler(queue, limits, run=run, prepare=service.sync_limits, interval=interval,
@@ -60,7 +61,7 @@ def serve(port: int):
 def call_config(args, timeout=5.0):
     """A ferramenta `config` do servidor de pé, por HTTP com o token: o resultado decodificado; OSError se está parado."""
     body = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'config', 'arguments': args}}
-    req = urllib.request.Request(f'http://127.0.0.1:{paths.default_port()}/mcp', data=json.dumps(body).encode(),
+    req = urllib.request.Request(f'http://127.0.0.1:{paths.active_port()}/mcp', data=json.dumps(body).encode(),
                                  headers={'Authorization': f'Bearer {paths.read_token()}',
                                           'Content-Type': 'application/json'})
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
@@ -81,6 +82,10 @@ def config_command(key, value):
     args = {} if key is None else {'key': key} if value is None else {'key': key, 'value': parse_value(value)}
     try:
         is_error, out = call_config(args)
+    except urllib.error.HTTPError as e:  # o servidor respondeu e recusou: não está parado
+        print(f'brza mcp config: o servidor recusou o pedido (HTTP {e.code}'
+              f'{", o token não vale: brza mcp token" if e.code == 401 else ""})', file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, KeyError):
         print('brza-mcp parado: o servidor não responde (brza mcp start)', file=sys.stderr)
         sys.exit(3)
@@ -114,7 +119,11 @@ def main(argv=None):
             sys.exit(str(e))
         print(f'brza-mcp de pé: o /health responde (pid {data["pid"]}, versão {data["version"]})')
     elif a.cmd == 'stop':
-        print('brza-mcp parado' if launchd.stop() else 'brza-mcp já estava parado: o agente não está carregado')
+        try:
+            stopped = launchd.stop()
+        except RuntimeError as e:
+            sys.exit(str(e))
+        print('brza-mcp parado' if stopped else 'brza-mcp já estava parado: o agente não está carregado')
     elif a.cmd == 'status':
         loaded, data = launchd.is_loaded(), launchd.health()
         print(f'carregado: {"sim" if loaded else "não"}')

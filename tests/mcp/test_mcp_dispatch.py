@@ -44,6 +44,36 @@ class CallerTest(ToolsCase):
         self.assertEqual(self.queue.pending(), [])
 
 
+class CallerEdgeTest(ToolsCase):  # P3 F-A4, O-A12
+    def test_an_empty_header_falls_back_to_the_argument(self):
+        err, out = self.call('dispatch', {'task': 'ler', 'role': 'consultant', 'caller': 'arg-1'}, session='')
+        self.assertFalse(err, out)
+        self.assertEqual(self.queue.get(out['request'])['caller'], 'arg-1')
+
+    def test_a_blank_caller_is_refused(self):
+        for session, args in (('', {}), ('   ', {}), (None, {'caller': '   '}), ('   ', {'caller': ' \t'})):
+            err, out = self.call('dispatch', {'task': 'ler', 'role': 'consultant', **args}, session=session)
+            self.assertTrue(err, (session, args))
+            self.assertIn('chamador', out)
+        self.assertEqual(self.queue.pending(), [])
+
+    def test_the_caller_is_stored_without_the_spaces(self):
+        _, out = self.call('dispatch', {'task': 'ler', 'role': 'consultant', 'caller': ' arg-1 '})
+        self.assertEqual(self.queue.get(out['request'])['caller'], 'arg-1')
+
+
+class RuntimeDefaultTest(ToolsCase):  # P3 O-A2, P4 O-A4
+    config = {'quota.max_sessions_per_account': 1}
+
+    def test_a_request_without_runtime_counts_in_the_same_session_ceiling_as_claude(self):
+        _, first = self.call('dispatch', {'task': 'a', 'role': 'consultant', 'runtime': 'claude'}, session='s')
+        self.assertEqual(self.queue.get(first['request'])['runtime'], 'claude')
+        self.queue.mark_running(first['request'])
+        _, second = self.call('dispatch', {'task': 'b', 'role': 'consultant'}, session='s')
+        self.assertEqual(self.queue.get(second['request'])['runtime'], 'claude')
+        self.assertEqual(second['held_by'], 'account_sessions')
+
+
 class ValidationTest(ToolsCase):
     def refused(self, args, fragment):
         err, out = self.call('dispatch', args, session='s')
@@ -73,6 +103,10 @@ class ValidationTest(ToolsCase):
 
     def test_wrong_date(self):
         self.refused({'task': 't', 'role': 'consultant', 'deadline': 'amanhã'}, 'deadline')
+
+    def test_the_deadline_outside_the_iso_form_is_refused(self):  # P3 O-A4
+        for bad in ('20261105', '2026-W45-4', '2026-11-5'):
+            self.refused({'task': 't', 'role': 'consultant', 'deadline': bad}, 'deadline')
 
     def test_unknown_argument(self):
         self.refused({'task': 't', 'role': 'consultant', 'acount': 'x'}, 'acount')
@@ -128,6 +162,18 @@ class OrderAndStatusTest(ToolsCase):
         self.assertEqual([r['task'] for r in st['gated']], ['g'])
         self.assertEqual([r['task'] for r in st['running']], ['ocupa'])
         self.assertEqual(st['ceilings']['orchestrator.max_workers'], 1)
+
+    def test_status_gives_the_gate_id_and_reason_of_each_gated_request(self):  # P3 F-A3
+        _, gate = self.call('dispatch', {'task': 'g', 'role': 'executor'}, session='s')
+        _, st = self.call('status')
+        self.assertEqual(st['gated'][0]['gate_id'], gate['gate']['id'])
+        self.assertEqual(st['gated'][0]['reason'], gate['gate']['reason'])
+
+    def test_queued_answers_with_the_real_state_when_the_request_is_no_longer_in_the_queue(self):  # P3 O-A10
+        rid = self.queue.enqueue(task='a', role='consultant')
+        self.queue.mark_running(rid)  # o ciclo o abriu entre o enqueue e a resposta
+        out = self.service.queued(rid)
+        self.assertEqual((out['request'], out['state'], out['position']), (rid, 'running', None))
 
 
 if __name__ == '__main__':
