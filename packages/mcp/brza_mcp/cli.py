@@ -6,11 +6,13 @@ import signal
 import sys
 import time
 
-from . import launchd, paths, server
+from . import launchd, paths, server, tools
+from .registry import REGISTRY
 
 
 def serve(port: int):
     token = paths.ensure_token()
+    tools.install(REGISTRY)
     try:
         srv = server.make_server(port, token)
     except OSError as e:
