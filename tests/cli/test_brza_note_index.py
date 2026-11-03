@@ -243,7 +243,16 @@ class IndexTest(IndexFixture):
                    '# PLN-001: O plano\n\n- **Retomar:** x\n')
         code, out = self.commit_note('plans/PLN-001-novo')
         self.assertEqual(code, 0, out)
-        self.assertEqual(len(self.origin_index()), 1)
+        # D7: o primeiro commit registra a passagem de reserva (sem commit) para nota materializada (com commit)
+        self.assertEqual(len(self.origin_index()), 2)
+        self.assertEqual(self.origin_index()[-1]['event'], 'changed')
+        self.assertTrue(self.origin_index()[-1].get('commit'))
+        # segundo commit sem mudar frontmatter não acrescenta linha
+        self.write('plans/PLN-001-novo/PLN-001-plan.md',
+                   '---\nstatus: open\nphase: interview\ndescription: Faz isto.\nopened: 2026-10-31\n---\n\n'
+                   '# PLN-001: O plano\n\n- **Retomar:** y\n')
+        self.commit_note('plans/PLN-001-novo')
+        self.assertEqual(len(self.origin_index()), 2)
         self.write('plans/PLN-001-novo/PLN-001-plan.md',
                    '---\nstatus: in_progress\nphase: execution\ndescription: Faz isto.\nopened: 2026-10-31\n---\n\n'
                    '# PLN-001: O plano\n\n- **Retomar:** x\n')
@@ -557,7 +566,7 @@ class IndexOtherBranchTest(NoteFixture):
 
     def test_commit_writes_the_index_line_on_the_up_main(self):
         (self.tree / 'work' / 'issues').mkdir(parents=True, exist_ok=True)
-        (self.tree / 'work' / 'issues' / 'uma.md').write_text(note_text())
+        (self.tree / 'work' / 'issues' / 'uma.md').write_text(note_text(extra='priority: medium\n'))
         code, out = self.run_note('commit', 'work/issues/uma.md', '-m', 'docs: uma')
         self.assertEqual(code, 0, out)
         self.assertNotIn('aviso', out)
@@ -590,3 +599,324 @@ class IndexOtherBranchTest(NoteFixture):
         self.assertEqual(code, 1, out)
         self.assertIn('recusado', out)
         self.assertIn('remote up', out)
+
+
+class Pln008P2IndexAndLsTest(IndexFixture):
+    """Testes do P2 do PLN-008: review-open, migration-open, bootstrap atômico, campos D9, aviso de priority e ls."""
+
+    def test_review_open_and_migration_open_reserve_independent_sequences_and_strip_prefixes(self):
+        c1, out1 = self.run_note('review-open', 'rev-um', '--title', 'REV-001: Primeira revisão',
+                                 '--description', 'Desc rev 1.')
+        self.assertEqual(c1, 0, out1)
+        self.assertEqual(out1.strip().splitlines()[-2:], ['REV-001', 'work/reviews/REV-001-rev-um.md'])
+
+        c2, out2 = self.run_note('migration-open', 'mig-um', '--title', 'MIG-001: Primeira migração',
+                                 '--description', 'Desc mig 1.')
+        self.assertEqual(c2, 0, out2)
+        self.assertEqual(out2.strip().splitlines()[-2:], ['MIG-001', 'work/issues/MIG-001-mig-um.md'])
+
+        c3, out3 = self.run_note('review-open', 'rev-dois', '--title', 'REV: Segunda revisão',
+                                 '--description', 'Desc rev 2.')
+        self.assertEqual(c3, 0, out3)
+        self.assertEqual(out3.strip().splitlines()[-2:], ['REV-002', 'work/reviews/REV-002-rev-dois.md'])
+
+        by_id = {x['id']: x for x in self.origin_index()}
+        self.assertEqual(by_id['REV-001']['kind'], 'review')
+        self.assertEqual(by_id['REV-001']['title'], 'Primeira revisão')
+        self.assertEqual(by_id['REV-001']['status'], 'in_progress')
+        self.assertNotIn('commit', by_id['REV-001'])
+
+        self.assertEqual(by_id['REV-002']['title'], 'Segunda revisão')
+
+        self.assertEqual(by_id['MIG-001']['kind'], 'issue')
+        self.assertEqual(by_id['MIG-001']['type'], 'migration')
+        self.assertEqual(by_id['MIG-001']['title'], 'Primeira migração')
+        self.assertEqual(by_id['MIG-001']['status'], 'open')
+        self.assertNotIn('commit', by_id['MIG-001'])
+
+    def test_review_open_and_migration_open_skip_concurrent_numbers_and_give_up_after_three_refusals(self):
+        other = self.clone('other')
+        real_push, calls = GLOBALS['index_push'], []
+
+        def push_after_rival(repo, sha):
+            calls.append(sha)
+            if len(calls) == 1:
+                with (other / INDEX).open('a') as f:
+                    f.write(json.dumps({'ts': '2026-10-31T10:00:00-03:00', 'event': 'created', 'kind': 'review',
+                                        'id': 'REV-001', 'path': 'work/reviews/REV-001-rival.md'}) + '\n')
+                git('commit', '-q', '-am', 'rival', cwd=other)
+                git('push', '-q', 'origin', 'HEAD:master', cwd=other)
+            return real_push(repo, sha)
+
+        with patch.dict(GLOBALS, {'index_push': push_after_rival}):
+            code, out = self.run_note('review-open', 'minha', '--title', 'Minha', '--description', 'x')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip().splitlines()[-2], 'REV-002')
+
+        fail_calls = []
+
+        def always_fail(repo, sha):
+            fail_calls.append(sha)
+            raise GLOBALS['runtime'].BrzaError('rejeitado')
+
+        with patch.dict(GLOBALS, {'index_push': always_fail}):
+            code, out = self.run_note('migration-open', 'falha', '--title', 'Falha', '--description', 'x')
+        self.assertEqual(code, 1, out)
+        self.assertIn('recusado', out)
+        self.assertEqual(len(fail_calls), 3)
+
+    def test_bootstrap_pln008_is_atomic_idempotent_and_refuses_conflicts(self):
+        code, out = self.run_note('index', '--bootstrap-pln008', workstream=None)
+        self.assertEqual(code, 0, out)
+        lines = self.origin_index()
+        self.assertEqual([x['id'] for x in lines], ['REV-001', 'REV-002', 'REV-003', 'REV-004', 'MIG-001'])
+        self.assertTrue(all('commit' not in x for x in lines))
+        log_before = self.origin_master_log()
+
+        # Reexecução com o mesmo mapa é no-op
+        code2, out2 = self.run_note('index', '--bootstrap-pln008', workstream=None)
+        self.assertEqual(code2, 0, out2)
+        self.assertIn('bootstrap em dia', out2)
+        self.assertEqual(self.origin_master_log(), log_before)
+
+        # Reserva subsequente parte de REV-005 e MIG-002
+        cr, out_r = self.run_note('review-open', 'nova', '--title', 'Nova', '--description', 'x')
+        self.assertEqual(cr, 0, out_r)
+        self.assertEqual(out_r.strip().splitlines()[-2], 'REV-005')
+        cm, out_m = self.run_note('migration-open', 'nova', '--title', 'Nova', '--description', 'x')
+        self.assertEqual(cm, 0, out_m)
+        self.assertEqual(out_m.strip().splitlines()[-2], 'MIG-002')
+
+        # Colisão com outro workstream/path recusa explicitamente
+        other = self.clone('conflict')
+        with (other / INDEX).open('a') as f:
+            f.write(json.dumps({
+                'ts': '2099-01-01T00:00:00-03:00',
+                'event': 'changed',
+                'kind': 'review',
+                'id': 'REV-001',
+                'workstream': 'studio',
+                'path': 'work/reviews/REV-001-outro.md',
+            }) + '\n')
+        git('commit', '-q', '-am', 'colisao', cwd=other)
+        git('push', '-q', 'origin', 'HEAD:master', cwd=other)
+        code3, out3 = self.run_note('index', '--bootstrap-pln008', workstream=None)
+        self.assertEqual(code3, 1, out3)
+        self.assertIn('colisão no bootstrap de REV-001', out3)
+
+    def test_d9_fields_session_and_priority_warning_on_commit_and_rebuild(self):
+        # 1. Aviso de priority ausente em issue/plano aberto sem bloquear commit
+        self.write('work/issues/sem-prio.md', note_text(status='open', h1='Sem prioridade'))
+        code, out = self.commit_note('work/issues/sem-prio.md')
+        self.assertEqual(code, 0, out)
+        self.assertIn('aviso: sem priority: work/issues/sem-prio.md', out)
+
+        # 2. Todos os campos D9 na issue (incluindo depends_on lista e estimate_h número) e session (D5)
+        issue_rel = 'work/issues/completa.md'
+        self.write(
+            issue_rel,
+            '---\n'
+            'status: in_progress\n'
+            'description: Issue completa.\n'
+            'scope:\n'
+            '  - workspace\n'
+            'opened: 2026-11-01\n'
+            'priority: high\n'
+            'blocks: PLN-001\n'
+            'deadline: 2026-11-10\n'
+            'owner: Anderson\n'
+            'type: unknown\n'
+            'depends_on:\n'
+            '  - issue:sem-prio\n'
+            'estimate_h: 2.5\n'
+            '---\n\n'
+            '# Issue Completa\n\n'
+            '## O pedido\nTexto.\n',
+        )
+        # Fecha a dependência antes para o checador real (se usado) aceitar; no NoteFixture o checador é stub 0
+        with patch.dict(os.environ, {'CLAUDE_SESSION_NAME': 'sessao-commit'}):
+            code, out = self.commit_note(issue_rel)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('aviso: sem priority', out)
+        state = GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+        item = state['issue:completa']
+        self.assertEqual(item['opened'], '2026-11-01')
+        self.assertEqual(item['priority'], 'high')
+        self.assertEqual(item['blocks'], 'PLN-001')
+        self.assertEqual(item['deadline'], '2026-11-10')
+        self.assertEqual(item['owner'], 'Anderson')
+        self.assertEqual(item['type'], 'unknown')
+        self.assertEqual(item['depends_on'], ['issue:sem-prio'])
+        self.assertEqual(item['estimate_h'], 2.5)
+        self.assertEqual(item['session'], 'sessao-commit')
+
+        # 3. Mudança de um único campo D9 (deadline) dispara `changed`
+        self.write(issue_rel, (self.tree / issue_rel).read_text().replace('2026-11-10', '2026-11-15'))
+        code, out = self.commit_note(issue_rel)
+        self.assertEqual(code, 0, out)
+        state = GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+        self.assertEqual(state['issue:completa']['event'], 'changed')
+        self.assertEqual(state['issue:completa']['deadline'], '2026-11-15')
+
+        # 4. Plano com estimate_h e remaining_h numéricos + rebuild registrando session da operação (D5)
+        plan_rel = 'plans/PLN-001-x/PLN-001-plan.md'
+        self.write(
+            plan_rel,
+            '---\n'
+            'status: in_progress\n'
+            'phase: execution\n'
+            'description: Plano X.\n'
+            'opened: 2026-10-30\n'
+            'priority: high\n'
+            'estimate_h: 8\n'
+            'remaining_h: 3.5\n'
+            '---\n\n'
+            '# PLN-001: Plano X\n',
+        )
+        git('add', plan_rel, cwd=self.tree)
+        git('commit', '-q', '-m', 'docs: plan d9', cwd=self.tree)
+        git('push', '-q', cwd=self.tree)
+
+        with patch.dict(os.environ, {'CLAUDE_SESSION_NAME': 'sessao-rebuild'}):
+            code, out = self.run_note('index', '--rebuild', workstream=None)
+        self.assertEqual(code, 0, out)
+        state = GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+        p_item = state['PLN-001']
+        self.assertEqual(p_item['estimate_h'], 8)
+        self.assertEqual(p_item['remaining_h'], 3.5)
+        self.assertEqual(p_item['priority'], 'high')
+        self.assertEqual(p_item['session'], 'sessao-rebuild')
+
+        # Rebuild subsequente é idempotente
+        before = self.origin_index()
+        code, out = self.run_note('index', '--rebuild', workstream=None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.origin_index(), before)
+
+    def test_ls_filters_sorts_excludes_unmaterialized_reservations_and_handles_refresh(self):
+        # Reserva MIG-001 sem materializar arquivo: não pode aparecer no ls
+        self.run_note('migration-open', 'reserva-pura', '--title', 'Reserva pura', '--description', 'Sem arquivo.')
+
+        # Cria issues e decisões com diferentes datas, prioridades, deadlines e status
+        self.write(
+            'work/issues/i-antiga.md',
+            note_text(status='open', h1='Issue Antiga', extra='priority: low\ndeadline: 2026-11-20\n').replace(
+                'opened: 2026-10-31', 'opened: 2026-10-10'
+            ),
+        )
+        self.write(
+            'work/issues/i-recente.md',
+            note_text(status='in_progress', h1='Issue Recente', extra='priority: high\ndeadline: 2026-11-05\n').replace(
+                'opened: 2026-10-31', 'opened: 2026-11-02'
+            ),
+        )
+        self.write(
+            'work/decisions/d-meio.md',
+            note_text(status='in_review', h1='Decisão Meio', extra='priority: medium\n').replace(
+                'opened: 2026-10-31', 'opened: 2026-10-20'
+            ),
+        )
+        self.write(
+            'work/issues/i-fechada.md',
+            note_text(status='done', h1='Issue Fechada', extra='priority: high\n'),
+        )
+        self.commit_note(
+            'work/issues/i-antiga.md',
+            'work/issues/i-recente.md',
+            'work/decisions/d-meio.md',
+            'work/issues/i-fechada.md',
+        )
+        # Atualiza origin/master local no workspace
+        git('fetch', '-q', 'origin', cwd=self.ws)
+
+        # 1. Padrão: apenas abertas (open, in_progress, in_review), ordenadas por opened desc, sem fetch
+        calls, real_git = [], GLOBALS['runtime'].git
+
+        def spy_git(*args, **kwargs):
+            calls.append(args)
+            return real_git(*args, **kwargs)
+
+        with patch.object(GLOBALS['runtime'], 'git', spy_git):
+            code, out = self.run_note('ls', workstream=None)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('fetch', [a[0] for a in calls])
+        rows = [line.split()[0] for line in out.strip().splitlines()[1:]]
+        self.assertEqual(rows, ['issue:i-recente', 'decision:d-meio', 'issue:i-antiga'])
+        self.assertNotIn('MIG-001', out)
+        self.assertNotIn('issue:i-fechada', out)
+
+        # 2. --status all inclui done
+        code, out_all = self.run_note('ls', '--status', 'all', workstream=None)
+        self.assertEqual(code, 0, out_all)
+        rows_all = [line.split()[0] for line in out_all.strip().splitlines()[1:]]
+        self.assertEqual(rows_all, ['issue:i-recente', 'issue:i-fechada', 'decision:d-meio', 'issue:i-antiga'])
+
+        # 3. --sort priority (high -> medium -> low, ausente no fim, desempate por ID asc)
+        code, out_prio = self.run_note('ls', '--sort', 'priority', workstream=None)
+        self.assertEqual(code, 0, out_prio)
+        rows_prio = [line.split()[0] for line in out_prio.strip().splitlines()[1:]]
+        self.assertEqual(rows_prio, ['issue:i-recente', 'decision:d-meio', 'issue:i-antiga'])
+
+        # 4. --sort deadline (menor data primeiro, sem deadline no fim)
+        code, out_dl = self.run_note('ls', '--sort', 'deadline', workstream=None)
+        self.assertEqual(code, 0, out_dl)
+        rows_dl = [line.split()[0] for line in out_dl.strip().splitlines()[1:]]
+        self.assertEqual(rows_dl, ['issue:i-recente', 'issue:i-antiga', 'decision:d-meio'])
+
+        # 5. --refresh busca atualizações remotas; falha de fetch sai com código 1 sem fallback silencioso
+        other = self.clone('other-ls')
+        with (other / INDEX).open('a') as f:
+            f.write(json.dumps({
+                'ts': '2026-11-03T10:00:00-03:00',
+                'event': 'created',
+                'kind': 'issue',
+                'id': 'issue:remota',
+                'path': 'work/issues/remota.md',
+                'title': 'Remota',
+                'description': 'Remota.',
+                'status': 'open',
+                'opened': '2026-11-03',
+                'workstream': 'studio',
+                'commit': 'abc1234',
+            }) + '\n')
+        git('commit', '-q', '-am', 'remota', cwd=other)
+        git('push', '-q', 'origin', 'HEAD:master', cwd=other)
+
+        # Sem --refresh não vê 'issue:remota'
+        _, out_local = self.run_note('ls', workstream=None)
+        self.assertNotIn('issue:remota', out_local)
+        # Com --refresh vê 'issue:remota' no topo
+        code, out_ref = self.run_note('ls', '--refresh', workstream=None)
+        self.assertEqual(code, 0, out_ref)
+        self.assertEqual(out_ref.strip().splitlines()[1].split()[0], 'issue:remota')
+
+        # Sem remote, --refresh falha explicitamente (sem fallback para o local)
+        git('remote', 'remove', 'origin', cwd=self.ws)
+        code_fail, out_fail = self.run_note('ls', '--refresh', workstream=None)
+        self.assertEqual(code_fail, 1, out_fail)
+        self.assertIn('recusado', out_fail)
+
+    def test_ls_fails_explicitly_when_local_index_is_unavailable(self):
+        git('rm', '-q', '-r', '.brza', cwd=self.ws)
+        git('commit', '-q', '-m', 'sem indice', cwd=self.ws)
+        git('push', '-q', 'origin', 'HEAD:master', cwd=self.ws)
+        code, out = self.run_note('ls', workstream=None)
+        self.assertEqual(code, 1, out)
+        self.assertIn('recusado', out)
+        self.assertIn('indisponível', out)
+
+    def test_unmaterialized_reservation_does_not_satisfy_refs_or_depends_on(self):
+        self.run_note('review-open', 'fantasma', '--title', 'Fantasma', '--description', 'Sem arquivo.')
+        self.run_note('migration-open', 'fantasma', '--title', 'Fantasma', '--description', 'Sem arquivo.')
+        git('fetch', '-q', 'origin', cwd=self.ws)
+        catalog = GLOBALS['build_target_catalog'](self.tree)
+        self.assertNotIn('REV-001', catalog['valid_refs'])
+        self.assertNotIn('MIG-001', catalog['valid_refs'])
+        # Worklog que cita REV-001 ou tem refs: [REV-001] sem arquivo materializado é barrado no commit
+        w_rel = 'work/worklogs/2026-10-31-fantasma.md'
+        self.write(w_rel, '---\nscope:\n  - workspace\nrefs:\n  - REV-001\n---\n\n# W\n')
+        code, out = self.commit_note(w_rel)
+        self.assertEqual(code, 1, out)
+        self.assertIn('ref-not-found', out)
+
+

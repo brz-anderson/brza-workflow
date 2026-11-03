@@ -106,7 +106,7 @@ class NoteFixture(unittest.TestCase):
                  workstream: str | None = 'studio') -> tuple[int, str]:
         """Roda o main; sem `cwd`, de fora do workspace de mentira, onde o caminho relativo parte da raiz-alvo. Em new,
         commit e plan-open, o --workstream vai junto, a menos que `workstream` seja None."""
-        if workstream and argv[0] in ('new', 'commit', 'plan-open'):
+        if workstream and argv[0] in ('new', 'commit', 'plan-open', 'review-open', 'migration-open'):
             argv = (*argv, '--workstream', workstream)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \

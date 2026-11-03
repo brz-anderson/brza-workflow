@@ -102,20 +102,77 @@ Refused, workstream_root, workstream_of_plan = runtime.Refused, runtime.workstre
 MEMORY_PATHS = ('memory', '.claude/agent-memory')
 DATED = re.compile(r'\d{4}-\d{2}-\d{2}-')
 PRIORITIES = ('low', 'medium', 'high')
+OPEN_STATUSES = ('open', 'in_progress', 'in_review')
+PRIORITY_ORDER = {'high': 0, 'medium': 1, 'low': 2}
 INDEX_PATH = '.brza/index.jsonl'
 INDEX_TRIES = 3
 # Os campos que, mudados, fazem uma linha `changed`; o resto (ts, commit, session) muda a cada commit
-INDEX_COMPARED = ('path', 'title', 'description', 'status', 'phase')
+STATE_INDEX_KEYS = (
+    'status', 'phase', 'opened', 'priority', 'blocks', 'deadline',
+    'owner', 'type', 'depends_on', 'estimate_h', 'remaining_h',
+)
+INDEX_COMPARED = ('path', 'title', 'description', *STATE_INDEX_KEYS)
 PLAN_NOTE = re.compile(r'plans/(PLN-\d+)-[^/]+/\1-plan\.md')
 PLAN_FOLDER = re.compile(r'plans/(PLN-\d+)-[^/]+/')
 REV_NOTE = re.compile(r'work/reviews/(REV-\d+)-[^/]+\.md')
 MIG_NOTE = re.compile(r'work/issues/(MIG-\d+)-[^/]+\.md')
+NUMBERED_ID = re.compile(r'(?:PLN|REV|MIG)-\d+')
 COMMON_ISSUE_NOTE = re.compile(r'work/issues/(?!README\.md$)(?!MIG-\d+-)([^/]+)\.md')
 WORKLOG_NOTE = re.compile(r'work/worklogs/(?!README\.md$)([^/]+)\.md')
-NOTE_KINDS = (('issue', re.compile(r'work/issues/(?!README\.md$)([^/]+)\.md')),
+NOTE_KINDS = (('issue', re.compile(r'work/issues/(?!README\.md$)(?!MIG-\d+-)([^/]+)\.md')),
               ('decision', re.compile(r'work/decisions/(?!README\.md$)([^/]+)\.md')))
-NOTE_ZONES = ('plans', 'work/issues', 'work/decisions')
+NOTE_ZONES = ('plans', 'work/issues', 'work/decisions', 'work/reviews')
 PLAN_PREFIX = re.compile(r'PLN-\d+:\s*')
+REV_PREFIX = re.compile(r'REV(?:-\d+)?:\s*')
+MIG_PREFIX = re.compile(r'MIG(?:-\d+)?:\s*')
+PLN008_BOOTSTRAP = (
+    {
+        'id': 'REV-001',
+        'kind': 'review',
+        'workstream': 'tools-kit',
+        'path': 'work/reviews/REV-001-pln-002-os-comandos-brza.md',
+        'title': 'a entrega do PLN-002, do P0 ao P9',
+        'description': 'a entrega do PLN-002, do P0 ao P9',
+        'status': 'in_progress',
+    },
+    {
+        'id': 'REV-002',
+        'kind': 'review',
+        'workstream': 'workspace',
+        'path': 'work/reviews/REV-002-pln-005-a-confianca-dos-fatos.md',
+        'title': 'PLN-005 — a confiança dos fatos do desenho',
+        'description': 'PLN-005 — a confiança dos fatos do desenho',
+        'status': 'in_progress',
+    },
+    {
+        'id': 'REV-003',
+        'kind': 'review',
+        'workstream': 'workspace',
+        'path': 'work/reviews/REV-003-pln-006-o-brza-init.md',
+        'title': 'o `brza-workflow` dos passos P1–P7 do PLN-006, em `b9210a6`',
+        'description': 'o `brza-workflow` dos passos P1–P7 do PLN-006, em `b9210a6`',
+        'status': 'in_progress',
+    },
+    {
+        'id': 'REV-004',
+        'kind': 'review',
+        'workstream': 'workspace',
+        'path': 'work/reviews/REV-004-pln-006-a-migracao.md',
+        'title': 'a migração do `brza-workspace` para cliente do `brza-workflow`, o P8 do PLN-006',
+        'description': 'a migração do `brza-workspace` para cliente do `brza-workflow`, o P8 do PLN-006',
+        'status': 'in_progress',
+    },
+    {
+        'id': 'MIG-001',
+        'kind': 'issue',
+        'type': 'migration',
+        'workstream': 'workspace',
+        'path': 'work/issues/MIG-001-renumeracao-rev-e-refs-pln-008.md',
+        'title': 'Renumeração de revisões históricas (REV-001..004) e extração de refs do PLN-008',
+        'description': 'Renumera os 4 pareceres históricos para REV-001..REV-004 e recalcula refs dos worklogs pelo PLN-008.',
+        'status': 'open',
+    },
+)
 CHECKER = Path('.claude') / 'skills' / 'notes-checker' / 'scripts' / 'check_notes.py'
 FENCE_RE = re.compile(r'^(```|~~~)')
 INLINE_CODE_RE = re.compile(r'`[^`\n]*`')
@@ -577,6 +634,30 @@ def prepare_worklog_refs(root: Path, paths: list[str], remove_date: bool = False
     return True
 
 
+def warn_missing_priority(root: Path, paths: list[str]):
+    """D9: avisa (sem bloquear) quando plano ou issue aberta nos caminhos dados não traz `priority`."""
+    seen: set[str] = set()
+    for p in paths:
+        clean = p.rstrip('/')
+        full = root / clean
+        candidates: list[str] = []
+        if full.is_file():
+            candidates.append(clean)
+        elif full.is_dir():
+            for child in sorted(full.rglob('*.md')):
+                candidates.append(child.relative_to(root).as_posix())
+        for rel in candidates:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            nk = note_kind(rel)
+            if not nk or nk[0] not in ('plan', 'issue'):
+                continue
+            fm = parse_frontmatter((root / rel).read_text(encoding='utf-8'))
+            if fm.get('status') in OPEN_STATUSES and not fm.get('priority'):
+                print(f'aviso: sem priority: {rel}')
+
+
 def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
     branch = branch_of(root)
     if not branch or not branch.startswith(WORKSTREAM_PREFIX):
@@ -604,6 +685,7 @@ def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
     # Com caminhos, o commit leva só eles e deixa o resto do índice como está.
     runtime.git('commit', '-q', '-m', message, '--', *paths, cwd=root)
     print(runtime.git('log', '-1', '--format=%h %s', cwd=root).strip())
+    warn_missing_priority(root, present)
     if dirty := dirty_memory(root, paths):
         print(f'aviso: memória suja fora do commit: {", ".join(dirty)}')
     if not do_push:
@@ -618,6 +700,13 @@ def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
     return 0
 
 
+def canonical_note_id(kind: str, key: str) -> str:
+    """O id canônico de uma nota do índice: PLN-NNN, REV-NNN, MIG-NNN, ou `<kind>:<slug>`."""
+    if kind in ('plan', 'review') or NUMBERED_ID.fullmatch(key):
+        return key
+    return f'{kind}:{key}'
+
+
 def id_of_another_workstream(root: Path, branch: str, paths: list[str]) -> str | None:
     """A recusa da issue ou decisão nova cujo id (`issue:<slug>`, `decision:<slug>`) o índice já dá a outro workstream
     que ainda tem a nota (A7 do P9): o id leva só o slug, e o mesmo nome em dois workstreams viraria um id só, com a
@@ -629,7 +718,7 @@ def id_of_another_workstream(root: Path, branch: str, paths: list[str]) -> str |
     fresh = {}
     for path in sorted(set(listed.split('\0')) - in_head - {''}):
         if (kind := note_kind(path)) and kind[0] != 'plan':
-            fresh[path] = f'{kind[0]}:{kind[1]}'
+            fresh[path] = canonical_note_id(kind[0], kind[1])
     if not fresh:
         return None
     repo, mine = index_repo(), branch.removeprefix(WORKSTREAM_PREFIX)
@@ -786,14 +875,10 @@ def append_index(make_lines) -> list[dict]:
     raise runtime.BrzaError(f'o push do índice foi recusado {INDEX_TRIES} vezes: {last}')
 
 
-def note_fields(text: str) -> tuple[dict[str, str], str]:
-    """(o frontmatter, o H1) de uma nota. O frontmatter é só chave: valor de nível zero, sem aspas; lista fica fora."""
-    fm, body = {}, text
-    if text.startswith('---\n') and (end := text.find('\n---', 4)) >= 0:
-        for line in text[4:end].split('\n'):
-            if m := re.match(r'^([A-Za-z_][\w-]*):\s*(.+?)\s*$', line):
-                fm[m.group(1)] = m.group(2).strip('\'"')
-        body = text[end + 4:]
+def note_fields(text: str) -> tuple[dict, str]:
+    """(o frontmatter, o H1) de uma nota, preservando listas via parse_frontmatter (D9)."""
+    fm = parse_frontmatter(text)
+    body = text[text.find('\n---', 4) + 4:] if text.startswith('---\n') and text.find('\n---', 4) >= 0 else text
     h1, fenced = '', False
     for line in body.split('\n'):
         if re.match(r'^(```|~~~)', line):
@@ -805,35 +890,78 @@ def note_fields(text: str) -> tuple[dict[str, str], str]:
 
 
 def note_kind(path: str) -> tuple[str, str] | None:
-    """(o gênero, a chave) do caminho de uma nota do índice: `plan` com o PLN-NNN, `issue` ou `decision` com o nome do
-    arquivo sem .md; None para qualquer outro."""
+    """(o gênero, a chave) do caminho de uma nota do índice: `plan` com PLN-NNN, `review` com REV-NNN, `issue` com
+    MIG-NNN ou o slug sem .md, `decision` com o slug sem .md; None para qualquer outro."""
     if m := PLAN_NOTE.fullmatch(path):
         return 'plan', m.group(1)
+    if m := REV_NOTE.fullmatch(path):
+        return 'review', m.group(1)
+    if m := MIG_NOTE.fullmatch(path):
+        return 'issue', m.group(1)
     for kind, pattern in NOTE_KINDS:
         if m := pattern.fullmatch(path):
             return kind, m.group(1)
     return None
 
 
-def note_state(kind: str, text: str) -> dict[str, str]:
-    """O que o índice guarda de uma nota, do texto dela: title, description e, quando há, status e phase (esta só no
-    plano). O título é o H1 (no plano, sem o `PLN-NNN: `); a descrição, o campo `description` ou, na nota que não o
-    tem, o H1."""
+def _parse_number(val) -> int | float | None:
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return int(val) if isinstance(val, float) and val.is_integer() else val
+    if isinstance(val, str):
+        try:
+            num = float(val.strip())
+        except ValueError:
+            return None
+        return int(num) if num.is_integer() else num
+    return None
+
+
+def _clean_title(kind: str, h1: str, key: str = '') -> str:
+    if kind == 'plan':
+        return PLAN_PREFIX.sub('', h1, count=1)
+    if kind == 'review':
+        return REV_PREFIX.sub('', h1, count=1)
+    if kind == 'issue' and (key.startswith('MIG-') or MIG_PREFIX.match(h1)):
+        return MIG_PREFIX.sub('', h1, count=1)
+    return h1
+
+
+def note_state(kind: str, text: str, key: str = '') -> dict:
+    """D9: extrai title, description e os campos opcionais aprovados (status, phase, opened, priority, blocks,
+    deadline, owner, type, depends_on, estimate_h, remaining_h), mantendo ausência como ausência."""
     fm, h1 = note_fields(text)
-    state = {'title': PLAN_PREFIX.sub('', h1, count=1) if kind == 'plan' else h1,
-             'description': fm.get('description') or h1}
-    for key in ('status', 'phase') if kind == 'plan' else ('status',):
-        if key in fm:
-            state[key] = fm[key]
+    title = _clean_title(kind, h1, key)
+    desc = fm.get('description')
+    state: dict = {
+        'title': title,
+        'description': desc if isinstance(desc, str) and desc else h1,
+    }
+    scalar_keys = ('status', 'phase', 'opened', 'priority', 'blocks', 'deadline', 'owner', 'type') if kind == 'plan' else (
+        'status', 'opened', 'priority', 'blocks', 'deadline', 'owner', 'type'
+    )
+    for k in scalar_keys:
+        val = fm.get(k)
+        if isinstance(val, str) and val != '':
+            state[k] = val
+    if 'depends_on' in fm:
+        deps = as_list(fm['depends_on'])
+        if deps:
+            state['depends_on'] = deps
+    if kind in ('plan', 'issue') and 'estimate_h' in fm:
+        if (num := _parse_number(fm['estimate_h'])) is not None:
+            state['estimate_h'] = num
+    if kind == 'plan' and 'remaining_h' in fm:
+        if (num := _parse_number(fm['remaining_h'])) is not None:
+            state['remaining_h'] = num
     return state
 
 
-def index_line(event: str, kind: str, id_: str, path: str, state: dict[str, str], workstream: str,
+def index_line(event: str, kind: str, id_: str, path: str, state: dict, workstream: str,
                commit: str | None, ts: str | None = None) -> dict:
     """A linha do índice de uma nota, com o `state` dela (note_state)."""
     line = {'ts': ts or now(), 'event': event, 'kind': kind, 'id': id_, 'path': path, 'title': state['title'],
             'description': state['description']}
-    line.update({k: state[k] for k in ('status', 'phase') if k in state})
+    line.update({k: state[k] for k in STATE_INDEX_KEYS if k in state})
     line.update(workstream=workstream, worktree=f'.worktrees/{workstream}')
     if session := session_name():
         line['session'] = session
@@ -842,34 +970,95 @@ def index_line(event: str, kind: str, id_: str, path: str, state: dict[str, str]
     return line
 
 
-def plan_open(root: Path, slug: str, title: str, description: str) -> int:
-    """Reserva o PLN-NNN seguinte no índice da <remote>/<branch>, com a linha `created`, e imprime o número e o caminho."""
+def _reserve_numbered_note(root: Path, prefix: str, kind: str, label: str, path_fn, state: dict) -> int:
+    """D7: reserva o próximo `<prefix>-NNN` (`max + 1`) no índice da <remote>/<branch> e imprime o ID e o caminho."""
     branch = branch_of(root) or ''
     if not branch.startswith(WORKSTREAM_PREFIX):
-        raise Refused(f'{root} está em {branch or "detached"}; o plano nasce num workstream, passe --workstream <nome>')
+        raise Refused(f'{root} está em {branch or "detached"}; {label} nasce num workstream, passe --workstream <nome>')
     workstream_name = branch.removeprefix(WORKSTREAM_PREFIX)
     taken = []
+    pattern = re.compile(rf'{prefix}-(\d+)')
 
     def make(text: str) -> list[dict]:
-        ids = [int(m.group(1)) for key in current_state(text) if (m := re.fullmatch(r'PLN-(\d+)', key))]
-        id_ = f'PLN-{max(ids, default=0) + 1:03d}'
-        path = f'plans/{id_}-{slug}/{id_}-plan.md'
+        ids = [int(m.group(1)) for key in current_state(text) if (m := pattern.fullmatch(key))]
+        id_ = f'{prefix}-{max(ids, default=0) + 1:03d}'
+        path = path_fn(id_)
         taken[:] = [id_, path]
-        state = {'title': PLAN_PREFIX.sub('', title, count=1), 'description': description, 'status': 'open',
-                 'phase': 'interview'}
-        return [index_line('created', 'plan', id_, path, state, workstream_name, None)]
+        return [index_line('created', kind, id_, path, state, workstream_name, None)]
 
     try:
         append_index(make)
     except runtime.BrzaError as e:
-        raise Refused(f'não reservei o número do plano: {e}') from None
+        raise Refused(f'não reservei o número {label}: {e}') from None
     print(taken[0])
     print(taken[1])
     return 0
 
 
+def plan_open(root: Path, slug: str, title: str, description: str) -> int:
+    """Reserva o PLN-NNN seguinte no índice da <remote>/<branch>, com a linha `created`, e imprime o número e o caminho."""
+    state = {'title': PLAN_PREFIX.sub('', title, count=1), 'description': description, 'status': 'open',
+             'phase': 'interview'}
+    return _reserve_numbered_note(root, 'PLN', 'plan', 'do plano', lambda id_: f'plans/{id_}-{slug}/{id_}-plan.md', state)
+
+
+def review_open(root: Path, slug: str, title: str, description: str) -> int:
+    """D7: reserva o REV-NNN seguinte no índice da <remote>/<branch> e imprime o ID e o caminho."""
+    state = {'title': REV_PREFIX.sub('', title, count=1), 'description': description, 'status': 'in_progress'}
+    return _reserve_numbered_note(root, 'REV', 'review', 'da revisão', lambda id_: f'work/reviews/{id_}-{slug}.md', state)
+
+
+def migration_open(root: Path, slug: str, title: str, description: str) -> int:
+    """D7: reserva o MIG-NNN seguinte no índice da <remote>/<branch> e imprime o ID e o caminho."""
+    state = {'title': MIG_PREFIX.sub('', title, count=1), 'description': description, 'status': 'open',
+             'type': 'migration'}
+    return _reserve_numbered_note(root, 'MIG', 'issue', 'da migração', lambda id_: f'work/issues/{id_}-{slug}.md', state)
+
+
+def bootstrap_pln008(entries: tuple[dict, ...] | list[dict] = PLN008_BOOTSTRAP) -> int:
+    """D7/D8: operação atômica que reserva REV-001..REV-004 e MIG-001 num único commit do índice.
+    Idempotente quando o mapa `(id, kind, workstream, path)` coincide; recusa se houver colisão divergente."""
+    def make(text: str) -> list[dict]:
+        state = current_state(text)
+        by_path = {line.get('path'): id_ for id_, line in state.items() if isinstance(line.get('path'), str)}
+        lines = []
+        for entry in entries:
+            id_ = entry['id']
+            kind = entry['kind']
+            ws = entry['workstream']
+            path = entry['path']
+            if id_ in state:
+                existing = state[id_]
+                if (existing.get('kind'), existing.get('workstream'), existing.get('path')) != (kind, ws, path):
+                    raise Refused(
+                        f'colisão no bootstrap de {id_}: índice tem ({existing.get("kind")}, '
+                        f'{existing.get("workstream")}, {existing.get("path")}), esperado ({kind}, {ws}, {path})'
+                    )
+                if entry.get('type') and existing.get('type') not in (None, entry['type']):
+                    raise Refused(f'colisão no bootstrap de {id_}: tipo {existing.get("type")} != {entry["type"]}')
+                continue
+            if path in by_path and by_path[path] != id_:
+                raise Refused(f'colisão no bootstrap de {id_}: caminho {path} já pertence a {by_path[path]}')
+            note_st = {
+                'title': entry['title'],
+                'description': entry['description'],
+                'status': entry['status'],
+            }
+            if 'type' in entry:
+                note_st['type'] = entry['type']
+            lines.append(index_line('created', kind, id_, path, note_st, ws, None))
+        return lines
+
+    try:
+        written = append_index(make)
+    except runtime.BrzaError as e:
+        raise Refused(f'não gravei o bootstrap no índice: {e}') from None
+    print(f'índice: {len(written)} reserva(s) de bootstrap gravada(s)' if written else 'índice: bootstrap em dia')
+    return 0
+
+
 def changed_notes(root: Path) -> list[tuple[str | None, str, str, str]]:
-    """Os planos, issues e decisões do último commit de `root`, como (o caminho antigo no rename, o caminho, o
+    """Os planos, revisões, issues e decisões do último commit de `root`, como (o caminho antigo no rename, o caminho, o
     gênero, a chave). Apagado não conta."""
     out = runtime.git('diff-tree', '--root', '--no-commit-id', '-r', '-M', '--name-status', '-z', 'HEAD', cwd=root)
     tokens, found = out.split('\0'), []
@@ -884,7 +1073,8 @@ def changed_notes(root: Path) -> list[tuple[str | None, str, str, str]]:
 
 def index_after_commit(root: Path, branch: str) -> list[dict]:
     """As linhas do índice do último commit de `root`, já enviado ao workstream: `created` para o id novo e `changed`
-    para o que mudou de caminho, H1, description, status ou phase contra o vigente. Devolve as linhas gravadas."""
+    para o que mudou nos campos de INDEX_COMPARED ou na transição reserva -> nota (ausência de `commit` no estado
+    vigente)."""
     notes = changed_notes(root)
     if not notes:
         return []
@@ -898,10 +1088,11 @@ def index_after_commit(root: Path, branch: str) -> list[dict]:
         lines = []
         for old, path, kind, key in notes:
             known = by_path.get(old or path)
-            id_ = key if kind == 'plan' else known['id'] if known else f'{kind}:{key}'
-            new = index_line('created', kind, id_, path, note_state(kind, texts[path]), workstream_name, commit)
+            default_id = canonical_note_id(kind, key)
+            id_ = default_id if NUMBERED_ID.fullmatch(default_id) else (known['id'] if known else default_id)
+            new = index_line('created', kind, id_, path, note_state(kind, texts[path], key), workstream_name, commit)
             if id_ in state:
-                if all(new.get(k) == state[id_].get(k) for k in INDEX_COMPARED):
+                if state[id_].get('commit') and all(new.get(k) == state[id_].get(k) for k in INDEX_COMPARED):
                     continue
                 new['event'] = 'changed'
             lines.append(new)
@@ -912,9 +1103,9 @@ def index_after_commit(root: Path, branch: str) -> list[dict]:
 
 def rebuild() -> int:
     """O `index --rebuild`: lê toda branch workstream/* (a do remote, ou a local quando o remote não a tem) e acrescenta
-    `created` para o plano, a issue ou a decisão cujo id e caminho faltam no índice, e `changed` para a que o índice já
-    tem e que difere do HEAD da branch (caminho, H1, description, status, phase). Issue e decisão cujo id o índice dá a
-    outro workstream ficam como estão: o nome repetido entre workstreams não se resolve aqui (A7)."""
+    `created` para a nota cujo id e caminho faltam no índice, e `changed` para a que o índice já tem e que difere do
+    HEAD da branch (INDEX_COMPARED ou reserva ainda sem `commit`). Issue comum e decisão cujo id o índice dá a outro
+    workstream ficam como estão (A7)."""
     repo = index_repo()
 
     def make(text: str) -> list[dict]:
@@ -936,28 +1127,112 @@ def rebuild() -> int:
                 kind = note_kind(path)
                 if not kind:
                     continue
-                id_ = kind[1] if kind[0] == 'plan' else f'{kind[0]}:{kind[1]}'
+                id_ = canonical_note_id(kind[0], kind[1])
                 known = state.get(id_) or by_path.get(path)
                 if known is None and id_ in handled:
                     continue
                 if known is not None and (known['id'] in handled or (
-                        kind[0] != 'plan' and known.get('workstream') not in (None, owner))):
+                        not NUMBERED_ID.fullmatch(known['id']) and known.get('workstream') not in (None, owner))):
                     continue
                 when, _, commit = runtime.git('log', '-1', '--format=%cI\t%h', ref, '--', path,
                                               cwd=repo).strip().partition('\t')
-                note = note_state(kind[0], runtime.git('show', f'{ref}:{path}', cwd=repo))
+                note = note_state(kind[0], runtime.git('show', f'{ref}:{path}', cwd=repo), kind[1])
                 if known is None:
                     handled.add(id_)
                     lines.append(index_line('created', kind[0], id_, path, note, owner, commit or None, when or None))
                     continue
-                new = index_line('changed', kind[0], known['id'], path, note, owner, commit or None)
-                if not all(new.get(k) == known.get(k) for k in INDEX_COMPARED):
-                    handled.add(known['id'])
+                target_id = id_ if NUMBERED_ID.fullmatch(id_) else known['id']
+                new = index_line('changed', kind[0], target_id, path, note, owner, commit or None)
+                if not known.get('commit') or not all(new.get(k) == known.get(k) for k in INDEX_COMPARED):
+                    handled.add(target_id)
                     lines.append(new)
         return lines
 
     written = append_index(make)
     print(f'índice: {len(written)} linha(s) acrescentada(s)' if written else 'índice: em dia, nada a acrescentar')
+    return 0
+
+
+def read_ls_index(repo: Path, refresh: bool) -> str:
+    """D6/D9: lê o índice para `brza note ls`. Por padrão usa a cópia local sem fetch; `--refresh` faz fetch e falha
+    explicitamente se não conseguir atualizar. Índice indisponível levanta Refused (sem fingir fila vazia)."""
+    remote, branch = remote_and_branch()
+    if refresh:
+        index_fetch(repo)
+        ref = f'{remote}/{branch}'
+        if not runtime.git('ls-tree', ref, '--', INDEX_PATH, cwd=repo).strip():
+            raise Refused(f'índice indisponível em {ref}:{INDEX_PATH}')
+        return runtime.git('show', f'{ref}:{INDEX_PATH}', cwd=repo)
+    for ref in (f'{remote}/{branch}', branch):
+        try:
+            if runtime.git('ls-tree', ref, '--', INDEX_PATH, cwd=repo).strip():
+                return runtime.git('show', f'{ref}:{INDEX_PATH}', cwd=repo)
+        except runtime.BrzaError:
+            continue
+    raise Refused(f'índice indisponível localmente ({INDEX_PATH}); rode brza note ls --refresh')
+
+
+def _ls_sort_key(item: dict, sort_by: str) -> tuple:
+    id_ = item.get('id', '')
+    if sort_by == 'priority':
+        prio = item.get('priority')
+        rank = PRIORITY_ORDER.get(prio, 3) if isinstance(prio, str) else 3
+        return (rank, id_)
+    if sort_by == 'deadline':
+        dl = item.get('deadline')
+        if isinstance(dl, str) and dl:
+            return (0, dl, id_)
+        return (1, '', id_)
+    # opened: mais recente primeiro; ausente no fim
+    opened = item.get('opened')
+    if isinstance(opened, str) and opened:
+        try:
+            ordinal = -datetime.date.fromisoformat(opened).toordinal()
+            return (0, ordinal, '', id_)
+        except ValueError:
+            inv = ''.join(chr(0xFFFF - ord(c)) for c in opened)
+            return (0, 0, inv, id_)
+    return (1, 0, '', id_)
+
+
+def ls_notes(status_filter: str = 'open', sort_by: str = 'opened', refresh: bool = False) -> int:
+    """D6/D9: lista issues (incluindo MIG) e decisões pelo estado vigente do índice, excluindo reservas sem `commit`."""
+    repo = index_repo()
+    text = read_ls_index(repo, refresh=refresh)
+    state = current_state(text)
+    items = []
+    for item in state.values():
+        if item.get('kind') not in ('issue', 'decision'):
+            continue
+        if not item.get('commit'):
+            continue
+        st = item.get('status')
+        if status_filter == 'open' and st not in OPEN_STATUSES:
+            continue
+        items.append(item)
+    items.sort(key=lambda x: _ls_sort_key(x, sort_by))
+    headers = ('ID', 'workstream', 'status', 'opened', 'priority', 'deadline', 'title')
+    rows = [
+        (
+            str(it.get('id') or '-'),
+            str(it.get('workstream') or '-'),
+            str(it.get('status') or '-'),
+            str(it.get('opened') or '-'),
+            str(it.get('priority') or '-'),
+            str(it.get('deadline') or '-'),
+            str(it.get('title') or '-'),
+        )
+        for it in items
+    ]
+    widths = [max(len(headers[i]), *(len(r[i]) for r in rows)) if rows else len(headers[i]) for i in range(len(headers) - 1)]
+
+    def fmt_row(cols: tuple[str, ...]) -> str:
+        padded = [cols[i].ljust(widths[i]) for i in range(len(widths))] + [cols[-1]]
+        return '  '.join(padded)
+
+    print(fmt_row(headers))
+    for r in rows:
+        print(fmt_row(r))
     return 0
 
 
@@ -1100,8 +1375,25 @@ def main(argv: list[str] | None = None) -> int:
     ap_plan.add_argument('--title', required=True, help='o H1 do plano, com ou sem o `PLN-NNN: `')
     ap_plan.add_argument('--description', required=True, help='uma frase, o campo description do plano')
     ap_plan.add_argument('--workstream', help=workstream_help)
+    ap_rev = sub.add_parser('review-open', help='reserva o REV-NNN seguinte no índice da master')
+    ap_rev.add_argument('slug', help='em kebab-case, o assunto da revisão')
+    ap_rev.add_argument('--title', required=True, help='o H1 da revisão, com ou sem o `REV-NNN: `')
+    ap_rev.add_argument('--description', required=True, help='uma frase, o campo description da revisão')
+    ap_rev.add_argument('--workstream', help=workstream_help)
+    ap_mig = sub.add_parser('migration-open', help='reserva o MIG-NNN seguinte no índice da master')
+    ap_mig.add_argument('slug', help='em kebab-case, o assunto da migração')
+    ap_mig.add_argument('--title', required=True, help='o H1 da migração, com ou sem o `MIG-NNN: `')
+    ap_mig.add_argument('--description', required=True, help='uma frase, o campo description da migração')
+    ap_mig.add_argument('--workstream', help=workstream_help)
+    ap_ls = sub.add_parser('ls', help='lista issues e decisões pelo estado vigente do índice')
+    ap_ls.add_argument('--status', choices=('open', 'all'), default='open', help='estados abertos (padrão) ou todos')
+    ap_ls.add_argument('--sort', choices=('opened', 'priority', 'deadline'), default='opened',
+                       help='ordenação (padrão opened)')
+    ap_ls.add_argument('--refresh', action='store_true', help='atualiza o índice via fetch antes de listar')
     ap_index = sub.add_parser('index', help='mantém o índice da master')
     ap_index.add_argument('--rebuild', action='store_true', help='acrescenta o que falta, lendo os workstreams')
+    ap_index.add_argument('--bootstrap-pln008', action='store_true',
+                          help='reserva atomicamente REV-001..REV-004 e MIG-001 no índice')
     ap_workstream = sub.add_parser('workstream', help='cria a branch workstream/<nome> e o worktree dela em '
                                                       '.worktrees/<nome>')
     ap_workstream.add_argument('name', metavar='nome', help='em kebab-case, como studio ou tools-kit')
@@ -1125,17 +1417,26 @@ def main(argv: list[str] | None = None) -> int:
             return memory_setup()
         if args.command == 'sync':
             return sync(not args.no_push)
+        if args.command == 'ls':
+            return ls_notes(status_filter=args.status, sort_by=args.sort, refresh=args.refresh)
         if args.command == 'index':
-            if not args.rebuild:
-                ap_index.error('diga o que fazer: --rebuild')
-            return rebuild()
+            if not args.rebuild and not args.bootstrap_pln008:
+                ap_index.error('diga o que fazer: --rebuild ou --bootstrap-pln008')
+            if args.bootstrap_pln008:
+                bootstrap_pln008()
+            if args.rebuild:
+                return rebuild()
+            return 0
         root = target_root(args.workstream)
-        if args.command == 'plan-open':
+        if args.command in ('plan-open', 'review-open', 'migration-open'):
+            parser_map = {'plan-open': ap_plan, 'review-open': ap_rev, 'migration-open': ap_mig}
+            fn_map = {'plan-open': plan_open, 'review-open': review_open, 'migration-open': migration_open}
+            sub_ap = parser_map[args.command]
             if not SUBJECT.fullmatch(args.slug):
-                ap_plan.error(f'slug inválido: {args.slug}; use kebab-case')
+                sub_ap.error(f'slug inválido: {args.slug}; use kebab-case')
             if not args.title.strip() or not args.description.strip():
-                ap_plan.error('--title e --description não podem ser vazios')
-            return plan_open(root, args.slug, args.title.strip(), ' '.join(args.description.split()))
+                sub_ap.error('--title e --description não podem ser vazios')
+            return fn_map[args.command](root, args.slug, args.title.strip(), ' '.join(args.description.split()))
         if args.command == 'new':
             if not SUBJECT.fullmatch(args.subject) or DATED.match(args.subject):
                 ap_new.error(f'assunto inválido: {args.subject}; use kebab-case, sem a data')
