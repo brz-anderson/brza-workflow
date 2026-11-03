@@ -420,9 +420,9 @@ import json, os, re, subprocess, sys, time
 cfg = json.load(open({config!r}))
 args = sys.argv[1:]
 seen = None
-for token in re.findall(r"\\S+\\.json", args[-1]):
-    if os.path.isfile(token):
-        seen = json.load(open(token))
+for candidate in re.findall(r"Leia o arquivo ([^\\n:]+\\.json):", args[-1]):
+    if os.path.isfile(candidate):
+        seen = json.load(open(candidate))
 json.dump({{"args": args, "cwd": os.getcwd(), "audit": os.environ.get("BRZA_FACT_AUDIT"), "file": seen}},
           open(cfg["record"], "w"))
 if cfg["grandchild"]:

@@ -81,7 +81,7 @@ plano**; no resto a pasta é plana, e o nome do arquivo carrega o que a subpasta
 | `archive/` | O item encerrado fica onde nasceu, com `status: done` ou `dropped`; um `archive/` seria a pasta de estado `done/` com outro nome |
 | `unknowns/`, `questions/` | Já são campo: investigação é `type: unknown` em `issues/`; questão é `status: open` em `decisions/` |
 | `entities/`, `syntheses/` | Nomeiam assunto ou procedência, não gênero |
-| `templates/` | O único molde de nota, o do plano, mora na skill `plan-runner` (`.claude/skills/plan-runner/references/plan-template.md`), que é quem o lê |
+| `templates/` | Os moldes moram nas skills que os leem: `plan-runner` (`.claude/skills/plan-runner/references/plan-template.md`) e `migration-runner` (`.claude/skills/migration-runner/references/migration-template.md`) |
 | `sessions/`, `memories/` | O gênero é `worklogs/`; memória de agente que vale para todos vira nota do gênero dela |
 
 Diretório novo sem decisão não nasce: a estrutura é decidida, não improvisada.
@@ -127,6 +127,10 @@ Os comandos rodam da raiz do workspace. O checador e o `move_note.py` moram na s
 `.claude/skills/notes-checker/`.
 
 ```bash
+# Listar issues (incluindo MIG-NNN) e decisões abertas pelo índice local (ou com --refresh)
+brza note ls
+brza note ls --status all --sort priority --refresh
+
 # O que trava agora — em qualquer pasta, porque urgência é campo
 grep -rl '^blocks:' work plans wiki | xargs grep -LE '^status: (done|dropped)'
 
@@ -153,7 +157,9 @@ opened: 2026-10-27
 
 **Um assunto por arquivo**, em Markdown, nome em kebab-case e **único no acervo inteiro** — salvo o `README.md`, que é
 a norma de cada zona, nunca nota, e repete o nome por construção. Prefixo de data `AAAA-MM-DD-` só onde a data é parte
-do assunto — `worklogs/` e `notes/`. O plano leva número, não data: `PLN-001-…`.
+do assunto — `worklogs/` e `notes/`. Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número
+sequencial reservado no índice da `master` por `brza note plan-open`, `brza note review-open` e
+`brza note migration-open`, nunca data.
 
 **A imagem de uma nota fica ao lado dela**, com o nome da nota e um sufixo quando há mais de uma — `<nome>.png`,
 `<nome>-escuro.png` — e o corpo a linka. É assim com o PNG da alternativa escolhida numa issue e com o print de um
@@ -185,10 +191,19 @@ por um formatador que junta linhas.
 
 `work/`, `plans/` e `wiki/` são deste repositório, mas **não moram na `master`**: cada nota mora na branch do
 workstream dela, `workstream/<nome>`, no worktree `.worktrees/<nome>`, como diz o `AGENTS.md`. **A nota nasce no
-workstream da sessão que a escreve.** **O commit é pelo `brza note commit`**, que roda o checador, commita só os
+workstream da sessão que a escreve.** **O commit é pelo `brza note commit`**, que extrai e atualiza o `refs:` dos
+worklogs pedidos, roda o checador, commita só os
 caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `master`. O commit é com a identidade do
 `brz-anderson`, que vem do `env` da sessão, e o push vai pela chave `personal` do `origin`
 (`git@personal:brz-anderson/brza-workspace.git`).
+
+No `.brza/index.jsonl`, `session` identifica a sessão da operação que produziu a linha (inclusive em
+`brza note index --rebuild`, que registra a sessão que executa a reconstrução, sem certificar autoria histórica da nota).
+A reserva inicial (`plan-open`, `review-open`, `migration-open`) nasce sem `commit`; o primeiro `brza note commit` da
+nota grava a transição de reserva para nota materializada. O `brza note ls` consulta as issues (incluindo `MIG-NNN`) e
+decisões materializadas no índice local por padrão (`--status open|all`, `--sort opened|priority|deadline`) e aceita
+`--refresh` para buscar atualizações remotas explicitamente; **gatilho da R12.3:** se dados desatualizados aparecerem com
+frequência nas listagens, o fetch passa a ser o padrão.
 
 O `brza-studio` é outro repositório, com branch `master` e a norma dele: o plano daqui só aponta para ele.
 
@@ -202,10 +217,13 @@ O `brza-studio` é outro repositório, com branch `master` e a norma dele: o pla
 
 | Propriedade | O que guarda |
 | :---------- | :----------- |
-| `type` | **Ausente**, quer dizer o gênero da pasta. Escrito só quando refina o caminho: `unknown`, para investigação em `issues/` |
+| `type` | **Ausente**, quer dizer o gênero da pasta. Escrito só quando refina o caminho em `issues/`: `unknown` (investigação) ou `migration` (`MIG-NNN`, conduzida pela skill `migration-runner`) |
 | `status` | `open` existe e ninguém pegou · `in_progress` alguém está fazendo · `in_review` feito, esperando parecer · `done` encerrado **com** desfecho · `dropped` encerrado **sem** desfecho, por escolha. **Omitido** nos gêneros sem ciclo de vida: `guide`, `worklog` e `note` |
 | `scope` | A que a nota se refere. Sempre **lista**: `brza-studio`, `workspace`, ou o que mais vier |
-| `priority` | Só em `issues/`: `high` · `medium` · `low`. Opcional e sem default |
+| `priority` | Em `issues/` e `plans/`: `high` · `medium` · `low`. Opcional e sem default; `brza note commit` avisa sem bloquear quando plano ou issue aberta não traz `priority` |
+| `depends_on` | Lista de IDs canônicos (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`, `decision:<slug>`) de que a nota depende. Só `status: done` satisfaz a dependência; alvo inexistente ou ciclo barra no checador |
+| `estimate_h` | Estimativa numérica em horas (ponto decimal, sem unidade), em `plans/` e opcional em `issues/` |
+| `refs` | Lista de IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`) citados no corpo de um `worklog` (prosa, crases inline, subitens como `PLN-008/D1` e links relativos), mantida automaticamente pelo `brza note commit` |
 | `opened` | Quando o assunto foi aberto |
 | `decided` / `decided_by` | Data da decisão e quem decidiu — par indivisível |
 | `completed` | Data da conclusão |
@@ -247,9 +265,11 @@ facultativos.
 > **O `status` é a fonte — e o checador o confere**
 >
 > O `notes-checker` **barra** nome de arquivo repetido, link relativo quebrado, `[[wikilink]]`, `status` fora do
-> vocabulário, campo obrigatório ausente em nota nova ou que mudou de estado e o plano aberto fora do molde, como diz o
+> vocabulário, `refs:` ou `depends_on:` com alvo inexistente, ciclo em `depends_on:`, `estimate_h` não numérico, campo
+> obrigatório ausente em nota nova ou que mudou de estado e o plano aberto fora do molde, como diz o
 > [`plans/README.md`](../plans/README.md); **relata** o campo ausente no acervo anterior à regra, `type` redundante ou
-> inválido, tag fora da lista, achado de parecer de `reviews/` sem evidência e a nota que linka um plano aberto e falta
+> inválido, tag fora da lista, `date:` em worklog, menção textual a ID inexistente no worklog, achado de parecer de
+> `reviews/` sem evidência e a nota que linka um plano aberto e falta
 > na seção dele. Os vocabulários estão no script (`.claude/skills/notes-checker/scripts/check_notes.py`) e nesta norma:
 > mudou um, muda o outro no mesmo commit.
 >
@@ -269,6 +289,10 @@ apontado de volta. Issue resolvida fica com `status: done`, `completed` e uma li
 **Investigação é `type: unknown`**: a pergunta cuja resposta existe no mundo e nós não temos. Resolvida, a resposta
 curta é uma linha no próprio arquivo, e a substantiva vira guia; a issue fecha apontando para ela.
 
+**Migração é `type: migration` (`MIG-NNN`)**: divergência entre o disco e a norma ou decisão vigente, aberta com
+`brza note migration-open` em `work/issues/MIG-NNN-<assunto>.md`, com H1 `# MIG-NNN: …`, e conduzida pela skill
+`migration-runner` (Criar, Revisar com revisor independente e Executar com critério determinístico de conclusão).
+
 **`priority` ordena a fila entre as que não travam ninguém.** Sem o campo, a issue cai no fim da fila: a ausência
 distingue "ninguém avaliou" de "é média".
 
@@ -281,7 +305,9 @@ Os planos moram em `plans/`, na raiz, e a norma deles está no [`plans/README.md
 Registro **escrito** de um trabalho feito — o que se discutiu, o que se decidiu, o que ficou aberto —, nunca
 transcrição.
 
-- **Nome `AAAA-MM-DD-assunto-em-kebab.md`**, com o assunto obrigatório.
+- **Nome `AAAA-MM-DD-assunto-em-kebab.md`**, com o assunto obrigatório. A data mora no nome do arquivo; o frontmatter
+  não usa `date:` (`date-on-worklog`) e guarda `scope`, `tags` (quando houver) e `refs:` (extraído automaticamente pelo
+  `brza note commit` a partir de `PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>` e links relativos do corpo).
 - **Três testes de corte abrem arquivo novo:** mudou o assunto, virou outro dia, ou o que se decidiu vai para
   `decisions/`.
 - **O plano de implementação aceito abre o worklog**, quando houve um: seção `## Plano aceito em AAAA-MM-DD`,
@@ -295,7 +321,8 @@ transcrição.
 
 ### `work/reviews/`
 
-Parecer sobre um artefato **numa versão**, citável por quem foi revisado, com o H1 `REV: …` e achados `### A<n>`, cada um
+Parecer sobre um artefato **numa versão**, citável por quem foi revisado, em `work/reviews/REV-NNN-<assunto>.md`
+(número reservado por `brza note review-open`), com o H1 `# REV-NNN: …` e achados `### A<n>`, cada um
 com a confiança e `**Evidência:**`, e o falso também com `**Por que é falso:**` — a forma está na `plan-runner`, em
 `references/conduct.md`. Fica `in_progress` enquanto é escrito e `done` quando o parecer está escrito.
 

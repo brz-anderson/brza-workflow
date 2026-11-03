@@ -29,11 +29,12 @@ ls work/worklogs/ | grep "^$(date +%F)-"
 ## 2. O worklog de hoje
 
 - **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois.
-- **Não tem:** crie `work/worklogs/AAAA-MM-DD-assunto-em-kebab.md`, com `scope` no frontmatter e sem `status`, na forma
-  da seção `work/worklogs/` do `work/README.md`. Mudou o assunto, virou o dia ou houve decisão: é arquivo novo.
+- **Não tem:** crie `work/worklogs/AAAA-MM-DD-assunto-em-kebab.md`, com `scope` no frontmatter e sem `status` nem `date`,
+  na forma da seção `work/worklogs/` do `work/README.md`. Mudou o assunto, virou o dia ou houve decisão: é arquivo novo.
 - **O conteúdo** é o registro escrito, não a transcrição: o que se fez, o que se decidiu (com a resposta literal da
-  rodada), o que ficou aberto, e `## Fora do workspace` quando algo mudou fora dos dois repositórios. Questão aberta
-  não fica no worklog: vai ao passo 3.
+  rodada), o que ficou aberto, e `## Fora do workspace` quando algo mudou fora dos dois repositórios. Cite no corpo os
+  IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`) ou links relativos das notas tocadas: o `brza note commit`
+  extrai e preenche `refs:` no frontmatter do worklog automaticamente. Questão aberta não fica no worklog: vai ao passo 3.
 - **Depois de uma compactação**, escreva a partir do resumo que ela deixou no contexto, sem inventar o que ele não diz.
 
 ## 3. O pendente
@@ -56,8 +57,9 @@ para todos os workstreams é candidato à norma: diga isso no worklog e a quem p
 brza note commit <caminhos> -m "docs: <o que a tarefa fechou>"
 ```
 
-Os caminhos são o worklog, o plano ou a issue, e a memória. O comando recusa a `master`, roda o checador antes e dá o
-push. Se o checador barrar, corrija e rode de novo; o `notes-checker` explica o erro.
+Os caminhos são o worklog, o plano ou a issue, e a memória. O comando atualiza o `refs:` dos worklogs pedidos, recusa a
+`master`, roda o checador antes e dá o push. Se o checador barrar, corrija e rode de novo; o
+`notes-checker` explica o erro.
 
 ## 6. Conferir e devolver
 

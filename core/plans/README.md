@@ -14,7 +14,7 @@ worklog.
 | Pasta | Uma por plano, mesmo com um arquivo só: `plans/PLN-001-assunto/`, no workstream da sessão que o abre, e nunca na `{{workspace.branch}}`. O número é sequencial e não se reusa: sai do `brza note plan-open <slug> --title … --description …`, que o reserva no índice da `{{workspace.branch}}` antes de o plano ser gravado |
 | Arquivos | `PLN-001-plan.md` sempre; `-interview.md` e `-design.md` quando o plano passa de ~400 linhas ou o desenho de ~800. O `-plan` é o arquivo lido para retomar. A imagem fica na pasta: a alternativa de interface escolhida no Desenho, `PLN-001-<assunto>.png`, pelo `brza shot`; o print de um caso manual, `PLN-001-C1.png`, pelo `brza print` |
 | IDs | `R3.2` rodada e pergunta, só cresce · `D3` item do Desenho, reescrito no lugar · `P3` passo · `X1` desvio · `A1` achado · `C1` caso manual. Citação de fora: `PLN-001/D3` |
-| Estado | Frontmatter **só no `-plan.md`**: `status`, `phase`, `origin`, `origin_ref`, `ready` e as três horas, na forma do molde; o `Retomar` é a primeira linha abaixo do H1 |
+| Estado | Frontmatter **só no `-plan.md`**: `status`, `phase`, `origin`, `origin_ref`, `ready`, as três horas e, quando houver, `priority` e `depends_on`, na forma do molde; o `Retomar` é a primeira linha abaixo do H1 |
 | Origem | `origin` em `issue` · `decision` · `plan` · `request`; `origin_ref` com o nome da nota sem `.md`, `PLN-NNN` ou `PLN-NNN/A<n>`, ausente com `request`. Uma origem por plano: com mais de uma, vale a ordem `issue` > `plan` > `decision`, e as outras ficam na linha `- **Origem:**` do Pedido. Plano que veio de outro workspace é `request`, com a procedência na linha `- **Origem:**` |
 | Seções de ponteiro | `## Worklogs`, sempre; `## Revisões`, `## Decisões`, `## Pendências conhecidas` e `## Documentação` quando há o que apontar, depois dos Desvios. À mão; o checador avisa a nota de `work/` que linka o plano e falta na seção, e a `plan-runner` acerta ao retomar |
 | Branch | O plano mora no workstream da frente, onde fica também depois de fechar. O trabalho de plano no `{{code.name}}` leva o plano no nome da branch: `<tipo>/pln-NNN-<slug>`, com um worktree em `<repo>/.worktrees/` e uma sessão por entrega. Ali, o `brza note` acha o workstream procurando o `plans/PLN-NNN-*` nas branches `workstream/*` |
@@ -38,7 +38,7 @@ worklog.
 - **O plano não substitui a decisão.** Rodada que decide algo que sobrevive ao plano leva a nota de `work/decisions/` a
   `done`, citando a rodada.
 - **O `## Worklogs` cita o worklog** de cada sessão, numa linha com a data e os IDs, e o link do worklog.
-- **O parecer da revisão é nota de `work/reviews/`**, `pln-NNN-<assunto>.md`, e o plano aponta para ela.
+- **O parecer da revisão é nota de `work/reviews/`**, `REV-NNN-<assunto>.md` (reservada por `brza note review-open`, com H1 `REV-NNN: …`), e o plano aponta para ela.
 - **O checador barra o plano aberto fora do molde** — `open`, `in_progress`, `in_review` —: `phase` ausente, fora do
   vocabulário ou em desacordo com o `status`; `origin` ausente ou fora do vocabulário; `origin_ref` ausente, presente
   com `request`, ou apontando para issue, decisão ou plano que não existe; `ready` ausente; hora que não é número;

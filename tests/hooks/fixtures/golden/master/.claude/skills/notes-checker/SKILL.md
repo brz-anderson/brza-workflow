@@ -54,7 +54,10 @@ a profundidade dos links que saem da nota movida quando ela muda de diretório, 
 Sai com 0 sem erro, com 1 com erro. O corte é **o que quebra consulta ou ponteiro** contra **o que é dívida conhecida**:
 
 - **Erro, barra:** `duplicate-name`, `unresolved-link` (link Markdown relativo quebrado), `wikilink-forbidden`
-  (`[[wikilink]]` fora de código), `status-out-of-vocabulary`, e os campos obrigatórios por estado
+  (`[[wikilink]]` fora de código), `status-out-of-vocabulary`, `ref-not-found` (item de `refs:` em worklog que não
+  resolve para `PLN-NNN`, `REV-NNN`, `MIG-NNN` ou `issue:<slug>` existente), `depends-on-not-found` e
+  `depends-on-cycle` (alvo de `depends_on:` inexistente ou em ciclo/auto-referência), `hours-not-a-number`
+  (`estimate_h` em issue ou as três horas em plano), e os campos obrigatórios por estado
   (`done-without-completed`, `decided-without-pair`, `decision-done-without-decided`, `open-decision-without-trigger`,
   `blocks-without-owner`) em nota datada de 2026-10-26 em diante, o dia em que o workspace nasceu; e, no `-plan.md`
   aberto — `open`, `in_progress`, `in_review` —, o molde do `plans/README.md`: `plan-without-phase`,
@@ -62,10 +65,12 @@ Sai com 0 sem erro, com 1 com erro. O corte é **o que quebra consulta ou pontei
   `origin-ref-on-request`, `origin-ref-missing`, `origin-ref-not-found`, `plan-without-ready`, `hours-not-a-number`,
   `retomar-not-first`, `plan-without-worklogs` e `worklog-line-without-link` (a linha datada de 2026-10-28 em diante).
 - **Aviso, relata e segue:** os mesmos campos obrigatórios em nota sem data nenhuma — data que não está escrita não se
-  infere —, `type` redundante ou inválido, tag fora do vocabulário ou que repete campo, `status` em gênero sem estado,
-  achado `### A<n>` de um parecer de `work/reviews/` sem `**Evidência:**` (`finding-without-evidence`) e nota de
-  `work/worklogs/`, `work/reviews/`, `work/decisions/` ou `work/issues/` que linka um plano aberto e falta na seção de
-  ponteiro dele (`backlink-missing`).
+  infere —, `type` redundante ou inválido (`issues/` aceita `unknown` e `migration`), tag fora do vocabulário ou que
+  repete campo, `status` em gênero sem estado, `date-on-worklog` (`date:` no frontmatter de worklog),
+  `unknown-ref-mention` (menção textual a `PLN-NNN`, `REV-NNN`, `MIG-NNN` ou `issue:<slug>` inexistente no corpo do
+  worklog, com linha), achado `### A<n>` de um parecer de `work/reviews/` sem `**Evidência:**`
+  (`finding-without-evidence`) e nota de `work/worklogs/`, `work/reviews/`, `work/decisions/` ou `work/issues/` que
+  linka um plano aberto e falta na seção de ponteiro dele (`backlink-missing`).
 
 **Link para nota de outro workstream:** o alvo que não está na árvore se procura nas branches `workstream/*`, as locais
 e as de `origin`, pelo `git ls-tree` de cada uma, calculado uma vez; só o que não existe em nenhuma é `unresolved-link`.

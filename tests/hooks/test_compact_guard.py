@@ -250,7 +250,7 @@ class OtherWorkspaceTest(unittest.TestCase):
         self.assertEqual(out["decision"], "block")
         self.assertIn(f"no worktree do workstream w ({self.tree})", out["reason"])
         self.assertNotIn("/close-task", out["reason"])
-        self.assertNotIn("brza-", out["reason"])
+        self.assertNotIn("brza-", out["reason"].replace(self.tmp.name, ""))
 
     def test_without_the_registry_entry_the_code_worktree_is_not_checked(self):
         self.assertIsNone(self.pre(self.far, registry=False))

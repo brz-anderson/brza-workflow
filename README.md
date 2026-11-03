@@ -95,11 +95,21 @@ Com ele, a função `claude` sobe com o `--settings` do workspace certo. Fora de
 
 ## O índice das notas
 
-A branch da norma do workspace guarda, além da norma, o `.brza/index.jsonl`: uma linha por plano, issue ou decisão
-criada ou alterada, em qualquer workstream.
+A branch da norma do workspace guarda, além da norma, o `.brza/index.jsonl`: uma linha por plano (`PLN-NNN`), revisão
+(`REV-NNN`), issue (`issue:<slug>` ou `MIG-NNN`) ou decisão (`decision:<slug>`) criada ou alterada, em qualquer
+workstream.
 
-- **Quem escreve:** só o `brza note`. O `brza note plan-open` reserva o número do plano novo, e o `brza note commit`
-  acrescenta a linha quando o frontmatter, o H1 ou o caminho de uma nota muda, por commit sem checkout.
+- **Quem escreve:** só o `brza note`. `brza note plan-open`, `brza note review-open` e `brza note migration-open`
+  reservam o próximo número sequencial (`PLN-NNN`, `REV-NNN`, `MIG-NNN`) no índice sem `commit`; o primeiro
+  `brza note commit` da nota registra a transição de reserva para nota materializada (com `commit`), e os commits
+  seguintes acrescentam linha `changed` quando caminho, H1, `description`, `status`, `phase`, `opened`, `priority`,
+  `blocks`, `deadline`, `owner`, `type`, `depends_on`, `estimate_h` ou `remaining_h` mudam, sem checkout.
+- **O campo `session`:** identifica a sessão da operação que produziu a linha do índice (inclusive em
+  `brza note index --rebuild`, que registra a sessão que executa a reconstrução, sem certificar autoria histórica).
+- **A listagem (`brza note ls`):** lista issues (incluindo `MIG-NNN`) e decisões materializadas de todos os workstreams
+  pelo estado vigente do índice local (`--status open|all`, `--sort opened|priority|deadline`) e aceita `--refresh` para
+  atualizar via `fetch` antes de listar (se dados desatualizados aparecerem com frequência, o `fetch` passa a ser o
+  padrão — R12.3).
 - **A concorrência:** o `.gitattributes` liga o `merge=union`, para dois acréscimos simultâneos não conflitarem.
 - **O reparo:** o `brza note index --rebuild` reconstrói o índice pelas branches.
 

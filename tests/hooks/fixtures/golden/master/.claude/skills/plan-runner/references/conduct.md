@@ -76,9 +76,10 @@ Com todo passo `[x]` ou `[-]`: `phase: review`, `status: in_review`.
    vai à rodada com `→ falso` como opção recomendada, o porquê e a evidência que o derruba — quem executou o passo não
    derruba sozinho achado sobre o próprio trabalho. Cada achado ganha o destino, escolhido por Anderson, com as opções
    e o custo.
-3. **Grave o parecer** numa nota `work/reviews/pln-NNN-<assunto>.md`, com H1 `REV: …`, e a linha dela em `## Revisões`
-   do `PLN`; no worklog, na revisão abaixo do plano aceito. Achado com destino `corrigido aqui` vira passo novo; o resto
-   vai para a casa dona — uma issue, uma decisão, a norma do `brza-studio`.
+3. **Reserve o número e grave o parecer** com `brza note review-open <slug> --title "<título>" --description "<frase>"`,
+   numa nota `work/reviews/REV-NNN-<slug>.md`, com H1 `# REV-NNN: …`, e a linha dela em `## Revisões` do `PLN`; no
+   worklog, na revisão abaixo do plano aceito. Achado com destino `corrigido aqui` vira passo novo; o resto vai para a
+   casa dona — uma issue, uma decisão, a norma do `brza-studio`.
 4. **Casos manuais**, quando algum critério só se prova em aparelho: escreva os `C` a partir do critério, peça a quem
    tem o aparelho, e grave o Observado numa linha com o veredito.
 
