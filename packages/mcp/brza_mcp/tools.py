@@ -133,18 +133,18 @@ class Orchestrator:
 
     # ---- a conta ----
 
-    def _for(self, client):
+    def _for(self, client, user_data=None):
         """Os argumentos de cliente das chamadas ao leitor de contas: o do pedido, quando ele o trouxe."""
-        return {'client': client} if client else {}
+        return {key: value for key, value in (('client', client), ('user_data', user_data)) if value}
 
-    def normalize_account(self, name, client=None):
+    def normalize_account(self, name, client=None, user_data=None):
         """O id da conta do pedido, lido no cliente do pedido. O worker abre na conta ativa do cliente: o `worker-start`
         não tem flag de conta (X20), então outra conta é recusada com o motivo. Sem leitor de contas, vale como veio."""
         if self.accounts is None or not hasattr(self.accounts, 'find'):
             return name
         try:
-            found = self.accounts.find(name, **self._for(client))
-            active = self.accounts.find(None, **self._for(client))
+            found = self.accounts.find(name, **self._for(client, user_data))
+            active = self.accounts.find(None, **self._for(client, user_data))
         except accounts_mod.AccountError as e:
             raise ToolError(f'não consegui ler as contas do cliente para conferir {name!r}: {e}') from None
         if found is None:
@@ -155,16 +155,16 @@ class Orchestrator:
                             'tire o account do pedido')
         return found['id']
 
-    def active_account(self, client=None):
-        return self.accounts.active_id(**self._for(client)) if hasattr(self.accounts, 'active_id') else None
+    def active_account(self, client=None, user_data=None):
+        return self.accounts.active_id(**self._for(client, user_data)) if hasattr(self.accounts, 'active_id') else None
 
     def warm_accounts(self):
         """Aquece a leitura das contas, de cada cliente da fila, antes de qualquer lock: o `account list` leva até 30 s
         com o app travado, e o lock da fila segura o `status`, o `dispatch` e o ciclo."""
         warm = getattr(self.accounts, 'warm', None)
         if warm:
-            for client in {r.get('client') for r in self.queue.pending()} | {None}:
-                warm(**self._for(client))
+            for client, user_data in {(r.get('client'), r.get('user_data')) for r in self.queue.pending()} | {(None, None)}:
+                warm(**self._for(client, user_data))
 
     def prepare(self):
         """O que o ciclo faz antes de cada decisão: as contas (fora do lock) e a configuração."""
@@ -222,7 +222,7 @@ class Orchestrator:
             if user_data:  # o perfil de outro build (brza-dev): o worker abre no runtime dele
                 fields['user_data'] = user_data
             if 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
-                fields['account'] = self.normalize_account(fields['account'], client)
+                fields['account'] = self.normalize_account(fields['account'], client, user_data)
             fields.setdefault('account', '')  # sem `account`: `''`, e o `Limits` o conta na ativa da hora da admissão
             decided = self.policy.decide_model(fields, self.resolver)
             fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
@@ -263,7 +263,7 @@ class Orchestrator:
         if args.get('account') is not None:
             # com o leitor de contas, `fields['account']` já é a conta normalizada, e a que não é a ativa foi recusada
             # (X38): só a troca de verdade, ou a que não se confere (sem leitor, ou sem ativa), pede a confirmação
-            active = self.active_account(client)
+            active = self.active_account(client, fields.get('user_data'))
             if active is None or fields.get('account') != active:
                 return f'troca de conta ({args["account"]!r}) exige a confirmação de quem pediu (R5.2)'
         return None
@@ -273,8 +273,8 @@ class Orchestrator:
         account = args.get('account')
         if account is not None:
             gate = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (gate_id,))
-            client = (self.queue.get(gate[0]['request_id']) or {}).get('client') if gate else None
-            account = self.normalize_account(account, client)  # a leitura das contas pode demorar: fora do lock global
+            stored = (self.queue.get(gate[0]['request_id']) or {}) if gate else {}
+            account = self.normalize_account(account, stored.get('client'), stored.get('user_data'))  # a leitura das contas pode demorar: fora do lock global
         with self.queue.lock:  # a leitura, a conferência e a gravação são um passo só: duas aprovações não passam juntas
             rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
             if not rows:

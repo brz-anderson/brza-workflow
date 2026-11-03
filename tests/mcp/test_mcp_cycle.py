@@ -530,3 +530,44 @@ class WiringTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AccountAdmissionTest(unittest.TestCase):
+    def test_an_explicit_account_changed_while_queued_does_not_open_in_the_new_active_account(self):
+        queue = q.Queue(':memory:')
+        active = {'studio': 'A', 'orca': 'A'}
+        limits = lim.Limits({'quota.max_sessions_per_account': 1}, machine=lambda: {},
+                            active=lambda client=None: active[client],
+                            usage=lambda account, runtime, **kw: {'windows': [
+                                {'name': 'session', 'usedPercent': 99 if account == 'B' else 1}]})
+        request = add(queue, account='A', client='studio', runtime='claude')
+        active['studio'] = 'B'
+        cli_ = FakeCli()
+        scheduler = cycle.Scheduler(queue, limits, run=cli_)
+        self.assertEqual(scheduler.tick(), [])
+        self.assertEqual(cli_.calls, [])
+        self.assertEqual(queue.get(request)['state'], 'queued')
+        self.assertEqual(queue.get(request)['held_by'], 'account_active')
+        self.assertIn('B', queue.get(request)['held_reason'])
+        active['studio'] = 'A'
+        self.assertEqual(scheduler.tick(), [request])
+        queue.close()
+
+    def test_an_implicit_workers_account_stays_bound_after_the_clients_active_account_changes(self):
+        queue = q.Queue(':memory:')
+        active = {'studio': 'A', 'orca': 'A'}
+        limits = lim.Limits({'quota.max_sessions_per_account': 1}, machine=lambda: {},
+                            active=lambda client=None: active[client])
+        first = add(queue, account='', client='studio', runtime='claude')
+        scheduler = cycle.Scheduler(queue, limits, run=FakeCli())
+        self.assertEqual(scheduler.tick(), [first])
+        self.assertEqual(queue.get(first)['account'], '')
+        self.assertEqual(queue.running_count('A', 'claude'), 1)
+        active['studio'] = 'B'
+        other_client = add(queue, account='', client='orca', runtime='claude')
+        other_account = add(queue, account='', client='studio', runtime='claude')
+        self.assertEqual(scheduler.tick(), [other_account])
+        self.assertEqual(queue.get(other_client)['held_by'], 'account_sessions')
+        self.assertEqual(queue.running_count('A', 'claude'), 1)
+        self.assertEqual(queue.running_count('B', 'claude'), 1)
+        queue.close()

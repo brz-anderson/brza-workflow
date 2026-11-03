@@ -80,7 +80,7 @@ class Accounts:
     """O leitor das contas, com o `account list --json` do cliente e um cache curto (o `Limits` o chama por pedido).
 
     O cliente é o do pedido (`client`): com o Studio e o Orca de pé, a conta e o uso de um pedido do Orca vêm do Orca. O
-    cache é por cliente, e a leitura que falha também se guarda pelo mesmo TTL, para o app travado não custar 30 s a
+    cache é por cliente e perfil, e a leitura que falha também se guarda pelo mesmo TTL, para o app travado não custar 30 s a
     cada consulta."""
 
     def __init__(self, client=None, run=_runner, detect=clients.detect, ttl=30.0, clock=time.monotonic):
@@ -88,8 +88,8 @@ class Accounts:
         self._cache, self._failed = {}, {}
         self._lock = threading.Lock()
 
-    def read(self, force=False, client=None) -> dict:
-        key = client or self.client  # None: o cliente do processo vivo
+    def read(self, force=False, client=None, user_data=None) -> dict:
+        key = (client or self.client, user_data)  # o cache separa também os perfis de outro build
         with self._lock:
             now = self.clock()
             hit = self._cache.get(key)
@@ -99,20 +99,20 @@ class Accounts:
             if not force and miss and now - miss[1] < self.ttl:
                 raise AccountError(miss[0])
             try:
-                data = self._read(key)
+                data = self._read(*key)
             except AccountError as e:
                 self._failed[key] = (str(e), self.clock())
                 raise
             self._cache[key], _ = (data, self.clock()), self._failed.pop(key, None)
             return data
 
-    def _read(self, key) -> dict:
+    def _read(self, key, user_data=None) -> dict:
         name = key or self.detect()
         if name not in clients.CLIENTS:
             raise AccountError('nenhum cliente (BrzA Studio ou Orca) de pé')
         spec = clients.CLIENTS[name]
         env = {k: v for k, v in os.environ.items() if not k.startswith('ORCA_')}
-        env['ORCA_USER_DATA_PATH'] = spec['user_data']
+        env['ORCA_USER_DATA_PATH'] = user_data or spec['user_data']
         code, out, err = self.run([clients.cli_path(name), 'account', 'list', '--json'], env, 30)
         try:
             if code != 0:
@@ -121,37 +121,37 @@ class Accounts:
         except ValueError as e:
             raise AccountError(f'account list falhou: {e}') from None
 
-    def warm(self, client=None):
+    def warm(self, client=None, user_data=None):
         """Aquece o cache fora de qualquer lock; a falha fica guardada e não levanta."""
         try:
-            self.read(client=client)
+            self.read(client=client, user_data=user_data)
         except AccountError:
             pass
 
-    def accounts(self, client=None):
-        return self.read(client=client)['accounts']
+    def accounts(self, client=None, user_data=None):
+        return self.read(client=client, user_data=user_data)['accounts']
 
-    def find(self, name, data=None, client=None):
+    def find(self, name, data=None, client=None, user_data=None):
         """A conta pelo id, e-mail ou rótulo; sem nome, a ativa. None se não existe."""
-        accounts = (data or self.read(client=client))['accounts']
+        accounts = (data or self.read(client=client, user_data=user_data))['accounts']
         if not name:
             return next((a for a in accounts if a['active']), None)
         return next((a for a in accounts if name in (a['id'], a['email'], a['label'])), None)
 
-    def active_id(self, client=None):
+    def active_id(self, client=None, user_data=None):
         """O id da conta ativa do cliente, ou None se não se lê."""
         try:
-            found = self.find(None, client=client)
+            found = self.find(None, client=client, user_data=user_data)
         except AccountError:
             return None
         return found['id'] if found else None
 
-    def usage(self, account, runtime, client=None):
+    def usage(self, account, runtime, client=None, user_data=None):
         """O provedor do `Limits`: o instantâneo da conta, ou None (sem uso, sem conta ou sem cliente)."""
         if runtime not in ('', None, RUNTIME):
             return None
         try:
-            data = self.read(client=client)
+            data = self.read(client=client, user_data=user_data)
         except AccountError:
             return None
         found = self.find(account, data)

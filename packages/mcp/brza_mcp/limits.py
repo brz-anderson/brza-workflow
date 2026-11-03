@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 DEFAULT_HARD_CAP = 90.0
 MIN_SLOPE_SPAN_MS = 10 * 60_000  # sem `windowMinutes`, a inclinação só vale com 10 min de amostras
 MIN_SLOPE_WINDOW_FRACTION = 20   # com ele, com 1/20 da janela: o `usedPercent` é inteiro e dá degraus
-CEILINGS = ('workspace', 'account_sessions', 'account_quota', 'machine')
+CEILINGS = ('account_active', 'workspace', 'account_sessions', 'account_quota', 'machine')
 
 
 @dataclass
@@ -96,10 +96,11 @@ def _now_ms():
 class Limits:
     def __init__(self, config=None, usage=None, machine=read_machine, clock=_now_ms, active=None):
         self.config = config or {}
-        self.usage = usage or (lambda account, runtime, client=None: None)
+        self.usage = usage or (lambda account, runtime, client=None, user_data=None: None)
         self.machine = machine
         self.clock = clock
-        self.active = active or (lambda client=None: None)  # o id da conta ativa do cliente: a do pedido sem `account`
+        self.has_active = active is not None
+        self.active = active or (lambda client=None, user_data=None: None)  # o id da conta ativa do cliente: a do pedido sem `account`
         self.last_decision = None
         self.last_measures = {}
         self._cache = None
@@ -134,7 +135,7 @@ class Limits:
     def decide(self, request, queue) -> Decision:
         """`admit`, ou o teto que segura. A ordem dos tetos é a da R9.3; todo resultado leva as medidas."""
         measures = {}
-        decision = (self._workspace(queue, measures) or self._sessions(request, queue, measures)
+        decision = (self._account_matches(request, measures) or self._workspace(queue, measures) or self._sessions(request, queue, measures)
                     or self._quota(request, queue, measures) or self._machine(measures))
         # as medidas que a decisão não chegou a tomar ficam de fora; as da máquina entram sempre, só para registrar
         if 'machine' not in measures:
@@ -154,8 +155,24 @@ class Limits:
 
     def _active(self, request):
         """O id da conta ativa do cliente do pedido (o do `X-Brza-Client`; sem ele, o do processo vivo)."""
-        client = request.get('client')
-        return self._once(('active', client), (lambda: self.active(client=client)) if client else self.active)
+        options = self._profile(request)
+        return self._once(('active', request.get('client'), request.get('user_data')),
+                          lambda: self.active(**options))
+
+    @staticmethod
+    def _profile(request):
+        return {key: request[key] for key in ('client', 'user_data') if request.get(key)}
+
+    def _account_matches(self, request, measures):
+        account = request.get('account')
+        if not account or not self.has_active:
+            return None
+        active = self._active(request)
+        if account != active:
+            measures['account'] = {'account': account, 'active': active}
+            return Decision(False, 'account_active',
+                            f'a conta pedida {account} não é a ativa ({active or "desconhecida"}); '
+                            'o worker-start não tem flag de conta; aguarda a conta pedida ficar ativa')
 
     def _account(self, request) -> str:
         """A conta do pedido; sem ela (gravada `''`), é a ativa de agora do cliente: o worker abre nela."""
@@ -175,10 +192,9 @@ class Limits:
     def _quota(self, request, queue, measures):
         account, runtime = self._account(request), request.get('runtime') or ''
         cap = self.hard_cap()
-        client = request.get('client')
-        snapshot = self._once(('usage', account, runtime, client),
-                              (lambda: self.usage(account, runtime, client=client)) if client
-                              else (lambda: self.usage(account, runtime)))
+        options = self._profile(request)
+        snapshot = self._once(('usage', account, runtime, request.get('client'), request.get('user_data')),
+                              lambda: self.usage(account, runtime, **options))
         windows = [w for w in (snapshot or {}).get('windows') or [] if w.get('usedPercent') is not None]
         if not windows:
             measures['quota'] = {'known': False, 'cap': cap, 'windows': []}  # R2.5: só o teto de sessões vale

@@ -445,3 +445,30 @@ class SwitchTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProfileAdmissionTest(unittest.TestCase):
+    def test_profile_accounts_and_usage_have_separate_caches_and_drive_admission(self):
+        calls = []
+        def run(argv, env, timeout):
+            profile = env['ORCA_USER_DATA_PATH']
+            calls.append(profile)
+            data = copy.deepcopy(FIXTURE)
+            data['result']['claude']['activeAccountId'] = 'dev-A' if profile == '/tmp/dev-A' else 'dev-B'
+            data['result']['claude']['accounts'] = [
+                {'id': 'dev-A', 'email': 'a@example.com', 'home': '/a'},
+                {'id': 'dev-B', 'email': 'b@example.com', 'home': '/b'}]
+            data['result']['rateLimits']['claude']['session']['usedPercent'] = 10 if profile == '/tmp/dev-A' else 99
+            return 0, json.dumps(data), ''
+        accounts = acc.Accounts(client='studio', run=run)
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.max_sessions_per_account': 1}, active=accounts.active_id,
+                            usage=accounts.usage, machine=lambda: {})
+        first = queue.enqueue(task='a', role='consultant', runtime='claude', client='studio', user_data='/tmp/dev-A')
+        second = queue.enqueue(task='b', role='consultant', runtime='claude', client='studio', user_data='/tmp/dev-B')
+        self.assertEqual(queue.admit_next(limits)['id'], first)
+        self.assertEqual(queue.get(second)['held_by'], 'account_quota')
+        self.assertEqual(queue.running_count('dev-A', 'claude'), 1)
+        self.assertEqual(accounts.active_id(client='studio', user_data='/tmp/dev-B'), 'dev-B')
+        self.assertEqual(calls, ['/tmp/dev-A', '/tmp/dev-B'])
+        queue.close()

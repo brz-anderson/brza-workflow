@@ -183,9 +183,11 @@ class Queue:
                         held = (None, None)
                         if first:
                             chosen = request
-                            self._open(request['id'], session, True)
+                            self._open(request['id'], session, True,
+                                       account=decision.measures.get('account', {}).get('account'))
                         else:
-                            self._open(request['id'], None, True)  # cada admissível ocupa uma vaga para os de trás
+                            self._open(request['id'], None, True,
+                                       account=decision.measures.get('account', {}).get('account'))  # cada admissível ocupa uma vaga para os de trás
                             virtual.append(request['id'])
                     else:
                         held = (decision.ceiling, decision.reason)
@@ -199,7 +201,7 @@ class Queue:
                 self.release(request_id)
         return self.get(chosen['id']) if chosen else None
 
-    def _open(self, request_id, session, counts_as_worker):
+    def _open(self, request_id, session, counts_as_worker, account=None):
         with self.lock:
             request = self.get(request_id)
             now = time.time()
@@ -208,7 +210,7 @@ class Queue:
             if cur.rowcount != 1:
                 raise ValueError(f'o pedido {request_id} não está queued: {request["state"] if request else "não existe"}')
             self._run('INSERT INTO workers (request_id, account, runtime, session, counts_as_worker, started_at)'
-                      ' VALUES (?,?,?,?,?,?)', (request_id, request['account'] or '', request['runtime'] or '',
+                      ' VALUES (?,?,?,?,?,?)', (request_id, (request['account'] or '') if account is None else account, request['runtime'] or '',
                                                 session, 1 if counts_as_worker else 0, now))
 
     def release(self, request_id):
