@@ -59,7 +59,7 @@ aos workstreams pelo `brza note sync`, que faz o `git merge` da `master` em cada
 
 ## Quem commita é o brz-anderson
 
-Os commits deste repositório e do `brza-studio` saem com o noreply do `brz-anderson`
+Os commits deste repositório e do `brza-studio` saem com o e-mail do `brz-anderson`
 (`240569289+brz-anderson@users.noreply.github.com`) e vão ao GitHub pela chave `personal`. A identidade vem do ambiente
 da sessão, como diz o adaptador do runtime, e não depende do `.git/config`. O push vai direto, sem PR: daqui, a norma
 na `master` e as notas na branch do workstream; do `brza-studio`, na `master`.

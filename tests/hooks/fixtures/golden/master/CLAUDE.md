@@ -62,7 +62,7 @@ O `env` do `.claude/settings.json` define:
 - `GIT_SSH_COMMAND`: o `~/.ssh/config` padrão, onde mora o alias `personal`.
 
 Isso vale para os commits deste repositório e do `brza-studio`, e vence o ambiente da `fixfy-claude` que uma sessão
-herde. O `git var GIT_AUTHOR_IDENT` confere: deve sair o noreply do `brz-anderson`.
+herde. O `git var GIT_AUTHOR_IDENT` confere: deve sair o e-mail do `brz-anderson`.
 
 O `gh` usa o perfil padrão, com a conta `brz-anderson` ativa (`gh auth switch`).
 

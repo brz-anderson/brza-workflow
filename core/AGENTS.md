@@ -68,7 +68,7 @@ vai à `.claude/rules/workspace.md` ou ao `README.md` local, que se editam na `{
 
 ## Quem commita é o {{author.login}}
 
-Os commits deste repositório e do `{{code.name}}` saem com o noreply do `{{author.login}}`
+Os commits deste repositório e do `{{code.name}}` saem com o e-mail do `{{author.login}}`
 (`{{author.email}}`) e vão ao GitHub, com a chave de acesso que o `README.md` documenta. A identidade vem do
 ambiente da sessão, como diz o adaptador do runtime, e não depende do `.git/config`. O push vai direto, sem PR: daqui, a norma
 na `{{workspace.branch}}` e as notas na branch do workstream; do `{{code.name}}`, na `{{code.branch}}`.
