@@ -3,10 +3,12 @@
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp -v
 """
 import json
+import socket
 import stat
+import time
 import unittest
 
-from mcp_support import HomeCase, ServerCase, paths
+from mcp_support import HomeCase, ServerCase, paths, server
 
 
 class TokenFileTest(HomeCase):
@@ -73,6 +75,43 @@ class AuthTest(ServerCase):
         self.assertEqual(status, 404)
         self.assertIn('error', json.loads(body))
         self.assertEqual(headers['Content-Length'], str(len(body)))
+
+
+class ContentLengthTest(ServerCase):  # P1 final A3
+    def raw(self, content_length, token=True, body=b''):
+        """A primeira linha da resposta a um POST cru com o `Content-Length` dado, ou None se o servidor não responde."""
+        with socket.create_connection(('127.0.0.1', self.port), timeout=2) as s:
+            auth = f'Authorization: Bearer {self.token}\r\n' if token else ''
+            s.sendall(f'POST /mcp HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {content_length}\r\n\r\n'.encode() + body)
+            try:
+                data = s.recv(4096)
+            except socket.timeout:
+                return None
+        return data.split(b'\r\n', 1)[0].decode() or None
+
+    def test_without_the_token_the_body_is_not_read_and_the_answer_is_401_at_once(self):
+        for length in ('abc', '-1', '1000000000', '5'):
+            with self.subTest(length=length):
+                started = time.monotonic()
+                self.assertIn('401', self.raw(length, token=False))
+                self.assertLess(time.monotonic() - started, 1)
+
+    def test_a_non_numeric_or_negative_length_is_400_at_once(self):
+        for length in ('abc', '-1', '1.5'):
+            with self.subTest(length=length):
+                started = time.monotonic()
+                self.assertIn('400', self.raw(length))
+                self.assertLess(time.monotonic() - started, 1)
+
+    def test_a_length_above_the_ceiling_is_413_without_waiting_for_the_body(self):
+        started = time.monotonic()
+        self.assertIn('413', self.raw(str(server.MAX_BODY + 1)))
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_a_length_at_the_ceiling_is_accepted_and_the_normal_post_still_works(self):
+        status, _, body = self.request('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'ping'})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['result'], {})
 
 
 if __name__ == '__main__':

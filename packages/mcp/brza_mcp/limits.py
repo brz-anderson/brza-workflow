@@ -96,10 +96,10 @@ def _now_ms():
 class Limits:
     def __init__(self, config=None, usage=None, machine=read_machine, clock=_now_ms, active=None):
         self.config = config or {}
-        self.usage = usage or (lambda account, runtime: None)
+        self.usage = usage or (lambda account, runtime, client=None: None)
         self.machine = machine
         self.clock = clock
-        self.active = active or (lambda: None)  # o id da conta ativa do cliente: a do pedido sem `account`
+        self.active = active or (lambda client=None: None)  # o id da conta ativa do cliente: a do pedido sem `account`
         self.last_decision = None
         self.last_measures = {}
         self._cache = None
@@ -152,14 +152,19 @@ class Limits:
         if cap is not None and running >= cap:
             return Decision(False, 'workspace', f'{running} workers abertos, orchestrator.max_workers = {cap}')
 
+    def _active(self, request):
+        """O id da conta ativa do cliente do pedido (o do `X-Brza-Client`; sem ele, o do processo vivo)."""
+        client = request.get('client')
+        return self._once(('active', client), (lambda: self.active(client=client)) if client else self.active)
+
     def _account(self, request) -> str:
-        """A conta do pedido; sem ela, é a ativa do cliente (o worker abre nela)."""
-        return request.get('account') or self._once('active', lambda: self.active()) or ''
+        """A conta do pedido; sem ela (gravada `''`), é a ativa de agora do cliente: o worker abre nela."""
+        return request.get('account') or self._active(request) or ''
 
     def _sessions(self, request, queue, measures):
         account, runtime = self._account(request), request.get('runtime') or ''
         sessions, cap = queue.running_count(account, runtime), self.get('quota.max_sessions_per_account')
-        if account and account == self._once('active', lambda: self.active()):
+        if account and account == self._active(request):
             sessions += queue.running_count('', runtime)  # o worker aberto sem `account` também é da ativa
         measures['account'] = {'account': account, 'runtime': runtime, 'sessions': sessions, 'max_sessions': cap}
         if cap is not None and sessions >= cap:
@@ -170,7 +175,10 @@ class Limits:
     def _quota(self, request, queue, measures):
         account, runtime = self._account(request), request.get('runtime') or ''
         cap = self.hard_cap()
-        snapshot = self._once(('usage', account, runtime), lambda: self.usage(account, runtime))
+        client = request.get('client')
+        snapshot = self._once(('usage', account, runtime, client),
+                              (lambda: self.usage(account, runtime, client=client)) if client
+                              else (lambda: self.usage(account, runtime)))
         windows = [w for w in (snapshot or {}).get('windows') or [] if w.get('usedPercent') is not None]
         if not windows:
             measures['quota'] = {'known': False, 'cap': cap, 'windows': []}  # R2.5: só o teto de sessões vale

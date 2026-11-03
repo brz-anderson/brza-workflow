@@ -184,6 +184,28 @@ class QuotaTest(unittest.TestCase):
         self.assertIsNotNone(queue.next_admissible(limits))
         self.assertEqual(limits.last_measures['quota']['windows'][0]['projected'], 11)
 
+    def test_a_weekly_step_of_one_point_in_a_quarter_of_an_hour_does_not_hold_the_account(self):  # P2 final A4
+        weekly = {'name': 'weekly', 'usedPercent': 29, 'resetsAt': RESETS, 'windowMinutes': 10080}
+        clock = Clock(RESETS - 5 * 24 * 3_600_000)  # o reset daqui a 5 dias
+        usage = Usage({'account': 'a1', 'runtime': 'claude', 'windows': [dict(weekly)]})
+        queue, limits = setup({'quota.hard_cap_percent': 90}, usage=usage, clock=clock)
+        add(queue)
+        queue.next_admissible(limits)
+        clock.advance(15)
+        usage.snapshot['windows'][0]['usedPercent'] = 30  # o degrau do inteiro, sem ser inclinação (15 min < 1/20 da janela)
+        self.assertIsNotNone(queue.next_admissible(limits))
+        self.assertEqual(limits.last_measures['quota']['windows'][0]['projected'], 30)
+
+    def test_a_worker_opened_with_the_explicit_active_account_holds_a_request_without_account(self):  # P2 final A3
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.max_sessions_per_account': 1}, usage=Usage(None), machine=machine(),
+                            clock=Clock(), active=lambda: 'ADM')
+        queue.mark_running(queue.enqueue(task='velho', role='consultant', account='ADM', runtime='claude'))
+        waiting = queue.enqueue(task='novo', role='consultant', runtime='claude')  # sem account: conta como a ativa
+        self.assertIsNone(queue.next_admissible(limits))
+        self.assertEqual(queue.get(waiting)['held_by'], 'account_sessions')
+        self.assertEqual(limits.last_measures['account']['account'], 'ADM')
+
     def test_a_vanished_window_is_pruned_on_the_next_record(self):  # P2 O-A12
         queue = q.Queue(':memory:')
         queue.record_usage(snap(5, resets=1_000_000), 900_000)
@@ -223,7 +245,10 @@ class QuotaTest(unittest.TestCase):
     def test_the_orca_fixture_shapes_a_snapshot(self):
         data = json.loads(FIXTURE.read_text())
         self.assertEqual(set(data), {'id', 'ok', 'result', '_meta'})  # o envelope do `--json`
-        self.assertTrue(all(e['email'].endswith('@example.com') for e in data['result']['accounts']['claude']))
+        self.assertTrue(all(e['email'].endswith('@example.com') for e in data['result']['claude']['accounts']))
+        self.assertEqual(set(data['result']), {'opencode', 'devin', 'claude', 'codex', 'rateLimits'})  # a forma real
+        self.assertEqual({'accounts', 'activeAccountId', 'systemDefaultHome', 'systemDefaultEmail'},
+                         set(data['result']['claude']))
         claude = data['result']['rateLimits']['claude']
         windows = [{'name': n, 'usedPercent': claude[n]['usedPercent'], 'resetsAt': claude[n]['resetsAt']}
                    for n in ('session', 'weekly', 'fableWeekly') if claude.get(n)]

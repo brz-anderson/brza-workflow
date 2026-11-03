@@ -17,6 +17,7 @@ O `/v1/systemone` do Ollama 0.40 (medido na máquina): `{"model", "keep_alive", 
 """
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import subprocess
@@ -54,9 +55,16 @@ def run_claude(argv, input, env, timeout):  # noqa: A002
 
 
 def claude_env():
-    """O ambiente mínimo do H2: a conta `systemDefault` vai sem `CLAUDE_CONFIG_DIR`."""
+    """O ambiente mínimo do H2: a conta `systemDefault` vai sem `CLAUDE_CONFIG_DIR`. O `USER` e o `LOGNAME` vêm do
+    `getpass` e não do ambiente (o launchd não os dá ao agente): sem eles o `claude -p` não autentica ("OAuth session
+    expired") e todo desempate cairia no `fallback`."""
     from .accounts import claude_env as account_env
-    return account_env(None, {k: os.environ[k] for k in ('HOME', 'PATH', 'LANG') if k in os.environ})
+    base = {k: os.environ[k] for k in ('HOME', 'PATH', 'LANG') if k in os.environ}
+    try:
+        base['USER'] = base['LOGNAME'] = getpass.getuser()
+    except (KeyError, OSError):  # sem entrada de usuário na máquina: segue sem, e o motivo vai à linha `route`
+        pass
+    return account_env(None, base)
 
 
 class Resolver:
@@ -93,10 +101,12 @@ class Resolver:
                 return self._answer(start, tev1['choice'], 'tev1', tev1_conf, 'tev1', tev1_conf)
         else:
             reason = 'sem resposta do tev1'
-        haiku = self._haiku(text)
+        haiku, error = self._haiku(text)
         if haiku is not None:
             return self._answer(start, haiku, 'haiku', None, f'{reason}; Haiku', tev1_conf)
-        return self._answer(start, None, 'fallback', None, f'{reason}; sem resposta do Haiku: fica a tabela', tev1_conf)
+        why = f' ({error})' if error else ''
+        return self._answer(start, None, 'fallback', None, f'{reason}; sem resposta do Haiku{why}: fica a tabela',
+                            tev1_conf)
 
     def _answer(self, start, layer, path, confidence, reason, tev1_conf):
         return {'layer': layer, 'path': path, 'confidence': confidence, 'ms': round((self.clock() - start) * 1000),
@@ -116,17 +126,29 @@ class Resolver:
         return {'choice': choice, 'confidence': confidence} if choice in LAYERS else None
 
     def _haiku(self, text):
+        """`(camada, erro)`: a camada, ou None com o motivo que o `claude` deu (o `result` do JSON de erro)."""
         argv = ['claude', '-p', '--model', 'haiku', '--effort', 'low', '--output-format', 'json',
                 '--json-schema', json.dumps(LAYER_SCHEMA), '--max-budget-usd',
                 str(self._get('resolver.haiku_max_budget_usd', 0.01)), '--no-session-persistence']
         try:
             code, out = self.claude(argv, HAIKU_PROMPT + text, claude_env(), CLAUDE_TIMEOUT)
             if code != 0:
-                return None
+                return None, self._claude_error(out) or f'saída {code}'
             choice = json.loads(out)['structured_output']['choice']
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, str(e)[:120]
+        except (ValueError, KeyError, TypeError):
+            return None, 'resposta fora do formato'
+        return (choice, None) if choice in LAYERS else (None, f'camada {choice!r} desconhecida')
+
+    @staticmethod
+    def _claude_error(out):
+        """O `result` do JSON que o `claude -p` imprime ao falhar, cortado: diz a causa (autenticação, orçamento)."""
+        try:
+            result = json.loads(out).get('result')
+        except (ValueError, AttributeError, TypeError):
             return None
-        return choice if choice in LAYERS else None
+        return result.strip()[:120] if isinstance(result, str) and result.strip() else None
 
 
 def choose_account(candidates, hard_cap=90.0, margin=5.0, soft_cap=None) -> dict:
@@ -140,6 +162,8 @@ def choose_account(candidates, hard_cap=90.0, margin=5.0, soft_cap=None) -> dict
     """
     usage = {name: max(windows) for name, windows in candidates.items() if windows}
     open_ = {n: u for n, u in usage.items() if u < hard_cap}
+    if not usage:
+        return {'account': None, 'reason': 'nenhuma conta com leitura de uso'}
     if not open_:
         return {'account': None, 'reason': f'todas as contas no teto de {hard_cap:g}%'}
     if soft_cap is not None:

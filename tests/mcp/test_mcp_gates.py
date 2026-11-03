@@ -51,6 +51,25 @@ class GateTest(ToolsCase):
         self.assertEqual((row['state'], row['role'], row['priority']), ('queued', 'executor', 'low'))
         self.assertEqual(len(self.queue.pending()), 1)
 
+    def test_the_gate_with_a_ref_reads_the_index_outside_the_queue_lock(self):  # P3 final A3
+        seen = []
+        real = self.service.index_reader
+
+        def slow(workspace):
+            seen.append(self.queue.lock._is_owned())  # o lock da fila não está com esta thread durante o `git show`
+            return real(workspace)
+        self.service.index_reader = slow
+        self.gate({'task': 't', 'role': 'executor', 'ref': 'PLN-9'})
+        self.assertEqual(seen, [False])
+        self.assertEqual(self.queue._all("SELECT priority FROM requests")[0]['priority'], 'low')  # o índice valeu
+
+    def test_the_approved_reply_carries_the_policy_reason_of_the_gate(self):  # P3 final A4, P4 final A6
+        gate = self.gate({'task': 't', 'role': 'executor'})
+        self.assertTrue(gate['proposal']['reason'])
+        _, out = self.call('dispatch', {'task': 't', 'role': 'executor', 'approved': gate['id']}, session='s1')
+        self.assertEqual(out['reason'], gate['proposal']['reason'])
+        self.assertEqual((out['model'], out['effort']), (gate['proposal'].get('model'), gate['proposal'].get('effort')))
+
     def test_an_unknown_id_is_an_error(self):
         err, out = self.call('dispatch', {'task': 't', 'role': 'executor', 'approved': 'gate-x'}, session='s1')
         self.assertTrue(err)
@@ -138,7 +157,7 @@ class GateTest(ToolsCase):
         from brza_mcp.registry import ToolRegistry
         other = ToolRegistry()
         tools.install(other, queue=self.queue, limits=self.limits, workspace='/ws', index_reader=lambda w: '',
-                      telemetry=Telemetry(None))
+                      telemetry=Telemetry(None, log=lambda m: None))
         from brza_mcp.registry import CallContext
         out = other.call('dispatch', {'task': 't', 'role': 'executor', 'approved': gate['id']}, CallContext('s1'))
         self.assertFalse(out['isError'])

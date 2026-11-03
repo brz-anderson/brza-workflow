@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import signal
@@ -27,7 +28,7 @@ def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=c
     service = tools.install(registry, queue=queue, limits=limits, resolver=resolver, accounts=accounts)
     if with_resolver and resolver is None:
         service.resolver = resolver_mod.Resolver(config=service.policy.config)
-    scheduler = cycle.Scheduler(queue, limits, run=run, prepare=service.sync_limits, interval=interval,
+    scheduler = cycle.Scheduler(queue, limits, run=run, prepare=service.prepare, interval=interval,
                                 log=lambda m: print(m, file=sys.stderr, flush=True), telemetry=service.telemetry,
                                 **({'detect': detect} if detect else {}))
     service.on_queued = scheduler.kick
@@ -58,16 +59,31 @@ def serve(port: int):
         info.unlink(missing_ok=True)
 
 
+class OutOfContract(Exception):
+    """O servidor respondeu, mas não como o `brza-mcp` (outro servidor na porta, ou um daemon de versão antiga)."""
+
+
 def call_config(args, timeout=5.0):
-    """A ferramenta `config` do servidor de pé, por HTTP com o token: o resultado decodificado; OSError se está parado."""
+    """A ferramenta `config` do servidor de pé, por HTTP com o token: o resultado decodificado; OSError se está parado;
+    `OutOfContract` se algo responde, mas não como o `brza-mcp`."""
     body = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'config', 'arguments': args}}
     req = urllib.request.Request(f'http://127.0.0.1:{paths.active_port()}/mcp', data=json.dumps(body).encode(),
                                  headers={'Authorization': f'Bearer {paths.read_token()}',
                                           'Content-Type': 'application/json'})
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
-        result = json.load(r)['result']
-    text = result['content'][0]['text']
-    return result.get('isError', False), (json.loads(text) if not result.get('isError') else text)
+        try:
+            message = json.load(r)
+        except ValueError:
+            raise OutOfContract('a resposta não é JSON') from None
+    if not isinstance(message, dict) or 'result' not in message:
+        error = message.get('error') if isinstance(message, dict) else None
+        raise OutOfContract((error or {}).get('message') if isinstance(error, dict) else 'a resposta não é um resultado')
+    try:
+        result = message['result']
+        text = result['content'][0]['text']
+        return result.get('isError', False), (json.loads(text) if not result.get('isError') else text)
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise OutOfContract('o resultado não tem o formato da ferramenta') from None
 
 
 def parse_value(text):
@@ -86,7 +102,15 @@ def config_command(key, value):
         print(f'brza mcp config: o servidor recusou o pedido (HTTP {e.code}'
               f'{", o token não vale: brza mcp token" if e.code == 401 else ""})', file=sys.stderr)
         sys.exit(1)
-    except (OSError, ValueError, KeyError):
+    except OutOfContract as e:  # algo escuta e responde, mas não é o `brza-mcp`: `start` esbarraria na porta ocupada
+        print(f'brza mcp config: o servidor em 127.0.0.1:{paths.active_port()} respondeu fora do contrato: {e}',
+              file=sys.stderr)
+        sys.exit(1)
+    except http.client.HTTPException as e:  # o que escuta não fala HTTP
+        print(f'brza mcp config: o servidor em 127.0.0.1:{paths.active_port()} respondeu fora do contrato: {e}',
+              file=sys.stderr)
+        sys.exit(1)
+    except OSError:  # recusou a conexão, estourou o tempo ou caiu: parado
         print('brza-mcp parado: o servidor não responde (brza mcp start)', file=sys.stderr)
         sys.exit(3)
     if is_error:
@@ -111,7 +135,7 @@ def main(argv=None):
     p.add_argument('value', nargs='?', help='valor em JSON (false, 3, "opus"); null apaga a sobreposição')
     a = ap.parse_args(argv)
     if a.cmd == 'serve':
-        serve(paths.default_port(a.port))
+        serve(paths.default_port(a.port, lenient=True))
     elif a.cmd == 'start':
         try:
             data = launchd.start(a.timeout)

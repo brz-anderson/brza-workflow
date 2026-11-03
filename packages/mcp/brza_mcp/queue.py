@@ -21,13 +21,13 @@ STATES = ('queued', 'gated', 'running', 'done', 'failed', 'cancelled')
 PRIORITIES = ('high', 'medium', 'low')
 _PRIORITY_RANK = {p: i for i, p in enumerate(PRIORITIES)}
 _FIELDS = ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref', 'deadline', 'blocks',
-           'priority', 'caller', 'client')
+           'priority', 'caller', 'client', 'user_data')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task TEXT NOT NULL, role TEXT NOT NULL, target TEXT, runtime TEXT, model TEXT, effort TEXT, account TEXT,
-    ref TEXT, deadline TEXT, blocks TEXT NOT NULL DEFAULT '[]', priority TEXT, caller TEXT, client TEXT,
+    ref TEXT, deadline TEXT, blocks TEXT NOT NULL DEFAULT '[]', priority TEXT, caller TEXT, client TEXT, user_data TEXT,
     state TEXT NOT NULL DEFAULT 'queued', held_by TEXT, held_reason TEXT,
     created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL, error TEXT
 );
@@ -100,7 +100,7 @@ class Queue:
         with self.lock:
             self.conn.executescript(SCHEMA)
             columns = {r['name'] for r in self.conn.execute('PRAGMA table_info(requests)')}
-            for name in ('client', 'error'):  # o banco do P2 a P4 não os tem
+            for name in ('client', 'error', 'user_data'):  # o banco do P2 a P4 não os tem
                 if name not in columns:
                     self.conn.execute(f'ALTER TABLE requests ADD COLUMN {name} TEXT')
             self.conn.commit()
@@ -122,7 +122,7 @@ class Queue:
     # ---- pedidos ----
 
     def enqueue(self, *, task, role, target=None, runtime=None, model=None, effort=None, account=None, ref=None,
-                deadline=None, blocks=None, priority=None, caller=None, client=None, state='queued', index=None) -> int:
+                deadline=None, blocks=None, priority=None, caller=None, client=None, user_data=None, state='queued', index=None) -> int:
         """Grava o pedido. O que veio no `dispatch` vence o índice; `index(ref)` completa o que faltou."""
         if state not in STATES:
             raise ValueError(f'state inválido: {state!r}')
@@ -135,9 +135,9 @@ class Queue:
         now = time.time()
         cur = self._run(
             'INSERT INTO requests (task, role, target, runtime, model, effort, account, ref, deadline, blocks,'
-            ' priority, caller, client, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            ' priority, caller, client, user_data, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (task, role, target, runtime, model, effort, account, ref, deadline, json.dumps(list(blocks or [])),
-             priority, caller, client, state, now, now))
+             priority, caller, client, user_data, state, now, now))
         return cur.lastrowid
 
     def get(self, request_id):
@@ -169,7 +169,7 @@ class Queue:
 
     def _admit(self, limits, reserve, session=None, exclude=()):
         scope = getattr(limits, 'scope', None)
-        chosen, virtual = None, []
+        chosen, virtual, failed = None, [], False
         try:
             with (scope() if scope else contextlib.nullcontext()):
                 for request in self.pending():
@@ -191,8 +191,11 @@ class Queue:
                         held = (decision.ceiling, decision.reason)
                     if held != (request['held_by'], request['held_reason']):
                         self._run('UPDATE requests SET held_by = ?, held_reason = ? WHERE id = ?', (*held, request['id']))
+        except BaseException:
+            failed = True  # a passada caiu depois do escolhido: o chamador não recebe o id, e a vaga não pode ficar presa
+            raise
         finally:
-            for request_id in virtual + ([chosen['id']] if chosen and not reserve else []):
+            for request_id in virtual + ([chosen['id']] if chosen and (not reserve or failed) else []):
                 self.release(request_id)
         return self.get(chosen['id']) if chosen else None
 

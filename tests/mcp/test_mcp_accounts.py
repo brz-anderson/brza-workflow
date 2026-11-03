@@ -5,6 +5,8 @@
 import copy
 import json
 import os
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -44,6 +46,12 @@ class ParseTest(unittest.TestCase):
                          [('session', 10, 1793701800586), ('weekly', 29, 1794114000586),
                           ('fableWeekly', 0, 1794114000000)])  # `monthly: null` fica de fora
         self.assertNotIn(ADM, data['usage'])  # a conta sem uso fica sem instantâneo
+
+    def test_only_the_real_shape_is_read_and_the_accounts_outside_claude_are_ignored(self):  # P2 final A2
+        old = copy.deepcopy(FIXTURE)
+        old['result']['accounts'] = {'claude': old['result']['claude']['accounts']}  # a forma inventada da fixture antiga
+        del old['result']['claude']['accounts']
+        self.assertEqual([a['id'] for a in acc.parse(old)['accounts']], ['systemDefault'])
 
     def test_the_full_shape_gives_homes_labels_and_the_inactive_usage(self):
         data = acc.parse(full())
@@ -146,10 +154,60 @@ class AccountRulesTest(ToolsCase):
         self.limits.active = self.accounts.active_id
 
     def approve(self, args):
+        """O `dispatch`; o que abre gate se aprova pelo mesmo chamador, o que entra direto volta como veio."""
         _, out = self.call('dispatch', args, session='s1')
-        self.assertIn('gate', out)
+        if 'gate' not in out:
+            return out
         _, ok = self.call('dispatch', {**args, 'approved': out['gate']['id']}, session='s1')
         return ok
+
+    def test_the_account_gate_opens_only_for_a_real_swap_and_the_active_account_goes_straight_in(self):  # P3 final A2
+        _, out = self.call('dispatch', {'task': 'a', 'role': 'consultant'}, session='s1')  # sem account
+        self.assertEqual((out['state'], self.queue.get(out['request'])['account']), ('queued', ''))
+        for name in (self.EMAIL, ADM):  # o rótulo, o e-mail ou o id da própria conta ativa
+            _, out = self.call('dispatch', {'task': 'b', 'role': 'consultant', 'account': name}, session='s1')
+            self.assertNotIn('gate', out)
+            self.assertEqual(self.queue.get(out['request'])['account'], ADM)
+        err, out = self.call('dispatch', {'task': 'c', 'role': 'consultant', 'account': self.OTHER}, session='s1')
+        self.assertTrue(err)  # a troca real segue recusada: o `worker-start` não tem flag de conta
+        self.assertIn('conta ativa', out)
+        self.assertEqual(len(self.queue._all('SELECT id FROM requests')), 3)
+
+    def test_an_active_account_that_cannot_be_read_keeps_the_swap_gate(self):  # P3 final A2
+        self.service.accounts = type('NoActive', (), {'find': lambda self, name=None: (
+            {'id': 'x', 'label': 'x'} if name else None)})()
+        _, out = self.call('dispatch', {'task': 'a', 'role': 'consultant', 'account': 'x'}, session='s1')
+        self.assertIn('gate', out)
+
+    def test_the_approval_normalizes_the_account_and_does_not_hold_the_queue_lock_while_reading_it(self):  # P3 final A3
+        _, out = self.call('dispatch', {'task': 'a', 'role': 'executor', 'account': self.EMAIL}, session='s1')
+        gate_id = out['gate']['id']
+        real, started, release = self.accounts, threading.Event(), threading.Event()
+
+        class Slow:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def find(self, name, data=None):
+                if name:
+                    started.set()
+                    release.wait(3)
+                return real.find(name, data)
+        self.service.accounts = Slow()
+        done = []
+        t = threading.Thread(target=lambda: done.append(self.call('dispatch', {
+            'task': 'a', 'role': 'executor', 'account': self.EMAIL, 'approved': gate_id}, session='s1')))
+        t.start()
+        self.assertTrue(started.wait(3))
+        began = time.monotonic()
+        got = self.queue.lock.acquire(timeout=0.5)  # outra thread precisa do lock enquanto a leitura das contas demora
+        if got:
+            self.queue.lock.release()
+        self.assertTrue(got)
+        self.assertLess(time.monotonic() - began, 0.4)
+        release.set()
+        t.join(5)
+        self.assertEqual(done[0][1]['state'], 'queued')
 
     def test_an_account_that_is_not_the_active_one_is_refused_with_the_reason(self):  # P5 O-A1
         err, out = self.call('dispatch', {'task': 't', 'role': 'consultant', 'account': self.OTHER}, session='s1')
@@ -170,10 +228,22 @@ class AccountRulesTest(ToolsCase):
 
     def test_a_request_without_account_counts_in_the_active_account(self):  # P5 O-A4 / P2 O-A7
         _, first = self.call('dispatch', {'task': 'a', 'role': 'consultant'}, session='s1')
-        self.assertEqual(self.queue.get(first['request'])['account'], ADM)
+        self.assertEqual(self.queue.get(first['request'])['account'], '')  # P5 final ponto 1: a ativa da hora da admissão
         self.queue.mark_running(first['request'])
         _, second = self.call('dispatch', {'task': 'b', 'role': 'consultant'}, session='s1')
         self.assertEqual(second['held_by'], 'account_sessions')
+
+    def test_a_request_without_account_follows_the_active_account_of_the_admission_time(self):  # P5 final ponto 1
+        self.queue.mark_running(self.queue.enqueue(task='velho', role='consultant', account=self.OTHER, runtime='claude'))
+        _, waiting = self.call('dispatch', {'task': 'novo', 'role': 'consultant'}, session='s1')
+        self.assertIsNone(waiting['held_by'])  # a ativa é a ADM, e o worker aberto é da OTHER
+        payload = full()
+        payload['result']['claude'].update(activeAccountId=self.OTHER, accounts=[
+            {'id': ADM, 'email': self.EMAIL, 'home': HOME}, {'id': self.OTHER, 'email': 'outra@example.com', 'home': '/h2'}])
+        self.accounts.run = lambda argv, env, t: (0, json.dumps(payload), '')
+        self.accounts.read(force=True)  # o app trocou a conta ativa antes de a vaga abrir
+        self.assertIsNone(self.queue.next_admissible(self.limits))
+        self.assertEqual(self.queue.get(waiting['request'])['held_by'], 'account_sessions')
 
     def test_the_limits_count_a_worker_opened_without_account_as_the_active_one(self):  # P2 O-A7
         self.queue.mark_running(self.queue.enqueue(task='velho', role='consultant', runtime='claude'))  # conta ''
@@ -184,6 +254,97 @@ class AccountRulesTest(ToolsCase):
     def test_the_approval_may_name_the_account_by_email(self):
         ok = self.approve({'task': 'a', 'role': 'consultant', 'account': self.EMAIL})
         self.assertEqual(ok['state'], 'queued')
+
+
+class ClientOfTheRequestTest(unittest.TestCase):  # P5 final A5
+    def setUp(self):
+        self.seen = []
+        studio, orca = full(), full()
+        studio['result']['claude'].update(activeAccountId=None)
+        orca['result']['claude'].update(activeAccountId='orca-conta', accounts=[
+            {'id': 'orca-conta', 'email': 'orca@example.com', 'home': '/o'}])
+        orca['result']['rateLimits'] = {'claude': {'session': {'usedPercent': 77, 'windowMinutes': 300,
+                                                               'resetsAt': 2_000_000_000_000}}}
+
+        def run(argv, env, timeout):
+            self.seen.append(env['ORCA_USER_DATA_PATH'])
+            return 0, json.dumps(orca if env['ORCA_USER_DATA_PATH'].endswith('/orca') else studio), ''
+        self.accounts = acc.Accounts(run=run, detect=lambda: 'studio')  # os dois apps de pé: o detect dá o Studio
+
+    def test_the_active_account_and_the_usage_come_from_the_client_of_the_request(self):
+        self.assertEqual(self.accounts.active_id(), 'systemDefault')
+        self.assertEqual(self.accounts.active_id(client='orca'), 'orca-conta')
+        self.assertEqual(self.accounts.usage('orca-conta', 'claude', client='orca')['windows'][0]['usedPercent'], 77)
+        self.assertIsNone(self.accounts.usage('orca-conta', 'claude'))  # o Studio não conhece a conta do Orca
+
+    def test_the_limits_judge_a_request_of_the_orca_with_the_accounts_and_the_usage_of_the_orca(self):
+        limits = lim.Limits({'quota.hard_cap_percent': 70}, usage=self.accounts.usage, machine=lambda: {},
+                            active=self.accounts.active_id)
+        queue = q.Queue(':memory:')
+        studio = queue.enqueue(task='a', role='consultant', runtime='claude', client='studio')
+        orca = queue.enqueue(task='b', role='consultant', runtime='claude', client='orca')
+        self.assertEqual(queue.next_admissible(limits)['id'], studio)  # a ativa do Studio está em 10%
+        queue.mark_running(studio)
+        self.assertIsNone(queue.next_admissible(limits))  # a do Orca está em 77%, acima do teto de 70
+        self.assertEqual(queue.get(orca)['held_by'], 'account_quota')
+        self.assertEqual(limits.last_measures['account']['account'], 'orca-conta')
+
+    def test_the_cache_is_per_client_and_a_failure_is_not_repeated_within_the_ttl(self):  # P5 final A6
+        now, calls = [0.0], []
+
+        def run(argv, env, timeout):
+            calls.append(env['ORCA_USER_DATA_PATH'])
+            return 1, '', 'app travado'
+        accounts = acc.Accounts(run=run, detect=lambda: 'studio', clock=lambda: now[0])
+        for _ in range(3):
+            with self.assertRaises(acc.AccountError):
+                accounts.read()
+        self.assertEqual(len(calls), 1)  # a falha também fica em cache pelo TTL
+        with self.assertRaises(acc.AccountError):
+            accounts.read(client='orca')
+        self.assertEqual(len(calls), 2)
+        now[0] = 31.0
+        with self.assertRaises(acc.AccountError):
+            accounts.read()
+        self.assertEqual(len(calls), 3)
+        accounts.warm()  # o `warm` não levanta
+        self.assertEqual(len(calls), 3)
+
+
+class WarmBeforeTheLockTest(ToolsCase):  # P5 final A6
+    def test_status_and_queued_warm_the_accounts_before_taking_the_queue_lock(self):
+        started, release = threading.Event(), threading.Event()
+        holders = []
+
+        class Slow:
+            def warm(self, client=None):
+                holders.append(self_.queue.lock._is_owned())
+                started.set()
+                release.wait(3)
+
+            def find(self, name, data=None, client=None):
+                return None
+
+            def active_id(self, client=None):
+                return None
+        self_ = self
+        self.service.accounts = Slow()
+        t = threading.Thread(target=lambda: self.call('status', session='s1'))
+        t.start()
+        self.assertTrue(started.wait(3))
+        got = self.queue.lock.acquire(timeout=0.5)  # a leitura lenta das contas não segura a fila
+        if got:
+            self.queue.lock.release()
+        self.assertTrue(got)
+        release.set()
+        t.join(5)
+        self.assertEqual(holders, [False])
+
+    def test_the_scheduler_prepare_warms_the_accounts_too(self):
+        warmed = []
+        self.service.accounts = type('W', (), {'warm': lambda self, client=None: warmed.append(client)})()
+        self.service.prepare()
+        self.assertEqual(warmed, [None])
 
 
 class StatusFinishedTest(ToolsCase):
@@ -200,6 +361,18 @@ class StatusFinishedTest(ToolsCase):
         got = {r['task']: (r['state'], r.get('error')) for r in st['finished']}
         self.assertEqual(got, {'a': ('done', None), 'b': ('failed', 'orchestration worker-start falhou: boom')})
         self.assertEqual(self.call('status')[1]['finished'], [])
+
+    def test_the_finished_follows_the_same_caller_as_the_dispatch_header_stripped_or_the_argument(self):  # P3 A5, P5 A7
+        a = self.queue.enqueue(task='a', role='consultant', caller='arg-1')
+        b = self.queue.enqueue(task='b', role='consultant', caller='s1')
+        for rid in (a, b):
+            self.queue.mark_running(rid)
+            self.queue.mark_done(rid)
+        self.assertEqual([r['task'] for r in self.call('status', {'caller': 'arg-1'})[1]['finished']], ['a'])
+        self.assertEqual([r['task'] for r in self.call('status', session=' s1 ')[1]['finished']], ['b'])
+        # o header vence o argumento, como no `dispatch`
+        self.assertEqual([r['task'] for r in self.call('status', {'caller': 'arg-1'}, session='s1')[1]['finished']], ['b'])
+        self.assertEqual(self.call('status', {'caller': '  '})[1]['finished'], [])
 
     def test_a_queued_request_that_cannot_open_shows_why(self):  # P5 F-A5
         rid = self.queue.enqueue(task='a', role='consultant', caller='s1')

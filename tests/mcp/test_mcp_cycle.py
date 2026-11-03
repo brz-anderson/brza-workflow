@@ -26,10 +26,13 @@ class FakeCli:
         self.task_status = 'dispatched'
         self.fail = {}
         self.fail_body = {}  # o corpo extra do erro de um verbo, como o `dispatchId` do worker-start que falhou
+        self.raw = {}  # a resposta crua de um verbo, como o app a imprime: `(código, stdout, stderr)`
 
     def __call__(self, argv, env, timeout):
         self.calls.append((argv, env))
         verb = argv[2]
+        if verb in self.raw:
+            return self.raw[verb]
         if verb in self.fail:
             return 1, json.dumps({'ok': False, 'error': {'code': self.fail[verb]}, **self.fail_body.get(verb, {})}), ''
         result = {'run-create': {'runId': 'run_1'}, 'task-create': {'taskId': 'task_1'},
@@ -187,6 +190,27 @@ class OpenTest(unittest.TestCase):
         scheduler.tick()
         self.assertEqual(queue.get(rid)['state'], 'done')
 
+    def test_the_real_outcome_unknown_of_the_app_has_no_error_key_and_keeps_the_worker(self):  # P5 final A1
+        queue, scheduler, cli_ = make()
+        rid = add(queue, client='studio')
+        # o app imprime `{ok: false, result: {state, dispatchId}}`, e o código só vai ao stderr
+        cli_.raw['worker-start'] = (1, json.dumps({'ok': False, 'result': {
+            'state': 'outcome_unknown', 'dispatchId': 'disp_7', 'taskId': 'task_1'}}),
+            'error: start_outcome_unknown: the launch may have started')
+        self.assertEqual(scheduler.tick(), [rid])
+        self.assertEqual(queue.get(rid)['state'], 'running')
+        self.assertNotIn('worker-release', cli_.verbs())
+        self.assertNotIn('task-update', cli_.verbs())
+        state = json.loads(queue._all('SELECT session FROM workers')[0]['session'])
+        self.assertEqual((state['task'], state['dispatch']), ('task_1', 'disp_7'))
+
+    def test_an_outcome_unknown_known_only_by_the_stderr_code_also_keeps_the_worker(self):  # P5 final A1
+        queue, scheduler, cli_ = make()
+        rid = add(queue, client='studio')
+        cli_.raw['worker-start'] = (1, '', 'error: start_outcome_unknown: do not resend')
+        self.assertEqual(scheduler.tick(), [rid])
+        self.assertEqual(queue.get(rid)['state'], 'running')
+
     def test_a_worker_left_without_a_session_by_a_crash_is_released_at_the_start(self):
         queue, scheduler, _ = make()
         rid = add(queue)  # sem cliente: a primeira volta da thread não o reabre
@@ -257,6 +281,20 @@ class EndTest(unittest.TestCase):
         self.assertIn('sumiu', row['error'])
         self.assertEqual(queue.running_count(), 0)
 
+    def test_a_client_that_is_down_does_not_fail_the_running_requests(self):  # P5 final A2
+        queue, scheduler, cli_ = make()
+        rid = add(queue, client='studio')
+        scheduler.tick()
+        # o app fechado: o CLI responde JSON com `runtime_unavailable` a toda consulta, inclusive o `worker-show`
+        cli_.fail['task-list'] = cli_.fail['worker-show'] = 'runtime_unavailable'
+        for _ in range(cycle.POLL_FAILURES + 5):
+            scheduler.tick()
+        self.assertEqual((queue.get(rid)['state'], queue.running_count()), ('running', 1))
+        cli_.fail.clear()
+        cli_.task_status = 'completed'
+        scheduler.tick()
+        self.assertEqual(queue.get(rid)['state'], 'done')
+
     def test_a_worker_the_client_still_knows_stays_running(self):  # P5 O-A12
         queue, scheduler, cli_ = make()
         rid = add(queue, client='studio')
@@ -299,6 +337,64 @@ class ThreadTest(unittest.TestCase):
         scheduler.stop()
         self.assertEqual(queue.get(rid)['state'], 'running')
         self.assertFalse(scheduler.thread.is_alive())
+
+
+class StuckTest(unittest.TestCase):  # P5 final A3 (ponto 2: só a recuperação)
+    def stuck(self, status='ready'):
+        """Um pedido `running` cuja queda veio entre o `save` e o `worker-start`: sem `dispatch`, task fora de `dispatched`."""
+        queue, scheduler, cli_ = make()
+        rid = add(queue, client='studio')
+        queue.admit_next(scheduler.limits)
+        queue.set_session(rid, json.dumps({'client': 'studio', 'run': 'run_1', 'task': 'task_1', 'dispatch': None}))
+        cli_.task_status = status
+        return queue, scheduler, cli_, rid
+
+    def test_at_the_start_the_task_goes_to_failed_and_the_request_goes_back_to_the_queue(self):
+        for status in ('ready', 'pending'):
+            queue, scheduler, cli_, rid = self.stuck(status)
+            scheduler.interval = 60
+            with patch.object(scheduler, 'tick', lambda: []):  # só a recuperação do `start`, sem a volta do ciclo
+                scheduler.start()
+                scheduler.stop()
+            update = next(a for a, _ in cli_.calls if a[2] == 'task-update')
+            self.assertEqual(update[3:7], ['--id', 'task_1', '--status', 'failed'])
+            self.assertEqual((queue.get(rid)['state'], queue.running_count()), ('queued', 0), status)
+
+    def test_after_n_rounds_with_the_task_still_not_dispatched_it_is_recovered(self):
+        queue, scheduler, cli_, rid = self.stuck()
+        for _ in range(cycle.STUCK_POLLS - 1):
+            scheduler._finish()
+            self.assertEqual(queue.get(rid)['state'], 'running')
+        scheduler._finish()
+        self.assertEqual(queue.get(rid)['state'], 'queued')
+        self.assertIn('task-update', cli_.verbs())
+
+    def test_a_task_that_got_dispatched_is_not_recovered(self):
+        queue, scheduler, cli_, rid = self.stuck()
+        cli_.task_status = 'dispatched'
+        for _ in range(cycle.STUCK_POLLS + 2):
+            scheduler._finish()
+        self.assertEqual(queue.get(rid)['state'], 'running')
+        self.assertNotIn('task-update', cli_.verbs())
+
+    def test_a_request_with_a_dispatch_is_never_recovered_while_the_task_is_ready(self):
+        queue, scheduler, cli_ = make()
+        rid = add(queue, client='studio')
+        scheduler.tick()
+        cli_.task_status = 'ready'
+        for _ in range(cycle.STUCK_POLLS + 2):
+            scheduler._finish()
+        self.assertEqual(queue.get(rid)['state'], 'running')
+
+    def test_if_the_task_update_fails_the_request_stays_running_for_the_next_round(self):
+        queue, scheduler, cli_, rid = self.stuck()
+        cli_.fail['task-update'] = 'runtime_unavailable'
+        for _ in range(cycle.STUCK_POLLS + 1):
+            scheduler._finish()
+        self.assertEqual(queue.get(rid)['state'], 'running')
+        cli_.fail.clear()
+        scheduler._finish()
+        self.assertEqual(queue.get(rid)['state'], 'queued')
 
 
 class MigrationTest(unittest.TestCase):
@@ -346,6 +442,44 @@ class ClientHeaderTest(ToolsCase):
         self.assertIsNone(self.queue.get(out['request'])['client'])  # valor fora de studio e orca é ignorado
 
 
+class OtherProfileTest(ToolsCase):  # P5 final A4
+    def profile(self, name='brza-dev'):
+        path = Path(self.tmp) / name
+        path.mkdir()
+        (path / 'orca-runtime.json').write_text('{}')
+        return str(path)
+
+    def test_a_profile_folder_with_a_runtime_file_keeps_its_path_and_uses_the_studio_binary(self):
+        path = self.profile()
+        _, out = self.call('dispatch', {'task': 'ler', 'role': 'consultant'}, session='s1', client=path + '/')
+        row = self.queue.get(out['request'])
+        self.assertEqual((row['client'], row['user_data']), ('studio', path))
+
+    def test_the_known_folders_and_the_names_store_no_path_and_a_folder_without_runtime_is_no_client(self):
+        for header in ('studio', clients.CLIENTS['studio']['user_data']):
+            _, out = self.call('dispatch', {'task': 'a', 'role': 'consultant'}, session='s1', client=header)
+            row = self.queue.get(out['request'])
+            self.assertEqual((row['client'], row['user_data']), ('studio', None))
+        empty = Path(self.tmp) / 'sem-runtime'
+        empty.mkdir()
+        _, out = self.call('dispatch', {'task': 'a', 'role': 'consultant'}, session='s1', client=str(empty))
+        row = self.queue.get(out['request'])
+        self.assertEqual((row['client'], row['user_data']), (None, None))
+
+    def test_the_cycle_runs_the_cli_with_the_profile_path_of_the_request(self):
+        queue, scheduler, cli_ = make()
+        path = self.profile('brza-dev-wt')
+        add(queue, client='studio', user_data=path)
+        scheduler.tick()
+        self.assertTrue(cli_.calls)
+        for _, env in cli_.calls:
+            self.assertEqual(env['ORCA_USER_DATA_PATH'], path)
+        self.assertEqual(cli_.calls[0][0][0], clients.CLIENTS['studio']['cli'])
+
+    def test_a_database_without_the_column_gets_it(self):
+        self.assertIn('user_data', {r['name'] for r in self.queue.conn.execute('PRAGMA table_info(requests)')})
+
+
 class ServeWiringTest(unittest.TestCase):
     def test_serve_starts_the_scheduler_before_it_serves(self):  # P5 O-A6
         from mcp_support import HomeCase
@@ -391,7 +525,7 @@ class WiringTest(unittest.TestCase):
                                        detect=lambda: None)
         self.assertEqual(service.limits.usage.__self__.__class__, Accounts)
         self.assertEqual(service.on_queued, scheduler.kick)
-        self.assertEqual(scheduler.prepare, service.sync_limits)
+        self.assertEqual(scheduler.prepare, service.prepare)
 
 
 if __name__ == '__main__':

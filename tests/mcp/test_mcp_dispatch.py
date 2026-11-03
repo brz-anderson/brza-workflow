@@ -163,11 +163,20 @@ class OrderAndStatusTest(ToolsCase):
         self.assertEqual([r['task'] for r in st['running']], ['ocupa'])
         self.assertEqual(st['ceilings']['orchestrator.max_workers'], 1)
 
-    def test_status_gives_the_gate_id_and_reason_of_each_gated_request(self):  # P3 F-A3
+    def test_status_gives_the_gate_id_only_to_the_caller_that_opened_it(self):  # P3 F-A3, final A1
         _, gate = self.call('dispatch', {'task': 'g', 'role': 'executor'}, session='s')
-        _, st = self.call('status')
+        _, st = self.call('status', session='s')
         self.assertEqual(st['gated'][0]['gate_id'], gate['gate']['id'])
         self.assertEqual(st['gated'][0]['reason'], gate['gate']['reason'])
+        for who in ({'session': 's2'}, {}, {'session': ' '}):  # outra sessão, nenhuma, ou o header vazio
+            _, other = self.call('status', **who)
+            self.assertNotIn('gate_id', other['gated'][0], who)
+            self.assertEqual(other['gated'][0]['reason'], gate['gate']['reason'])
+        _, by_arg = self.call('status', {'caller': 's'})  # sem header, vale o argumento
+        self.assertEqual(by_arg['gated'][0]['gate_id'], gate['gate']['id'])
+        err, _ = self.call('dispatch', {'task': 'g', 'role': 'executor', 'approved': gate['gate']['id'],
+                                        'caller': 'x'}, session='s2')
+        self.assertTrue(err)  # e o id que outra sessão não vê não a deixa aprovar
 
     def test_queued_answers_with_the_real_state_when_the_request_is_no_longer_in_the_queue(self):  # P3 O-A10
         rid = self.queue.enqueue(task='a', role='consultant')

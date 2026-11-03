@@ -2,6 +2,39 @@
  "id": "req_0001",
  "ok": true,
  "result": {
+  "opencode": {
+   "accounts": [],
+   "activeAccountId": null
+  },
+  "devin": {
+   "accounts": [],
+   "activeAccountId": null
+  },
+  "claude": {
+   "accounts": [
+    {
+     "id": "8eee0e1b-f5d7-40ba-8337-8cae0df3a062",
+     "authMethod": "subscription-oauth",
+     "email": "conta-1@example.com",
+     "organization": "Org Exemplo",
+     "home": "/Users/x/Library/Application Support/brza-studio/claude-profiles/8eee0e1b/home"
+    },
+    {
+     "id": "c2e4f85c-388a-4603-8edc-a0844496c902",
+     "authMethod": "subscription-oauth",
+     "email": "conta-2@example.com",
+     "organization": "Org Exemplo",
+     "home": "/Users/x/Library/Application Support/brza-studio/claude-profiles/c2e4f85c/home"
+    }
+   ],
+   "activeAccountId": null,
+   "systemDefaultHome": "/Users/x/.claude",
+   "systemDefaultEmail": "sistema@example.com"
+  },
+  "codex": {
+   "accounts": [],
+   "activeAccountId": null
+  },
   "rateLimits": {
    "claude": {
     "provider": "claude",
@@ -214,27 +247,6 @@
    },
    "inactiveClaudeAccounts": [],
    "inactiveCodexAccounts": []
-  },
-  "accounts": {
-   "opencode": [],
-   "devin": [],
-   "claude": [
-    {
-     "id": "8eee0e1b-f5d7-40ba-8337-8cae0df3a062",
-     "authMethod": "subscription-oauth",
-     "email": "conta-1@example.com",
-     "organization": "Org Exemplo",
-     "home": "/Users/x/Library/Application Support/brza-studio/claude-profiles/8eee0e1b/home"
-    },
-    {
-     "id": "c2e4f85c-388a-4603-8edc-a0844496c902",
-     "authMethod": "subscription-oauth",
-     "email": "conta-2@example.com",
-     "organization": "Org Exemplo",
-     "home": "/Users/x/Library/Application Support/brza-studio/claude-profiles/c2e4f85c/home"
-    }
-   ],
-   "codex": []
   }
  },
  "_meta": {

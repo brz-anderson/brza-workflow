@@ -192,7 +192,7 @@ class SuggestionTest(WorkspaceCase, ToolsCase):
         self.assertEqual(self.limits.get('orchestrator.max_workers'), 2)
 
 
-class BrokenTomlTest(WorkspaceCase, HomeCase):  # P4 O-A1, O-A2
+class ServiceCase(WorkspaceCase, HomeCase):
     def service(self, text='[mcp\nport = '):
         from brza_mcp import limits as lim, queue as q, tools
         from brza_mcp.registry import ToolRegistry
@@ -202,13 +202,15 @@ class BrokenTomlTest(WorkspaceCase, HomeCase):  # P4 O-A1, O-A2
         self.addCleanup(self.queue.close)
         self.ws = self.workspace(text)
         return tools.install(self.registry, queue=self.queue, limits=lim.Limits(machine=lambda: {}), workspace=self.ws,
-                             index_reader=lambda w: '', telemetry=Telemetry(None))
+                             index_reader=lambda w: '', telemetry=Telemetry(None, log=lambda m: None))
 
     def call(self, name, args=None):
         from brza_mcp.registry import CallContext
         out = self.registry.call(name, args or {}, CallContext('s1'))
         return out.get('isError', False), out['content'][0]['text']
 
+
+class BrokenTomlTest(ServiceCase):  # P4 O-A1, O-A2
     def test_a_broken_brza_toml_does_not_stop_the_service_from_starting_and_each_tool_names_the_file(self):
         service = self.service()
         self.assertEqual(service.limits.get('orchestrator.max_workers'), 6)  # sobe com os padrões
@@ -274,6 +276,78 @@ class GateProposalTest(ToolsCase):  # P4 F-A1 = O-A3
         self.assertEqual((approved['model'], approved['effort']), ('sonnet', 'medium'))
 
 
+class TypedTomlTest(ServiceCase):  # P4 final A2: o brza.toml confere chave e tipo como a ferramenta `config`
+    def assert_refused(self, text, key):
+        self.service(text)
+        for name, args in (('status', {}), ('dispatch', {'task': 't', 'role': 'consultant'}), ('config', {})):
+            is_error, out = self.call(name, args)
+            self.assertTrue(is_error, f'{name}: {out}')
+            self.assertIn(str(Path(self.ws) / 'brza.toml'), out)
+            self.assertIn(key, out)
+        self.assertEqual(self.queue._all('SELECT id FROM requests'), [])  # nenhum pedido fica gravado
+
+    def test_a_typo_in_a_key_is_refused_with_the_file_and_the_key(self):
+        self.assert_refused('[orchestrator]\nmax_worker = 1\n', 'orchestrator.max_worker')
+
+    def test_a_string_in_a_ceiling_is_refused_before_the_request_is_recorded(self):
+        self.assert_refused('[orchestrator]\nmax_workers = "1"\n', 'orchestrator.max_workers')
+
+    def test_a_boolean_in_text_does_not_enforce_the_policy(self):
+        self.assert_refused('[policy]\nenforce = "false"\n', 'policy.enforce')
+
+    def test_a_number_where_a_url_is_expected_is_refused(self):
+        self.assert_refused('[resolver]\nollama_url = 11434\n', 'resolver.ollama_url')
+
+    def test_an_out_of_range_or_wrongly_typed_port_and_role_row_are_refused(self):
+        self.assert_refused('[mcp]\nport = 70000\n', 'mcp.port')
+        self.assert_refused('[policy.roles.executor]\nmodel = 3\n', 'policy.roles.executor.model')
+
+    def test_the_valid_file_and_the_sections_that_are_not_the_mcp_load(self):
+        service = self.service('[workspace]\nname = "x"\nfoo = 1\n[orchestrator]\nmax_workers = 2\n'
+                               '[policy.roles.novo]\nmodel = "opus"\neffort = "high"\n')
+        self.assertFalse(self.call('status')[0])
+        self.assertEqual(service.limits.get('orchestrator.max_workers'), 2)
+
+    def test_the_same_table_serves_the_tool_and_the_file(self):
+        from brza_mcp import tools
+        for key in pol.KEYS:
+            tools.check_key(key)  # a ferramenta `config` aceita exatamente as chaves que o arquivo confere
+
+
+class ConfigFallsBackToTheLastReadTest(ServiceCase):  # P4 final A3
+    def test_a_file_that_breaks_after_the_start_keeps_the_last_ceiling_and_logs_once(self):
+        service = self.service('[orchestrator]\nmax_workers = 1\n[quota]\nmax_sessions_per_account = 1\n')
+        self.assertEqual((service.limits.get('orchestrator.max_workers'),
+                          service.limits.get('quota.max_sessions_per_account')), (1, 1))
+        (Path(self.ws) / 'brza.toml').write_text('[orchestrator\nmax_workers = 1\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            service.sync_limits()
+            service.sync_limits()  # o mesmo erro não se repete
+        self.assertEqual((service.limits.get('orchestrator.max_workers'),
+                          service.limits.get('quota.max_sessions_per_account')), (1, 1))
+        self.assertEqual(err.getvalue().count('brza.toml'), 1)
+        self.assertIn('última configuração', err.getvalue())
+        (Path(self.ws) / 'brza.toml').write_text('[orchestrator]\nmax_workers = 3\n')
+        service.sync_limits()
+        self.assertEqual(service.limits.get('orchestrator.max_workers'), 3)
+
+    def test_at_the_start_without_a_previous_read_the_defaults_hold_and_the_error_is_logged(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            service = self.service('[orchestrator\nmax_workers = 1\n')
+        self.assertEqual(service.limits.get('orchestrator.max_workers'), 6)
+        self.assertIn('valem os padrões', err.getvalue())
+
+    def test_the_config_override_still_goes_on_top_of_the_kept_base(self):
+        service = self.service('[orchestrator]\nmax_workers = 2\n')
+        self.call('config', {'key': 'quota.hard_cap_percent', 'value': 70})
+        (Path(self.ws) / 'brza.toml').write_text('[x\n')
+        with contextlib.redirect_stderr(io.StringIO()):
+            service.sync_limits()
+        self.assertEqual((service.limits.get('orchestrator.max_workers'), service.limits.hard_cap()), (2, 70.0))
+
+
 class ConfigVerbTest(ToolsCase):
     def run_cli(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -306,6 +380,51 @@ class ConfigVerbTest(ToolsCase):
     def test_a_server_error_exits_with_the_message(self):
         code, _, _ = self.run_cli('foo', '1')
         self.assertIn('chave de configuração desconhecida', str(code))
+
+
+class ConfigVerbOutOfContractTest(HomeCase):  # P4 final A5
+    def serve_once(self, handler_body, content_type='text/html'):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                body = handler_body.encode()
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        t = threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        t.start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close(), t.join(5)))
+        return srv.server_address[1]
+
+    def run_cli(self, port):
+        err = io.StringIO()
+        with patch.dict(os.environ, {'BRZA_MCP_PORT': str(port)}), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                cli.main(['config'])
+        return cm.exception.code, err.getvalue()
+
+    def test_an_html_server_on_the_port_is_out_of_contract_and_not_stopped(self):
+        code, err = self.run_cli(self.serve_once('<html>oi</html>'))
+        self.assertEqual(code, 1)
+        self.assertIn('fora do contrato', err)
+        self.assertNotIn('parado', err)
+
+    def test_a_json_rpc_error_of_an_old_daemon_says_its_message_and_is_not_stopped(self):
+        body = '{"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "ferramenta desconhecida: config"}}'
+        code, err = self.run_cli(self.serve_once(body, 'application/json'))
+        self.assertEqual(code, 1)
+        self.assertIn('fora do contrato', err)
+        self.assertIn('ferramenta desconhecida: config', err)
+        self.assertNotIn('parado', err)
 
 
 class ConfigVerbStoppedTest(HomeCase):

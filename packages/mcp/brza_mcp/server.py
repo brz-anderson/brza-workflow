@@ -18,6 +18,7 @@ from .registry import REGISTRY, CallContext
 HOST = '127.0.0.1'
 SERVER_NAME = 'brza-orchestrator'
 FALLBACK_PROTOCOL = '2025-06-18'
+MAX_BODY = 1 << 20  # 1 MiB: o maior corpo de JSON-RPC que o servidor lê
 
 
 def rpc_error(id, code, message):
@@ -52,11 +53,22 @@ class Handler(BaseHTTPRequestHandler):
         return ok
 
     def route(self):
-        """Dispara a rota; o corpo do POST é lido antes de responder, para a conexão seguir limpa."""
-        length = int(self.headers.get('Content-Length') or 0)
-        body = self.rfile.read(length) if length else b''
+        """Dispara a rota. O Bearer vem antes de ler o corpo; o `Content-Length` é validado antes de lê-lo."""
         if not self.authorized():
+            self.close_connection = True  # o corpo não lido ficaria no fio
             return
+        raw = self.headers.get('Content-Length')
+        try:
+            length = int(raw) if raw else 0
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.close_connection = True
+            return self.reply(400, {'error': 'Content-Length inválido'})
+        if length > MAX_BODY:
+            self.close_connection = True
+            return self.reply(413, {'error': f'corpo acima de {MAX_BODY} bytes'})
+        body = self.rfile.read(length) if length else b''
         path = self.path.split('?', 1)[0]
         if self.command == 'GET' and path == '/health':
             self.reply(200, {'ok': True, 'pid': os.getpid(), 'version': VERSION})

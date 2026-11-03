@@ -37,6 +37,18 @@ def from_header(value) -> str | None:
     return None
 
 
+def resolve_header(value):
+    """`(cliente, user_data)` do `X-Brza-Client`. O nome ou o caminho de uma pasta conhecida dá o cliente e nenhum
+    `user_data` (vale o padrão dele). Outra pasta com o `orca-runtime.json` dentro é o perfil de um build (o
+    `brza-dev`, por exemplo): o runtime dela é outro, e o binário do Studio serve a ela com o
+    `ORCA_USER_DATA_PATH` dela. O resto não é cliente."""
+    client = from_header(value)
+    if client or not (isinstance(value, str) and value.startswith('/')):
+        return client, None
+    path = Path(value.rstrip('/'))
+    return ('studio', str(path)) if (path / 'orca-runtime.json').is_file() else (None, None)
+
+
 def detect(run=None) -> str | None:
     """O cliente do processo vivo (`pgrep -f`); o Studio vence quando os dois rodam. None se nenhum."""
     run = run or _pgrep

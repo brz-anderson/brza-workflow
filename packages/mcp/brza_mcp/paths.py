@@ -73,26 +73,51 @@ def _read_toml(path: Path) -> dict:
     return tomllib.loads(text)
 
 
+class TomlUnreadable(SystemExit):
+    """O brza.toml que não se lê: o `serve` o trata como "sem a chave"; os outros pontos de entrada o recusam."""
+
+
+def _check_port(value, origin: str, low: int = 1) -> int:
+    """A porta válida (inteiro de 1 a 65535, sem booleano) ou SystemExit apontando a origem."""
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= 65535:
+        raise SystemExit(f'{origin}: a porta precisa ser um inteiro de 1 a 65535, e veio {value!r}')
+    return value
+
+
 def workspace_port(root: Path | None = None) -> int | None:
     """O `[mcp] port` do <workspace>/brza.toml (o `root`, ou o do ambiente), ou None sem workspace, sem arquivo ou sem
-    a chave."""
+    a chave. Arquivo ilegível ou porta que não é inteiro de 1 a 65535 recusam, com o caminho."""
     root = root if root is not None else workspace_root()
     if root is None or not (root / 'brza.toml').is_file():
         return None
+    path = root / 'brza.toml'
     try:
-        port = _read_toml(root / 'brza.toml').get('mcp', {}).get('port')
+        port = _read_toml(path).get('mcp', {}).get('port')
     except Exception as e:  # noqa: BLE001
-        raise SystemExit(f'{root / "brza.toml"} ilegível: {e}')
-    return port if isinstance(port, int) and not isinstance(port, bool) else None
+        raise TomlUnreadable(f'{path} ilegível: {e}')
+    return None if port is None else _check_port(port, f'{path} [mcp] port')
 
 
-def default_port(port: int | None = None) -> int:
-    """A porta: o `--port` (o argumento), a BRZA_MCP_PORT, o `[mcp] port` do brza.toml do workspace, ou 4242."""
+def default_port(port: int | None = None, lenient: bool = False) -> int:
+    """A porta: o `--port` (o argumento), a BRZA_MCP_PORT, o `[mcp] port` do brza.toml do workspace, ou 4242. Valor
+    inválido recusa; com `lenient`, o brza.toml ilegível conta como "sem a chave" e avisa no stderr (o `serve` do
+    launchd não pode sair em laço por um erro de digitação)."""
     if port is not None:
-        return port
+        return _check_port(port, '--port', low=0)  # 0: a porta efêmera
     if os.environ.get('BRZA_MCP_PORT'):
-        return int(os.environ['BRZA_MCP_PORT'])
-    return workspace_port() or DEFAULT_PORT
+        text = os.environ['BRZA_MCP_PORT']
+        try:
+            value = int(text)
+        except ValueError:
+            raise SystemExit(f'BRZA_MCP_PORT: a porta precisa ser um inteiro de 1 a 65535, e veio {text!r}')
+        return _check_port(value, 'BRZA_MCP_PORT')
+    try:
+        return workspace_port() or DEFAULT_PORT
+    except TomlUnreadable as e:
+        if not lenient:
+            raise
+        print(f'{e}; sem a chave [mcp] port, vale a porta {DEFAULT_PORT}', file=sys.stderr, flush=True)
+        return DEFAULT_PORT
 
 
 def _plist_env() -> dict:
@@ -119,10 +144,16 @@ def active_port() -> int:
     except (TypeError, ValueError):
         pass
     if env.get('BRZA_WORKSPACE'):
-        port = workspace_port(Path(env['BRZA_WORKSPACE']).expanduser())
+        try:
+            port = workspace_port(Path(env['BRZA_WORKSPACE']).expanduser())
+        except SystemExit:  # a sonda não recusa: vale o resto da cadeia
+            port = None
         if port:
             return port
-    return default_port()
+    try:
+        return default_port(lenient=True)
+    except SystemExit:
+        return DEFAULT_PORT
 
 
 def ensure_runtime() -> Path:

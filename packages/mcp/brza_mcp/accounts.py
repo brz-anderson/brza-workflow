@@ -55,8 +55,6 @@ def parse(payload) -> dict:
     data = payload.get('result', payload) if isinstance(payload, dict) else {}
     claude = data.get('claude')
     managed = claude.get('accounts') if isinstance(claude, dict) else None
-    if managed is None:  # a forma da fixture: as contas em `accounts.claude`
-        managed = (data.get('accounts') or {}).get('claude') if isinstance(data.get('accounts'), dict) else None
     claude = claude if isinstance(claude, dict) else {}
     active = claude.get('activeAccountId')
     default_home = claude.get('systemDefaultHome')
@@ -79,56 +77,81 @@ def parse(payload) -> dict:
 
 
 class Accounts:
-    """O leitor das contas, com o `account list --json` do cliente e um cache curto (o `Limits` o chama por pedido)."""
+    """O leitor das contas, com o `account list --json` do cliente e um cache curto (o `Limits` o chama por pedido).
+
+    O cliente é o do pedido (`client`): com o Studio e o Orca de pé, a conta e o uso de um pedido do Orca vêm do Orca. O
+    cache é por cliente, e a leitura que falha também se guarda pelo mesmo TTL, para o app travado não custar 30 s a
+    cada consulta."""
 
     def __init__(self, client=None, run=_runner, detect=clients.detect, ttl=30.0, clock=time.monotonic):
         self.client, self.run, self.detect, self.ttl, self.clock = client, run, detect, ttl, clock
-        self._cache, self._at = None, None
+        self._cache, self._failed = {}, {}
         self._lock = threading.Lock()
 
-    def read(self, force=False) -> dict:
+    def read(self, force=False, client=None) -> dict:
+        key = client or self.client  # None: o cliente do processo vivo
         with self._lock:
-            if not force and self._cache is not None and self.clock() - self._at < self.ttl:
-                return self._cache
-            name = self.client or self.detect()
-            if name not in clients.CLIENTS:
-                raise AccountError('nenhum cliente (BrzA Studio ou Orca) de pé')
-            spec = clients.CLIENTS[name]
-            env = {k: v for k, v in os.environ.items() if not k.startswith('ORCA_')}
-            env['ORCA_USER_DATA_PATH'] = spec['user_data']
-            code, out, err = self.run([clients.cli_path(name), 'account', 'list', '--json'], env, 30)
+            now = self.clock()
+            hit = self._cache.get(key)
+            if not force and hit and now - hit[1] < self.ttl:
+                return hit[0]
+            miss = self._failed.get(key)
+            if not force and miss and now - miss[1] < self.ttl:
+                raise AccountError(miss[0])
             try:
-                if code != 0:
-                    raise ValueError(err.strip() or out.strip())
-                self._cache, self._at = parse(json.loads(out)), self.clock()
-            except ValueError as e:
-                raise AccountError(f'account list falhou: {e}') from None
-            return self._cache
+                data = self._read(key)
+            except AccountError as e:
+                self._failed[key] = (str(e), self.clock())
+                raise
+            self._cache[key], _ = (data, self.clock()), self._failed.pop(key, None)
+            return data
 
-    def accounts(self):
-        return self.read()['accounts']
+    def _read(self, key) -> dict:
+        name = key or self.detect()
+        if name not in clients.CLIENTS:
+            raise AccountError('nenhum cliente (BrzA Studio ou Orca) de pé')
+        spec = clients.CLIENTS[name]
+        env = {k: v for k, v in os.environ.items() if not k.startswith('ORCA_')}
+        env['ORCA_USER_DATA_PATH'] = spec['user_data']
+        code, out, err = self.run([clients.cli_path(name), 'account', 'list', '--json'], env, 30)
+        try:
+            if code != 0:
+                raise ValueError(err.strip() or out.strip())
+            return parse(json.loads(out))
+        except ValueError as e:
+            raise AccountError(f'account list falhou: {e}') from None
 
-    def find(self, name, data=None):
+    def warm(self, client=None):
+        """Aquece o cache fora de qualquer lock; a falha fica guardada e não levanta."""
+        try:
+            self.read(client=client)
+        except AccountError:
+            pass
+
+    def accounts(self, client=None):
+        return self.read(client=client)['accounts']
+
+    def find(self, name, data=None, client=None):
         """A conta pelo id, e-mail ou rótulo; sem nome, a ativa. None se não existe."""
-        accounts = (data or self.read())['accounts']
+        accounts = (data or self.read(client=client))['accounts']
         if not name:
             return next((a for a in accounts if a['active']), None)
         return next((a for a in accounts if name in (a['id'], a['email'], a['label'])), None)
 
-    def active_id(self):
+    def active_id(self, client=None):
         """O id da conta ativa do cliente, ou None se não se lê."""
         try:
-            found = self.find(None)
+            found = self.find(None, client=client)
         except AccountError:
             return None
         return found['id'] if found else None
 
-    def usage(self, account, runtime):
+    def usage(self, account, runtime, client=None):
         """O provedor do `Limits`: o instantâneo da conta, ou None (sem uso, sem conta ou sem cliente)."""
         if runtime not in ('', None, RUNTIME):
             return None
         try:
-            data = self.read()
+            data = self.read(client=client)
         except AccountError:
             return None
         found = self.find(account, data)

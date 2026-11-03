@@ -23,7 +23,7 @@ class ToolsCase(ServerCase):
         self.addCleanup(self.queue.close)
         self.limits = lim.Limits(self.config, machine=self.machine)
         self.service = tools.install(self.registry, queue=self.queue, limits=self.limits, workspace='/ws',
-                                     index_reader=lambda workspace: INDEX, telemetry=Telemetry(None))
+                                     index_reader=lambda workspace: INDEX, telemetry=Telemetry(None, log=lambda m: None))
 
     def call(self, name, arguments=None, session=None, client=None):
         """(isError, conteúdo): o JSON do texto quando decodifica, senão o texto."""

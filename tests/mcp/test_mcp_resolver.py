@@ -4,9 +4,12 @@ Nenhuma chamada real ao `claude` (custa dinheiro) nem ao Ollama.
 
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp -v
 """
+import getpass
 import json
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp_support import PACKAGE  # noqa: F401  (põe o brza_mcp no sys.path)
 
@@ -125,10 +128,33 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(json.loads(argv[argv.index('--json-schema') + 1])['required'], ['choice'])
         self.assertTrue(prompt.endswith('texto da tarefa'))
         self.assertNotIn('CLAUDE_CONFIG_DIR', env)
-        self.assertLessEqual(set(env), {'HOME', 'PATH', 'LANG'})
+        self.assertLessEqual(set(env), {'HOME', 'PATH', 'LANG', 'USER', 'LOGNAME'})
+        self.assertEqual((env['USER'], env['LOGNAME']), (getpass.getuser(),) * 2)  # P4 final A1: sem o USER não autentica
+
+    def test_the_user_comes_from_getpass_even_when_the_agent_environment_has_none(self):  # P4 final A1
+        with patch.dict(os.environ, {'HOME': '/h', 'PATH': '/bin'}):
+            os.environ.pop('USER', None)
+            os.environ.pop('LOGNAME', None)
+            env = res.claude_env()
+        self.assertEqual(env['USER'], getpass.getuser())
+        self.assertNotIn('CLAUDE_CONFIG_DIR', env)
+
+    def test_a_failed_haiku_carries_the_error_the_claude_gave_to_the_route_reason(self):  # P4 final A1
+        out = json.dumps({'is_error': True, 'result': 'Failed to authenticate: OAuth session expired'})
+        answer = make(claude=FakeClaude(code=1, out=out)).classify('qualquer tarefa')
+        self.assertEqual((answer['layer'], answer['path']), (None, 'fallback'))
+        self.assertIn('Failed to authenticate', answer['reason'])
+        plain = make(claude=FakeClaude(code=2, out='')).classify('qualquer tarefa')
+        self.assertIn('saída 2', plain['reason'])
 
 
 class ChooseAccountTest(unittest.TestCase):
+    def test_with_no_account_reading_the_reason_does_not_say_every_account_is_over_the_cap(self):  # P4 final A7
+        out = res.choose_account({'conta-nova': []})
+        self.assertIsNone(out['account'])
+        self.assertIn('nenhuma conta com leitura', out['reason'])
+        self.assertIn('no teto', res.choose_account({'a': [95]})['reason'])
+
     def test_an_account_without_windows_is_left_out(self):  # P4 F-A2
         out = res.choose_account({'conta-a': [50], 'conta-nova': []})
         self.assertEqual(out['account'], 'conta-a')

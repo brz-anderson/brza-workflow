@@ -41,6 +41,12 @@ class WorkspaceCase(ToolsCase):
         self.service.telemetry = self.telemetry
         self.queue.on_decision = self.telemetry.decided
 
+    def scheduler(self, detected='studio'):
+        """O ciclo com o CLI dublê e a telemetria deste caso: o `admitted` só sai quando ele abre o worker."""
+        self.cli = FakeCli()
+        return cycle.Scheduler(self.queue, self.limits, run=self.cli, detect=lambda: detected, telemetry=self.telemetry,
+                               prepare=self.service.prepare)
+
     def lines(self, decision=None):
         rows = read_lines(self.ws)
         return [r for r in rows if decision is None or r['decision'] == decision]
@@ -52,7 +58,7 @@ class LineTest(WorkspaceCase):
     def test_a_queued_request_writes_the_d5_line(self):
         _, out = self.call('dispatch', {'task': 'ler o plano', 'role': 'consultant'}, session='sess-1')
         rows = self.lines()
-        self.assertEqual([r['decision'] for r in rows], ['policy', 'queued', 'admitted'])
+        self.assertEqual([r['decision'] for r in rows], ['policy', 'queued'])  # o `admitted` é do ciclo, e ele não rodou
         queued = rows[1]
         self.assertEqual(queued['event'], 'route')
         self.assertEqual(queued['workstream'], 'tools-kit')
@@ -73,16 +79,44 @@ class LineTest(WorkspaceCase):
         policy = self.lines('policy')[1]
         self.assertEqual((policy['model'], policy['reason'], policy['passthrough']), ('haiku', 'passthrough', True))
 
-    def test_admission_carries_the_machine_measures_and_is_written_once(self):
-        self.call('dispatch', {'task': 'ler', 'role': 'consultant'}, session='s')
+    def test_admission_is_written_when_the_cycle_opens_the_worker_with_the_measures_and_only_once(self):
+        scheduler = self.scheduler()
+        _, out = self.call('dispatch', {'task': 'ler', 'role': 'consultant'}, session='s')
         self.call('status')
         self.call('status')
+        self.assertEqual(self.lines('admitted'), [])  # a prévia do `status` e do `queued()` não admite nada
+        self.assertEqual(scheduler.tick(), [out['request']])
+        scheduler.tick()
+        scheduler.tick()
         admitted = self.lines('admitted')
         self.assertEqual(len(admitted), 1)
+        self.assertEqual(admitted[0]['request'], out['request'])
         self.assertEqual(admitted[0]['machine'], {'free_mem_gb': 9.1, 'swap_gb': 0.4, 'cpu_percent': 31,
                                                   'enforced': False})
         self.assertIsNone(admitted[0]['held_by'])
         self.assertEqual(admitted[0]['measures']['workspace']['running'], 0)
+
+    def test_a_request_without_a_client_writes_no_admitted_or_held_line_on_every_round(self):  # P6 final A1
+        scheduler = self.scheduler(detected=None)  # nenhum cliente de pé: o ciclo o libera e põe no `skipped`
+        _, out = self.call('dispatch', {'task': 'ler', 'role': 'consultant'}, session='s')
+        before = len(self.lines())
+        for _ in range(100):
+            scheduler.tick()
+        self.assertEqual(len(self.lines()), before)
+        self.assertEqual((self.lines('admitted'), self.queue.get(out['request'])['state']), ([], 'queued'))
+        self.assertEqual(self.queue.running_count(), 0)
+
+    def test_the_held_and_admitted_do_not_alternate_when_the_first_cannot_open(self):  # P6 final A1
+        self.queue.mark_running(self.queue.enqueue(task='ocupa', role='consultant', caller='s'))
+        self.limits.config = {'orchestrator.max_workers': 2}
+        scheduler = self.scheduler(detected=None)
+        self.queue.enqueue(task='a', role='consultant', caller='s')
+        self.queue.enqueue(task='b', role='consultant', caller='s')
+        for _ in range(30):
+            scheduler.tick()
+        decisions = [(r['request'], r['decision']) for r in self.lines()]
+        self.assertLessEqual(len(decisions), 2, decisions)
+        self.assertNotIn('admitted', [d for _, d in decisions])
 
     def test_the_gate_and_its_approval_are_lines(self):
         _, gate = self.call('dispatch', {'task': 'x', 'role': 'executor'}, session='s')
@@ -91,6 +125,8 @@ class LineTest(WorkspaceCase):
         self.assertEqual(gated['gate'], gate['gate']['id'])
         self.assertIn('executor', gated['reason'])
         self.call('dispatch', {'task': 'x', 'role': 'executor', 'approved': gate['gate']['id']}, session='s')
+        self.assertEqual([r['decision'] for r in self.lines()], ['policy', 'gated', 'approved', 'queued'])
+        self.scheduler().tick()
         self.assertEqual([r['decision'] for r in self.lines()], ['policy', 'gated', 'approved', 'queued', 'admitted'])
         self.assertEqual(self.lines('approved')[0]['request'], gated['request'])
 
@@ -115,8 +151,11 @@ class HeldTest(WorkspaceCase):
         self.queue.enqueue(task='a', role='consultant', caller='s', priority='high')
         second = self.queue.enqueue(task='b', role='consultant', caller='s')
         self.queue.next_admissible(self.limits)
+        self.assertEqual(self.lines('admitted'), [])  # a prévia não admite
+        self.scheduler().tick()  # com o teto de 1 worker, só o primeiro abre
         self.assertEqual([r['request'] for r in self.lines('admitted')], [1])
         self.assertNotIn(second, [r['request'] for r in self.lines('admitted')])
+        self.assertEqual([r['held_by'] for r in self.lines('held')], ['workspace'])
 
 
 class ResolverLineTest(WorkspaceCase):
@@ -183,9 +222,13 @@ class CycleLineTest(WorkspaceCase):
 
 class SafetyTest(HomeCase):
     def test_without_a_workspace_nothing_is_written_and_nothing_raises(self):
-        t = telemetry.Telemetry(None, log=lambda m: None)
+        log = []
+        t = telemetry.Telemetry(None, log=log.append)
         self.assertFalse(t.emit('queued', {'id': 1}))
+        self.assertFalse(t.emit('queued', {'id': 2}))
         self.assertEqual(list(self.tmp.rglob('measurements.jsonl')), [])
+        self.assertEqual(len(log), 1)  # P6 final A2: o motivo vai uma vez ao log
+        self.assertIn('BRZA_WORKSPACE', log[0])
 
     def test_dispatch_answers_without_BRZA_WORKSPACE(self):
         class Ctx:

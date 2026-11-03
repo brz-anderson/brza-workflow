@@ -9,9 +9,9 @@ argumento `caller`. As sobreposições da política ficam na tabela `config` do 
 funde por cima do `brza.toml`.
 """
 import json
-import math
 import os
 import secrets
+import sys
 import time
 
 from . import accounts as accounts_mod
@@ -33,34 +33,16 @@ DISPATCH_SCHEMA = {'type': 'object', 'required': ['task', 'role'], 'properties':
     'account': {'type': 'string'}, 'ref': {'type': 'string'}, 'deadline': {'type': 'string', 'format': 'date'},
     'blocks': {'type': 'array', 'items': {'type': 'string'}}, 'priority': {'enum': list(queue_mod.PRIORITIES)},
     'caller': {'type': 'string'}, 'approved': {'type': 'string'}}}
-STATUS_SCHEMA = {'type': 'object', 'properties': {}}
+STATUS_SCHEMA = {'type': 'object', 'properties': {'caller': {'type': 'string'}}}
 CONFIG_SCHEMA = {'type': 'object', 'properties': {'key': {'type': 'string'}, 'value': {}}}
 
-# as chaves de sobreposição são as do `brza.toml` (D4), em lista fechada: chave com erro de digitação se recusa em vez
-# de gravar um valor que nada lê. Cada uma leva o tipo e a faixa: (tipo, mínimo, máximo, mínimo exclusivo)
-_KEYS = {
-    'policy.enforce': ('bool',),
-    'policy.suggest_to_main': ('bool',),
-    'orchestrator.max_workers': ('int', 0, None, False),
-    'quota.soft_cap_percent': ('number', 0, 100, True),
-    'quota.hard_cap_percent': ('number', 0, 100, True),
-    'quota.max_sessions_per_account': ('int', 0, None, False),
-    'machine.min_free_mem_gb': ('number', 0, None, False),
-    'machine.max_swap_gb': ('number', 0, None, False),
-    'machine.max_cpu_percent': ('number', 0, 100, True),
-    'resolver.ollama_url': ('string',),
-    'resolver.tev1_model': ('string',),
-    'resolver.tev1_keep_alive': ('string',),
-    'resolver.tev1_min_confidence': ('number', 0, 1, False),
-    'resolver.haiku_max_budget_usd': ('number', 0, None, True),
-}
 _CEILING_KEYS = ('orchestrator.max_workers', 'quota.max_sessions_per_account', 'quota.hard_cap_percent',
                  'machine.min_free_mem_gb', 'machine.max_swap_gb', 'machine.max_cpu_percent')
 
 GATES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS gates (
     id TEXT PRIMARY KEY, request_id INTEGER NOT NULL REFERENCES requests(id), caller TEXT NOT NULL,
-    reason TEXT NOT NULL, created_at REAL NOT NULL, approved_at REAL
+    reason TEXT NOT NULL, created_at REAL NOT NULL, approved_at REAL, policy_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
@@ -74,34 +56,20 @@ def _error(message):
     return {'content': [{'type': 'text', 'text': message}], 'isError': True}
 
 
-def _is_number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
 # ---- as sobreposições da política ----
 
 def check_key(key):
-    if key not in _KEYS:
-        raise ToolError(f'chave de configuração desconhecida: {key!r} (as do brza.toml: {", ".join(sorted(_KEYS))})')
+    if key not in policy_mod.KEYS:
+        raise ToolError(f'chave de configuração desconhecida: {key!r} (as do brza.toml: '
+                        f'{", ".join(sorted(policy_mod.KEYS))})')
 
 
 def check_config(key, value):
     check_key(key)
-    kind, *bounds = _KEYS[key]
-    shown = json.dumps(value)
-    if kind == 'bool':
-        if not isinstance(value, bool):
-            raise ToolError(f'{key} é booleano, veio {shown}')
-    elif kind == 'string':
-        if not isinstance(value, str) or not value.strip():
-            raise ToolError(f'{key} é texto não vazio, veio {shown}')
-    else:
-        if not _is_number(value) or not math.isfinite(value) or (kind == 'int' and not isinstance(value, int)):
-            raise ToolError(f'{key} é {"inteiro" if kind == "int" else "numérico finito"}, veio {shown}')
-        low, high, low_open = bounds
-        if value < low or (low_open and value == low) or (high is not None and value > high):
-            span = f'{"maior que" if low_open else "a partir de"} {low}' + (f' e até {high}' if high is not None else '')
-            raise ToolError(f'{key} fica {span}, veio {shown}')
+    try:
+        policy_mod.check_value(key, value)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
 
 
 def get_overrides(queue) -> dict:
@@ -121,11 +89,14 @@ class Orchestrator:
         self.policy = policy or policy_mod.Policy(self.workspace, overrides=self.get_overrides)
         self.resolver = resolver
         self.policy_error = None
+        self._last_base = None  # a última configuração do `brza.toml` que se leu: o erro depois da subida não a solta
         self.telemetry = telemetry or Telemetry(self.workspace)
         queue.on_decision = self.telemetry.decided
         self.index_reader = index_reader
         with queue.lock:
             queue.conn.executescript(GATES_SCHEMA)
+            if 'policy_reason' not in {r['name'] for r in queue.conn.execute('PRAGMA table_info(gates)')}:
+                queue.conn.execute('ALTER TABLE gates ADD COLUMN policy_reason TEXT')  # o banco anterior ao motivo
             queue.conn.commit()
         self.sync_limits()
 
@@ -133,12 +104,19 @@ class Orchestrator:
         return get_overrides(self.queue)
 
     def sync_limits(self):
-        # o `brza.toml` (ou os padrões do D4) por baixo, o que o `Limits` recebeu em cima dele, e as sobreposições;
-        # com o `brza.toml` ilegível o servidor sobe e o ciclo segue com os padrões, e as ferramentas dizem o arquivo
+        # o `brza.toml` (ou os padrões do D4) por baixo, o que o `Limits` recebeu em cima dele, e as sobreposições.
+        # Com o `brza.toml` ilegível: na subida, sem leitura anterior, valem os padrões (X36); com o servidor de pé,
+        # vale a última configuração lida, para o erro de edição não soltar o teto que Anderson apertou. As ferramentas
+        # dizem o arquivo, e o erro vai ao stderr quando muda.
         try:
-            base, self.policy_error = self.policy.load(), None
+            base, error = self.policy.load(), None
+            self._last_base = base
         except policy_mod.PolicyError as e:
-            base, self.policy_error = dict(policy_mod.DEFAULTS), str(e)
+            base, error = (self._last_base if self._last_base is not None else dict(policy_mod.DEFAULTS)), str(e)
+        if error != self.policy_error and error is not None:
+            kept = 'vale a última configuração lida' if self._last_base is not None else 'valem os padrões'
+            print(f'brza-mcp: {error}; {kept}', file=sys.stderr, flush=True)
+        self.policy_error = error
         self.limits.config = {**base, **self.base_config, **self.get_overrides()}
 
     def check_policy(self):
@@ -155,14 +133,18 @@ class Orchestrator:
 
     # ---- a conta ----
 
-    def normalize_account(self, name):
-        """O id da conta do pedido. O worker abre na conta ativa do cliente: o `worker-start` não tem flag de conta
-        (X20), então outra conta é recusada com o motivo. Sem leitor de contas, vale como veio."""
+    def _for(self, client):
+        """Os argumentos de cliente das chamadas ao leitor de contas: o do pedido, quando ele o trouxe."""
+        return {'client': client} if client else {}
+
+    def normalize_account(self, name, client=None):
+        """O id da conta do pedido, lido no cliente do pedido. O worker abre na conta ativa do cliente: o `worker-start`
+        não tem flag de conta (X20), então outra conta é recusada com o motivo. Sem leitor de contas, vale como veio."""
         if self.accounts is None or not hasattr(self.accounts, 'find'):
             return name
         try:
-            found = self.accounts.find(name)
-            active = self.accounts.find(None)
+            found = self.accounts.find(name, **self._for(client))
+            active = self.accounts.find(None, **self._for(client))
         except accounts_mod.AccountError as e:
             raise ToolError(f'não consegui ler as contas do cliente para conferir {name!r}: {e}') from None
         if found is None:
@@ -173,8 +155,27 @@ class Orchestrator:
                             'tire o account do pedido')
         return found['id']
 
-    def active_account(self):
-        return self.accounts.active_id() if hasattr(self.accounts, 'active_id') else None
+    def active_account(self, client=None):
+        return self.accounts.active_id(**self._for(client)) if hasattr(self.accounts, 'active_id') else None
+
+    def warm_accounts(self):
+        """Aquece a leitura das contas, de cada cliente da fila, antes de qualquer lock: o `account list` leva até 30 s
+        com o app travado, e o lock da fila segura o `status`, o `dispatch` e o ciclo."""
+        warm = getattr(self.accounts, 'warm', None)
+        if warm:
+            for client in {r.get('client') for r in self.queue.pending()} | {None}:
+                warm(**self._for(client))
+
+    def prepare(self):
+        """O que o ciclo faz antes de cada decisão: as contas (fora do lock) e a configuração."""
+        self.warm_accounts()
+        self.sync_limits()
+
+    @staticmethod
+    def caller_of(ctx, args) -> str:
+        """O chamador: o `X-Brza-Session` e, sem o header, o argumento `caller` (a mesma precedência em toda ferramenta)."""
+        caller = args.get('caller')
+        return (getattr(ctx, 'session', None) or '').strip() or (caller.strip() if isinstance(caller, str) else '')
 
     # ---- dispatch ----
 
@@ -206,7 +207,7 @@ class Orchestrator:
         try:
             self.check_policy()
             args = self.validate(args)
-            caller = (ctx.session or '').strip() or (args.get('caller') or '').strip()
+            caller = self.caller_of(ctx, args)
             if not caller:
                 raise ToolError('chamador desconhecido: o header X-Brza-Session não veio e o argumento caller falta')
             if 'approved' in args:
@@ -214,17 +215,18 @@ class Orchestrator:
             fields = {k: args[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref',
                                            'deadline', 'blocks', 'priority') if k in args}
             fields.setdefault('runtime', 'claude')  # o teto de sessões conta por runtime: pedido sem ele escaparia
-            if 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só
-                fields['account'] = self.normalize_account(fields['account'])
-            elif self.active_account():
-                fields['account'] = self.active_account()  # o pedido sem `account` conta na ativa
-            decided = self.policy.decide_model(fields, self.resolver)
-            fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
-            client = clients_mod.from_header(
+            client, user_data = clients_mod.resolve_header(
                 next((v for k, v in (ctx.headers or {}).items() if k.lower() == 'x-brza-client'), None))
             if client:
                 fields['client'] = client
-            reason = self.gate_reason(args)
+            if user_data:  # o perfil de outro build (brza-dev): o worker abre no runtime dele
+                fields['user_data'] = user_data
+            if 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
+                fields['account'] = self.normalize_account(fields['account'], client)
+            fields.setdefault('account', '')  # sem `account`: `''`, e o `Limits` o conta na ativa da hora da admissão
+            decided = self.policy.decide_model(fields, self.resolver)
+            fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
+            reason = self.gate_reason(args, fields, client)
             if reason is None:
                 request = self.queue.enqueue(**fields, caller=caller, index=self._index)
                 self.telemetry.policy(self.queue.get(request), decided)
@@ -233,11 +235,14 @@ class Orchestrator:
                 return {**self.queued(request), 'model': row['model'], 'effort': row['effort'],
                         'reason': decided['reason']}
             gate_id = 'gate-' + secrets.token_hex(8)
+            found = self._index(fields.get('ref'))  # o `git show` fica fora do lock global da fila
             with self.queue.lock:  # o pedido `gated` e o gate nascem juntos: sem o gate, o pedido ficaria sem saída
-                request = self.queue.enqueue(**fields, caller=caller, state='gated', index=self._index)
+                request = self.queue.enqueue(**fields, caller=caller, state='gated', index=lambda ref: found)
                 try:
-                    self.queue._run('INSERT INTO gates (id, request_id, caller, reason, created_at) VALUES (?,?,?,?,?)',
-                                    (gate_id, request, caller, reason, self.queue.get(request)['created_at']))
+                    self.queue._run('INSERT INTO gates (id, request_id, caller, reason, created_at, policy_reason)'
+                                    ' VALUES (?,?,?,?,?,?)',
+                                    (gate_id, request, caller, reason, self.queue.get(request)['created_at'],
+                                     decided['reason']))
                 except Exception:
                     self.queue._run('DELETE FROM requests WHERE id = ?', (request,))
                     raise
@@ -245,23 +250,31 @@ class Orchestrator:
             self.telemetry.emit('gated', self.queue.get(request), reason=reason, gate=gate_id)
             # a proposta é o que o pedido guardado vai ser, depois da política: o que Anderson aprova é o que roda
             proposal = {k: fields[k] for k in ('task', 'role', 'target', 'model', 'effort', 'account', 'ref')
-                        if k in fields}
+                        if fields.get(k)}
             proposal['reason'] = decided['reason']
             return {'gate': {'id': gate_id, 'reason': reason, 'proposal': proposal}}
         except (ToolError, ValueError) as e:
             return _error(str(e))
 
-    @staticmethod
-    def gate_reason(args):
+    def gate_reason(self, args, fields, client=None):
         if args['role'] != ROLE_CONSULTANT:
             return (f'o papel {args["role"]!r} não é consultant: abrir executor ou outro papel exige a '
                     'confirmação de quem pediu (R5.2)')
         if args.get('account') is not None:
-            return f'troca de conta ({args["account"]!r}) exige a confirmação de quem pediu (R5.2)'
+            # com o leitor de contas, `fields['account']` já é a conta normalizada, e a que não é a ativa foi recusada
+            # (X38): só a troca de verdade, ou a que não se confere (sem leitor, ou sem ativa), pede a confirmação
+            active = self.active_account(client)
+            if active is None or fields.get('account') != active:
+                return f'troca de conta ({args["account"]!r}) exige a confirmação de quem pediu (R5.2)'
         return None
 
     def approve(self, gate_id, caller, args=None):
         args = args or {}
+        account = args.get('account')
+        if account is not None:
+            gate = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (gate_id,))
+            client = (self.queue.get(gate[0]['request_id']) or {}).get('client') if gate else None
+            account = self.normalize_account(account, client)  # a leitura das contas pode demorar: fora do lock global
         with self.queue.lock:  # a leitura, a conferência e a gravação são um passo só: duas aprovações não passam juntas
             rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
             if not rows:
@@ -273,9 +286,7 @@ class Orchestrator:
             if gate['approved_at'] is not None or request['state'] != 'gated':
                 raise ToolError(f'o gate {gate_id} já foi usado')
             for name in ('task', 'role', 'account'):
-                given = args.get(name)
-                if given is not None and name == 'account':
-                    given = self.normalize_account(given)
+                given = account if name == 'account' else args.get(name)
                 if given is not None and given != request[name]:
                     raise ToolError(f'o gate {gate_id} foi aberto para {name} {request[name]!r}: a aprovação é da '
                                     f'proposta guardada, e veio {args[name]!r}; abra outra proposta')
@@ -294,11 +305,12 @@ class Orchestrator:
         self.telemetry.emit('approved', self.queue.get(request['id']), reason=gate['reason'], gate=gate_id)
         self.telemetry.emit('queued', self.queue.get(request['id']), reason='gate aprovado')
         row = self.queue.get(request['id'])
-        return {**self.queued(request['id']), 'model': row['model'], 'effort': row['effort']}
+        return {**self.queued(request['id']), 'model': row['model'], 'effort': row['effort'],
+                'reason': gate['policy_reason']}
 
     def queued(self, request_id):
         """A resposta do pedido na fila: a posição na ordem da R9.2 e o teto que o segura, se algum."""
-        self.sync_limits()
+        self.prepare()
         with self.queue.lock:
             self.queue.next_admissible(self.limits)  # grava o teto de cada pedido que espera
             pending = self.queue.pending()
@@ -320,7 +332,8 @@ class Orchestrator:
             self.check_policy()
         except ToolError as e:
             return _error(str(e))
-        self.sync_limits()
+        self.prepare()
+        caller = self.caller_of(ctx, args)
         with self.queue.lock:
             self.queue.next_admissible(self.limits)
             pending = self.queue.pending()
@@ -328,7 +341,7 @@ class Orchestrator:
                 "SELECT r.*, g.id AS gate_id, g.reason AS reason FROM requests r LEFT JOIN gates g ON g.request_id = r.id"
                 " AND g.approved_at IS NULL WHERE r.state = 'gated' ORDER BY r.id")]
             running = [queue_mod._row(r) for r in self.queue._all("SELECT * FROM requests WHERE state = 'running' ORDER BY id")]
-            finished = self.queue.recent_finished(ctx.session) if getattr(ctx, 'session', None) else []
+            finished = self.queue.recent_finished(caller) if caller else []
 
         def brief(r, position=None):
             out = {k: r[k] for k in ('id', 'task', 'role', 'account', 'ref', 'caller')}
@@ -337,7 +350,9 @@ class Orchestrator:
             if r.get('error'):
                 out['error'] = r['error']
             if 'gate_id' in r.keys():
-                out.update({'gate_id': r['gate_id'], 'reason': r['reason']})
+                out['reason'] = r['reason']
+                if caller and r['caller'] == caller:  # o id do gate é de quem o abriu: com ele se aprova (R5.2)
+                    out['gate_id'] = r['gate_id']
             return out
         ceilings = {key: self.limits.get(key) for key in _CEILING_KEYS}
         ceilings['quota.hard_cap_percent'] = self.limits.hard_cap()

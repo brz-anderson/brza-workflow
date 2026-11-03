@@ -105,7 +105,7 @@ class EndToEndTest(ServerCase):
                          ['policy', 'queued', 'admitted',                      # primeiro
                           'policy', 'queued', 'held',                         # segundo, segurado
                           'done', 'admitted', 'done',                         # fim do primeiro, segundo sai e fecha
-                          'policy', 'gated', 'approved', 'queued', 'admitted',  # executor
+                          'policy', 'gated', 'approved', 'queued',            # executor: o ciclo não rodou
                           'resolved', 'policy', 'gated'])                     # papel desconhecido
         held = [r for r in rows if r['decision'] == 'held'][0]
         self.assertEqual((held['held_by'], held['request']), ('workspace', second['request']))

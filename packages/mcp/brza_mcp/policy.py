@@ -12,6 +12,8 @@ decimal como texto marcado e o devolve como float.
 from __future__ import annotations
 
 import importlib.util
+import json
+import math
 import re
 from pathlib import Path
 
@@ -34,6 +36,70 @@ DEFAULTS = {
     'resolver.tev1_keep_alive': '1m',
     'resolver.haiku_max_budget_usd': 0.01,
 }  # `machine.*` e `resolver.tev1_min_confidence` ficam sem valor de propósito (R2.2)
+
+# as chaves de sobreposição são as do `brza.toml` (D4), em lista fechada: chave com erro de digitação se recusa em vez
+# de gravar um valor que nada lê. Cada uma leva o tipo e a faixa: (tipo, mínimo, máximo, mínimo exclusivo)
+KEYS = {
+    'policy.enforce': ('bool',),
+    'policy.suggest_to_main': ('bool',),
+    'orchestrator.max_workers': ('int', 0, None, False),
+    'quota.soft_cap_percent': ('number', 0, 100, True),
+    'quota.hard_cap_percent': ('number', 0, 100, True),
+    'quota.max_sessions_per_account': ('int', 0, None, False),
+    'machine.min_free_mem_gb': ('number', 0, None, False),
+    'machine.max_swap_gb': ('number', 0, None, False),
+    'machine.max_cpu_percent': ('number', 0, 100, True),
+    'resolver.ollama_url': ('string',),
+    'resolver.tev1_model': ('string',),
+    'resolver.tev1_keep_alive': ('string',),
+    'resolver.tev1_min_confidence': ('number', 0, 1, False),
+    'resolver.haiku_max_budget_usd': ('number', 0, None, True),
+}
+
+
+def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def check_value(key, value):
+    """Confere o valor de uma chave de `KEYS` pelo tipo e pela faixa; levanta `ValueError` com o motivo."""
+    kind, *bounds = KEYS[key]
+    shown = json.dumps(value)
+    if kind == 'bool':
+        if not isinstance(value, bool):
+            raise ValueError(f'{key} é booleano, veio {shown}')
+    elif kind == 'string':
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f'{key} é texto não vazio, veio {shown}')
+    else:
+        if not _is_number(value) or not math.isfinite(value) or (kind == 'int' and not isinstance(value, int)):
+            raise ValueError(f'{key} é {"inteiro" if kind == "int" else "numérico finito"}, veio {shown}')
+        low, high, low_open = bounds
+        if value < low or (low_open and value == low) or (high is not None and value > high):
+            span = f'{"maior que" if low_open else "a partir de"} {low}' + (f' e até {high}' if high is not None else '')
+            raise ValueError(f'{key} fica {span}, veio {shown}')
+
+
+NAMESPACES = ('mcp', 'orchestrator', 'policy', 'quota', 'machine', 'resolver')  # o resto do brza.toml não é daqui
+_ROLE_KEY = re.compile(r'^policy\.roles\.[A-Za-z0-9_-]+\.(model|effort)$')
+
+
+def check_file_key(key, value):
+    """Confere uma chave plana do `brza.toml` com a mesma tabela da ferramenta `config`, mais `mcp.port` e as linhas
+    `policy.roles.<papel>.{model,effort}`; chave desconhecida ou tipo errado levanta `ValueError`."""
+    if key.split('.')[0] not in NAMESPACES:
+        return
+    if key in KEYS:
+        check_value(key, value)
+    elif key == 'mcp.port':
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            raise ValueError(f'mcp.port é um inteiro de 1 a 65535, veio {json.dumps(value)}')
+    elif _ROLE_KEY.match(key):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f'{key} é texto não vazio, veio {json.dumps(value)}')
+    else:
+        raise ValueError(f'chave desconhecida: {key!r} (confira o nome)')
+
 
 _FLOAT_LINE = re.compile(r'^(\s*[A-Za-z0-9_-]+\s*=\s*)(-?\d+\.\d+)(\s*(?:#.*)?)$')
 _MARK = '@float:'
@@ -101,9 +167,12 @@ class Policy:
         if path is None or not path.is_file():
             return values
         try:
-            values.update(flatten(parse_text(path.read_text(), self.use_parse_toml)))
+            found = flatten(parse_text(path.read_text(), self.use_parse_toml))
+            for key, value in found.items():  # a chave com erro de digitação some sem erro, e o tipo errado estoura depois
+                check_file_key(key, value)
         except (OSError, ValueError) as e:  # tomllib.TOMLDecodeError e brza_root.TomlError são ValueError
             raise PolicyError(f'{path}: {e}') from e
+        values.update(found)
         return values
 
     def config(self) -> dict:

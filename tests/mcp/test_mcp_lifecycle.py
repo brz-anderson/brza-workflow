@@ -247,11 +247,16 @@ class LifecycleTest(HomeCase):
                     print(e.code, file=err)
         return code, out.getvalue(), err.getvalue()
 
-    def live_server(self):
-        """Um servidor numa thread que responde o /health no lugar do agente, na porta do BRZA_MCP_PORT."""
+    def live_server(self, info=False):
+        """Um servidor numa thread que responde o /health no lugar do agente, na porta do BRZA_MCP_PORT (a do ambiente,
+        ou uma efêmera que ele passa a valer). Com `info`, grava o `mcp.json` como o `serve` do agente grava."""
         token = paths.ensure_token()
-        s = server.make_server(0, token, None)
+        s = server.make_server(int(os.environ.get('BRZA_MCP_PORT') or 0), token, None)
         os.environ['BRZA_MCP_PORT'] = str(s.server_address[1])
+        if info:
+            paths.ensure_runtime()
+            paths.info_path().write_text(json.dumps({'pid': os.getpid(), 'port': s.server_address[1],
+                                                     'started': time.time()}))
         s.quiet = True
         t = threading.Thread(target=s.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
         t.start()
@@ -263,7 +268,8 @@ class LifecycleTest(HomeCase):
         self.addCleanup(cleanup)
 
     def test_start_writes_the_plist_bootstraps_and_waits_for_the_health(self):
-        self.fake.on_bootstrap = self.live_server
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        self.fake.on_bootstrap = lambda: self.live_server(info=True)
         code, out, err = self.main('start', '--timeout', '5')
         self.assertEqual(code, 0, err)
         self.assertTrue(paths.plist_path().is_file())
@@ -272,7 +278,8 @@ class LifecycleTest(HomeCase):
 
     def test_start_on_a_loaded_agent_boots_it_out_and_bootstraps_again_to_reread_the_plist(self):  # A6
         self.fake.loaded = True
-        self.fake.on_bootstrap = self.live_server
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        self.fake.on_bootstrap = lambda: self.live_server(info=True)
         code, _, err = self.main('start', '--timeout', '5')
         self.assertEqual(code, 0, err)
         verbs = self.fake.verbs()
@@ -293,6 +300,96 @@ class LifecycleTest(HomeCase):
             code, _, err = self.main('start', '--timeout', '0.5')
         self.assertEqual(code, 1)
         self.assertIn('Bootstrap failed', err)
+
+    # --- rodada final, P1 -------------------------------------------------------------------------------------
+
+    def broken_workspace(self, text='[policy\nenforce = true\n'):
+        ws = self.tmp / 'ws'
+        ws.mkdir(exist_ok=True)
+        (ws / 'brza.toml').write_text(text)
+        os.environ['BRZA_WORKSPACE'] = str(ws)
+
+    def test_start_resolves_the_port_before_loading_anything_and_refuses_an_unreadable_toml(self):  # A1
+        self.broken_workspace()
+        code, _, err = self.main('start', '--timeout', '0.5')
+        self.assertEqual(code, 1)
+        self.assertIn('brza.toml ilegível', err)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(paths.plist_path().exists())
+
+    def test_start_writes_the_resolved_port_in_the_plist_even_when_it_came_from_the_toml(self):  # A1, A5
+        self.broken_workspace(f'[mcp]\nport = {free_port()}\n')
+        port = paths.default_port()
+        code, _, _ = self.main('start', '--timeout', '0.3')
+        self.assertEqual(code, 1)  # ninguém respondeu, mas o plist já foi gravado com a porta resolvida
+        env = plistlib.loads(paths.plist_path().read_bytes())['EnvironmentVariables']
+        self.assertEqual(env['BRZA_MCP_PORT'], str(port))
+
+    def test_the_plist_carries_the_port_of_the_environment_and_the_resolved_one(self):  # A5
+        self.assertNotIn('BRZA_MCP_PORT', launchd.build_plist()['EnvironmentVariables'])
+        os.environ['BRZA_MCP_PORT'] = '4401'
+        self.assertEqual(launchd.build_plist()['EnvironmentVariables']['BRZA_MCP_PORT'], '4401')
+        self.assertEqual(launchd.build_plist(4402)['EnvironmentVariables']['BRZA_MCP_PORT'], '4402')
+
+    def test_the_serve_of_the_agent_takes_an_unreadable_toml_as_no_key_and_warns(self):  # A1
+        self.broken_workspace()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(paths.default_port(lenient=True), 4242)
+        self.assertIn('brza.toml ilegível', err.getvalue())
+        with self.assertRaises(SystemExit):  # sem o `lenient`, quem pergunta a porta recebe a recusa
+            paths.default_port()
+
+    def test_start_does_not_take_the_health_of_another_process_for_the_agent(self):  # A4
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        self.live_server()  # outro processo já escuta na porta, e o bootstrap não sobe nada
+        code, _, err = self.main('start', '--timeout', '0.6')
+        self.assertEqual(code, 1)
+        self.assertIn('/health do agente', err)
+        self.assertIn('mcp.err.log', err)
+
+    def test_start_does_not_take_a_stale_runtime_info_for_the_agent(self):  # A4
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        paths.ensure_runtime()
+        paths.info_path().write_text(json.dumps({'pid': os.getpid(), 'port': 1, 'started': time.time() - 3600}))
+        self.fake.on_bootstrap = self.live_server  # responde, mas o mcp.json segue o de antes do bootstrap
+        self.assertEqual(self.main('start', '--timeout', '0.6')[0], 1)
+
+    def test_start_accepts_the_pid_that_launchctl_reports(self):  # A4
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        self.fake.on_bootstrap = self.live_server
+        real = self.fake
+
+        def with_pid(*args):
+            r = real(*args)
+            if args[0] == 'print' and r.returncode == 0:
+                return CompletedProcess(args, 0, f'\tstate = running\n\tpid = {os.getpid()}\n', '')
+            return r
+        with patch.object(launchd, 'run_launchctl', with_pid):
+            self.fake.loaded = True
+            self.assertEqual(self.main('start', '--timeout', '3')[0], 0)
+
+    def test_a_port_that_is_not_an_integer_between_1_and_65535_is_refused(self):  # A2
+        for text in ('"4300"', 'true', '70000', '0', '-5', '4300.5'):
+            with self.subTest(port=text):
+                self.broken_workspace(f'[mcp]\nport = {text}\n')
+                code, _, err = self.main('url')
+                self.assertEqual(code, 1)
+                self.assertIn('brza.toml', err)
+                self.assertIn('1 a 65535', err)
+                self.assertEqual(self.main('start')[0], 1)
+                self.assertEqual(self.fake.calls, [])
+
+    def test_the_port_of_the_environment_and_of_the_option_are_validated_without_a_traceback(self):  # A2
+        for value in ('abc', '70000', '0'):
+            with self.subTest(env=value):
+                os.environ['BRZA_MCP_PORT'] = value
+                code, _, err = self.main('url')
+                self.assertEqual(code, 1)
+                self.assertIn('BRZA_MCP_PORT', err)
+        os.environ.pop('BRZA_MCP_PORT')
+        self.assertEqual(self.main('url', '--port', '70000')[0], 1)
 
     def test_stop_boots_the_agent_out(self):
         self.fake.loaded = True
@@ -441,6 +538,29 @@ def free_port() -> int:
 
 
 class ProcessTest(HomeCase):
+    def test_serve_with_an_unreadable_toml_and_the_plist_port_answers_the_health(self):  # P1 final A1
+        ws = self.tmp / 'ws'
+        ws.mkdir()
+        (ws / 'brza.toml').write_text('[policy\nenforce = true\n')
+        port = free_port()
+        env = {**os.environ, 'BRZA_HOME': str(self.home), 'BRZA_WORKSPACE': str(ws), 'BRZA_MCP_PORT': str(port),
+               'PYTHONDONTWRITEBYTECODE': '1'}
+        proc = subprocess.Popen([sys.executable, str(ENTRY), 'serve'], env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        token = paths.ensure_token()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        body, deadline = None, time.time() + 10
+        while time.time() < deadline and body is None and proc.poll() is None:
+            try:
+                req = urllib.request.Request(f'http://127.0.0.1:{port}/health', headers={'Authorization': f'Bearer {token}'})
+                body = json.load(opener.open(req, timeout=1))
+            except (OSError, ValueError):
+                time.sleep(0.1)
+        self.assertIsNotNone(body, proc.poll())
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=10)
+
     def test_serve_as_a_process_answers_the_health_and_stops_clean_on_sigterm(self):
         port = free_port()
         env = {**os.environ, 'BRZA_HOME': str(self.home), 'PYTHONDONTWRITEBYTECODE': '1'}

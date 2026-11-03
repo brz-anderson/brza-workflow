@@ -125,6 +125,38 @@ class ReservationTest(unittest.TestCase):
         self.assertEqual(queue.get(rid)['deadline'], '2026-12-01')
 
 
+class ExplodingAfterTheChosenTest(unittest.TestCase):  # P2 final A1
+    class Boom:
+        """Admite o 1º pedido e levanta no 2º: a passada cai depois do escolhido já aberto."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def decide(self, request, queue):
+            self.calls += 1
+            if self.calls == 2:
+                raise KeyError('saída malformada')
+            return q_decision_admit()
+
+    def test_admit_next_frees_the_chosen_slot_when_the_pass_raises_after_it(self):
+        queue, boom = make(), self.Boom()
+        first = queue.enqueue(task='a', role='consultant')
+        queue.enqueue(task='b', role='consultant')
+        with self.assertRaises(KeyError):
+            queue.admit_next(boom)
+        self.assertEqual(queue.running_count(), 0)
+        self.assertEqual(queue.orphan_workers(), [])
+        self.assertEqual(queue.get(first)['state'], 'queued')
+        self.assertEqual({r['state'] for r in queue._all('SELECT state FROM requests')}, {'queued'})
+
+    def test_the_chosen_request_stays_reserved_when_the_pass_ends_normally(self):
+        queue = make()
+        first = queue.enqueue(task='a', role='consultant')
+        queue.enqueue(task='b', role='consultant')
+        self.assertEqual(queue.admit_next(AllowAll())['id'], first)
+        self.assertEqual(queue.running_count(), 1)
+
+
 class PersistenceTest(unittest.TestCase):
     def test_default_path_is_orchestrator_db_in_the_brza_home(self):
         import os

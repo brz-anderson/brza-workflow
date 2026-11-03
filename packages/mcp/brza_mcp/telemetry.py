@@ -56,6 +56,7 @@ class Telemetry:
         self.lock = threading.Lock()
         self.warned = False
         self.states = {}  # pedido -> a última decisão de admissão escrita, para não repetir a cada `status`
+        self.chosen = {}  # pedido -> (motivo, medidas) da última vez que a passada o escolheu, até o ciclo abri-lo
 
     # ---- o workstream ----
 
@@ -80,6 +81,7 @@ class Telemetry:
         """Grava a linha e devolve se gravou. `request` é a linha do pedido na fila (ou só `{'id': ...}`); `fields`
         sobrepõe qualquer campo (`model`, `effort`, `reason`, `held_by`, `resolver`, `measures`, `gate`...)."""
         if not self.path:
+            self._warn('sem BRZA_WORKSPACE: a linha route não se grava')
             return False
         try:
             request = request or {}
@@ -100,33 +102,53 @@ class Telemetry:
                     os.close(fd)
             return True
         except Exception as e:  # nenhuma falha daqui derruba o pedido
-            if not self.warned:
-                self.warned = True
-                try:
-                    self.log(f'não gravei em {self.path}: {e}')
-                except Exception:
-                    pass
+            self._warn(f'não gravei em {self.path}: {e}')
             return False
+
+    def _warn(self, message):
+        """O motivo de a linha se perder vai uma vez ao log, e nunca levanta."""
+        if self.warned:
+            return
+        self.warned = True
+        try:
+            self.log(message)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---- os pontos de decisão ----
 
     def decided(self, request, decision, chosen):
-        """O gancho da `Queue.next_admissible`: a retenção (o teto, o motivo e as medidas) e a admissão do primeiro
-        admissível. Cada mudança vira uma linha; a repetição, a cada `status` ou volta do ciclo, não."""
+        """O gancho da `Queue._admit`: só a retenção vira linha (o teto, o motivo e as medidas), e cada mudança é uma
+        linha. A passada que escolhe o pedido também é a prévia do `status` e do `queued()`, e a vaga se desfaz se o
+        cliente não abre: ela só guarda as medidas, e o `admitted` sai quando o ciclo abre o worker."""
         try:
             if not decision.admit:
                 state = ('held', decision.ceiling)
+                if self.states.get(request['id']) == state:
+                    return
+                self.states[request['id']] = state
+                self.emit('held', request, reason=decision.reason, held_by=decision.ceiling,
+                          measures=decision.measures)
             elif chosen:
-                state = ('admitted', None)
-            else:
-                return
-            if self.states.get(request['id']) == state:
-                return
-            self.states[request['id']] = state
-            self.emit(state[0], request, reason=decision.reason, held_by=decision.ceiling,
-                      measures=decision.measures)
-        except Exception:
+                self.chosen[request['id']] = (decision.reason, decision.measures)
+        except Exception:  # noqa: BLE001
             pass
+
+    def admitted(self, request):
+        """A admissão de verdade: o ciclo abriu o worker do pedido, com as medidas da passada que o escolheu."""
+        try:
+            if self.states.get(request['id']) == ('admitted', None):
+                return
+            reason, measures = self.chosen.pop(request['id'], (None, None))
+            self.states[request['id']] = ('admitted', None)
+            self.emit('admitted', request, reason=reason, held_by=None, measures=measures)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def forget(self, request_id):
+        """O pedido voltou à fila (a recuperação do ciclo): a próxima admissão é uma linha nova."""
+        self.states.pop(request_id, None)
+        self.chosen.pop(request_id, None)
 
     def policy(self, request, decided):
         """A decisão da política (`decide_model`) e, quando houve, o desempate do `resolver` que veio com ela."""

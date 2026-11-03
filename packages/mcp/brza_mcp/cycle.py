@@ -24,14 +24,17 @@ DEFAULT_INTERVAL = 15.0
 TASK_DONE = ('completed',)
 TASK_FAILED = ('failed',)
 POLL_FAILURES = 3  # as consultas seguidas que falham antes de perguntar ao cliente se o worker ainda existe
+STUCK_POLLS = 3  # as voltas com a task ainda não despachada, sem `dispatch`, antes de recuperar o pedido
+TASK_NOT_DISPATCHED = ('pending', 'ready')
+GONE_CODE = 'dispatch_not_found'  # o único erro do app que diz que o worker não existe (o app fechado é outro)
 
 
 class CycleError(RuntimeError):
     """`code` e `body` vêm do erro que o CLI respondeu (`{ok: false, error: {code}}`); sem eles, o CLI nem respondeu."""
 
-    def __init__(self, message, code=None, body=None):
+    def __init__(self, message, code=None, body=None, stderr=''):
         super().__init__(message)
-        self.code, self.body = code, body
+        self.code, self.body, self.stderr = code, body, stderr
 
 
 class NoClient(CycleError):
@@ -94,6 +97,8 @@ class Scheduler:
         self.tick_lock = threading.Lock()
         self.errors = {}
         self.poll_failures = {}
+        self.last_status = {}  # o status da task de cada worker, na última consulta
+        self.stuck = {}
 
     # ---- o CLI ----
 
@@ -103,12 +108,12 @@ class Scheduler:
             raise NoClient('cliente desconhecido: sem X-Brza-Client no pedido e nenhum processo vivo do Studio ou Orca')
         return name
 
-    def env_for(self, request, client):
+    def env_for(self, request, client):  # `user_data`: o perfil de outro build que o header trouxe (o runtime dele)
         if not request.get('caller'):
             raise CycleError('o pedido não tem chamador: sem ORCA_AGENT_SESSION_ID o run-create cai noutro terminal (H4)')
         env = {k: v for k, v in os.environ.items() if not k.startswith('ORCA_')}
         env['ORCA_AGENT_SESSION_ID'] = request['caller']
-        env['ORCA_USER_DATA_PATH'] = clients_mod.CLIENTS[client]['user_data']
+        env['ORCA_USER_DATA_PATH'] = request.get('user_data') or clients_mod.CLIENTS[client]['user_data']
         return env
 
     def cli(self, client, env, *args):
@@ -123,7 +128,7 @@ class Scheduler:
             error = body.get('error') if isinstance(body, dict) else None
             raise CycleError(f'orchestration {args[0]} falhou: {detail}',
                              code=error.get('code') if isinstance(error, dict) else None,
-                             body=body if isinstance(body, dict) else None)
+                             body=body if isinstance(body, dict) else None, stderr=err or '')
         return body.get('result', body)
 
     # ---- abrir ----
@@ -153,13 +158,22 @@ class Scheduler:
             started = self.cli(client, env, *args)
         except CycleError as e:
             dispatch = find_key(e.body, 'dispatchId', 'dispatch_id') if e.body else None
-            if e.code == 'start_outcome_unknown':  # o worker pode estar de pé: o poll decide, e ninguém o relança
+            if self._outcome_unknown(e):  # o worker pode estar de pé: o poll decide, e ninguém o relança
                 state['dispatch'] = dispatch
                 return state
             self._abandon(client, env, task, dispatch)
             raise
         state['dispatch'] = find_key(started, 'dispatchId', 'dispatch_id')
         return state
+
+    @staticmethod
+    def _outcome_unknown(error) -> bool:
+        """O `worker-start` que o app deu por desconhecido. O app o imprime como `{ok: false, result: {state:
+        'outcome_unknown', dispatchId}}` e põe o código `start_outcome_unknown` só no stderr; o `error.code` do JSON
+        também vale."""
+        result = (error.body or {}).get('result') if isinstance(error.body, dict) else None
+        return (error.code == 'start_outcome_unknown' or 'start_outcome_unknown' in (error.stderr or '')
+                or (isinstance(result, dict) and result.get('state') == 'outcome_unknown'))
 
     def _abandon(self, client, env, task, dispatch):
         """O `worker-start` falhou de vez: o que ele deixou se libera e a task fecha como `failed`, sem pendurar."""
@@ -177,6 +191,7 @@ class Scheduler:
         listed = self.cli(state['client'], env, 'task-list', '--run', state['run'])
         task = find_task(listed, state['task'])
         status = (task or {}).get('status')
+        self.last_status[request['id']] = status
         if status in TASK_DONE:
             return 'done'
         if status in TASK_FAILED:
@@ -217,6 +232,8 @@ class Scheduler:
                 self.queue.set_error(rid, None)
                 self.errors.pop(rid, None)
                 opened.append(rid)
+                if self.telemetry:
+                    self.telemetry.admitted(self.queue.get(rid))  # a admissão de verdade: o worker abriu
 
     def _finish(self):
         rows = self.queue._all("SELECT request_id, session FROM workers WHERE state = 'running' AND session IS NOT NULL")
@@ -237,13 +254,52 @@ class Scheduler:
                 continue
             self.poll_failures.pop(rid, None)
             if outcome:
+                self.stuck.pop(rid, None)
                 self.queue.mark_done(rid, failed=outcome == 'failed',
                                      error='a task do worker terminou como failed' if outcome == 'failed' else None)
                 self._route(outcome, rid, f'task {outcome} no worker')
+            elif not state.get('dispatch') and self.last_status.get(rid) in TASK_NOT_DISPATCHED:
+                self.stuck[rid] = self.stuck.get(rid, 0) + 1
+                if self.stuck[rid] >= STUCK_POLLS:
+                    self._recover(rid, state)
+            else:
+                self.stuck.pop(rid, None)
+
+    def _recover(self, request_id, state):
+        """O pedido `running` sem `dispatch` cuja task nunca saiu de `pending`/`ready`: o `worker-start` não chegou ao
+        app (a queda veio no meio dele). A task fecha como `failed` e o pedido volta à fila; se o app não responde, fica
+        para a próxima volta."""
+        try:
+            env = self.env_for(self.queue.get(request_id), state['client'])
+            self.cli(state['client'], env, 'task-update', '--id', state['task'], '--status', 'failed')
+        except (CycleError, KeyError) as e:
+            self.log(f'pedido {request_id}: a recuperação da task parada falhou: {e}')
+            return
+        self.queue.release(request_id)
+        if self.telemetry:
+            self.telemetry.forget(request_id)
+        self.stuck.pop(request_id, None)
+        self.last_status.pop(request_id, None)
+        self.log(f'pedido {request_id}: a task {state["task"]} nunca foi despachada; o pedido voltou à fila')
+
+    def _recover_all(self):
+        """Na subida: o pedido `running` sem `dispatch` e com a task parada se recupera já, sem esperar as voltas."""
+        for row in self.queue._all("SELECT request_id, session FROM workers WHERE state = 'running'"
+                                   ' AND session IS NOT NULL'):
+            rid = row['request_id']
+            try:
+                state = json.loads(row['session'])
+                if state.get('dispatch'):
+                    continue
+                self.poll(self.queue.get(rid), state)
+                if self.last_status.get(rid) in TASK_NOT_DISPATCHED:
+                    self._recover(rid, state)
+            except (ValueError, KeyError, CycleError, AttributeError, TypeError):
+                continue  # o app fora do ar: as voltas do ciclo tentam de novo
 
     def _gone(self, request_id, state):
-        """O cliente responde que não conhece o worker: só então ele se dá por perdido. Cliente fora do ar, ou sem o
-        `dispatchId` para perguntar, mantém o pedido `running`."""
+        """O cliente responde `dispatch_not_found`: só então o worker se dá por perdido. Cliente fora do ar (o CLI
+        responde JSON com `runtime_unavailable`), ou sem o `dispatchId` para perguntar, mantém o pedido `running`."""
         dispatch = (state or {}).get('dispatch')
         if not dispatch:
             return False
@@ -251,7 +307,7 @@ class Scheduler:
             env = self.env_for(self.queue.get(request_id), state['client'])
             self.cli(state['client'], env, 'worker-show', '--dispatch', dispatch)
         except (CycleError, KeyError) as e:
-            return isinstance(e, CycleError) and e.body is not None
+            return isinstance(e, CycleError) and e.code == GONE_CODE
         return False
 
     def _route(self, decision, request_id, reason):
@@ -264,6 +320,10 @@ class Scheduler:
         self.wake.set()
 
     def _loop(self):
+        try:
+            self._recover_all()
+        except Exception as e:  # noqa: BLE001 - a recuperação da subida não derruba a thread
+            self.log(f'recuperação: {e}')
         while not self.stop_event.is_set():
             try:
                 self.tick()
