@@ -131,8 +131,15 @@ class ClaudeTranscriptTest(HookTest):
 
     def test_turn_writes_the_account_by_the_config_directory(self):
         path = self.transcript()
-        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/Users/x/.claude-adm/"}):
+        cfg = os.path.join(self.tmp.name, ".claude-adm")
+        os.makedirs(os.path.join(cfg, "plugins"), exist_ok=True)
+        with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w", encoding="utf-8") as f:
+            json.dump({"plugins": {"fixfy@x": [{"scope": "user", "version": "1.2.3"}]}}, f)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg + "/"}):
             self.run_hook({"hook_event_name": "Stop", "session_id": "s", "transcript_path": path}, mode="turn")
+            self.assertEqual(self.measure.plugin_version("fixfy:git-runner", self.tmp.name), "1.2.3")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "   "}, clear=False):
+            self.assertEqual(self.measure.account(), ".claude")
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
             self.assertEqual(self.measure.account(), ".claude")

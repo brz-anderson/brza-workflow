@@ -110,7 +110,7 @@ def now():
 def account():
     """A conta do Claude Code pelo diretório de configuração: `.claude`, ou `.claude-adm` quando a `adm-claude` do
     `~/.zshrc` põe o `CLAUDE_CONFIG_DIR`. Cada conta tem o próprio limite semanal."""
-    return os.path.basename(os.path.normpath(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"))
+    return os.path.basename(os.path.normpath((os.environ.get("CLAUDE_CONFIG_DIR") or "").strip() or "~/.claude"))
 
 
 def bridge_session():
@@ -139,8 +139,9 @@ def plugin_version(name, cwd):
     if not name or ":" not in name:
         return None
     plugin = name.split(":", 1)[0]
+    cfg_dir = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip() or CONFIG_DIR
     try:
-        with open(os.path.join(CONFIG_DIR, "plugins", "installed_plugins.json"), encoding="utf-8") as f:
+        with open(os.path.join(cfg_dir, "plugins", "installed_plugins.json"), encoding="utf-8") as f:
             installed = json.load(f).get("plugins", {})
     except (OSError, ValueError):
         return None

@@ -56,11 +56,14 @@ workstream pelo sync. A raiz onde a nota vai, a raiz-alvo, sai assim, na ordem:
 O checador roda com --root na raiz-alvo.
 
 O índice da master. `.brza/index.jsonl` é a única exceção à regra de que a master guarda só a norma: uma linha JSON por
-evento (`created`, `changed`) de plano, issue ou decisão, de qualquer workstream. Só o brza-note acrescenta. O estado
-vigente de um id é a linha de maior `ts` (current_state), porque o merge=union do .gitattributes junta acréscimos
-simultâneos fora de ordem; o id de issue e decisão é `issue:<slug>` ou `decision:<slug>`, com o slug da criação, que o
-rename não muda (só o `path`). A "master" do índice é a <branch> do manifesto, no <remote> dele. O commit nela sai de
-fetch, read-tree da <remote>/<branch> num índice temporário, hash-object, update-index, write-tree, commit-tree e
+evento (`created`, `changed`) de plano, revisão (`REV-NNN`), issue (comum `issue:<slug>` ou migração `MIG-NNN`) ou
+decisão (`decision:<slug>`), de qualquer workstream. Só o brza-note acrescenta. O estado vigente de um id é a linha de
+maior `ts` (current_state), porque o merge=union do .gitattributes junta acréscimos simultâneos fora de ordem; o id de
+issue comum e decisão leva o slug da criação, que o rename não muda (só o `path`). O campo `session` identifica a
+sessão que produziu a linha do índice (inclusive em `index --rebuild`, onde registra a sessão que executa a
+reconstrução, sem recuperar nem certificar a sessão de autoria da nota; sem nome resolvido, o campo fica ausente). A
+"master" do índice é a <branch> do manifesto, no <remote> dele. O commit nela sai de fetch, read-tree da
+<remote>/<branch> num índice temporário, hash-object, update-index, write-tree, commit-tree e
 push <sha>:refs/heads/<branch>: não toca o checkout principal, nem o worktree do workstream.
 
 O assunto é kebab-case, sem a data, e o --scope padrão é workspace. O worklog leva a sessão do $CLAUDE_SESSION_NAME,
@@ -225,19 +228,23 @@ def sessions_module() -> dict | None:
 
 def session_name() -> str | None:
     """O nome da sessão: o CLAUDE_SESSION_NAME ou, num chat do app, o do mapa de sessões e, sem entrada, o /rename.
-    Sem o `brza-sessions` do pacote do cliente, só o CLAUDE_SESSION_NAME vale; do contrário, None."""
-    if name := os.environ.get('CLAUDE_SESSION_NAME'):
+    Nome vazio permite fallback disponível; sem o `brza-sessions` do pacote do cliente, só o CLAUDE_SESSION_NAME vale;
+    sem fonte, retorna None (D5, D10)."""
+    if name := (os.environ.get('CLAUDE_SESSION_NAME') or '').strip():
         return name
-    chat = os.environ.get('ORCA_AGENT_SESSION_ID')
+    chat = (os.environ.get('ORCA_AGENT_SESSION_ID') or '').strip()
     if not chat:
         return None
     sessions = sessions_module()
     if sessions is None:
         return None
-    if entry := sessions['session_map']().get(chat):
-        return entry['name']
+    if (entry := sessions['session_map']().get(chat)) and isinstance(entry.get('name'), str) and (mapped := entry['name'].strip()):
+        return mapped
     claude_session = sessions['provider_session'](chat)
-    return sessions['chat_name'](claude_session) if claude_session else None
+    if not claude_session:
+        return None
+    renamed = sessions['chat_name'](claude_session)
+    return renamed.strip() if isinstance(renamed, str) and renamed.strip() else None
 
 
 def manifest() -> dict:

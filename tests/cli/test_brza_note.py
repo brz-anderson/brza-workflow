@@ -187,6 +187,18 @@ class NoteTest(NoteFixture):
         text, _ = self.new_worklog_in_chat({}, None, None)
         self.assertIn('na sessão `<a escrever>`', text)
 
+    def test_empty_session_name_falls_back_to_available_source(self):
+        """D10: nome vazio em CLAUDE_SESSION_NAME ou no session_map faz fallback para a fonte seguinte; sem fonte, None."""
+        asked, sessions = self.fake_sessions({'claude_x': {'name': '   '}}, 'uuid-x', 'pln-fallback')
+        with patch.dict('os.environ', {'CLAUDE_SESSION_NAME': '  ', 'ORCA_AGENT_SESSION_ID': 'claude_x'}), \
+                patch.dict(GLOBALS, {'sessions_module': lambda: sessions}):
+            self.assertEqual(GLOBALS['session_name'](), 'pln-fallback')
+        self.assertEqual(asked, ['claude_x'])
+        _, sessions_empty = self.fake_sessions({'claude_x': {'name': ''}}, 'uuid-x', '   ')
+        with patch.dict('os.environ', {'CLAUDE_SESSION_NAME': '', 'ORCA_AGENT_SESSION_ID': 'claude_x'}), \
+                patch.dict(GLOBALS, {'sessions_module': lambda: sessions_empty}):
+            self.assertIsNone(GLOBALS['session_name']())
+
     def test_session_name_without_the_client_package_is_none(self):
         """R10.1: o núcleo roda sem o pacote do cliente; sem o brza-sessions, o chat não dá nome."""
         with tempfile.TemporaryDirectory() as tmp:

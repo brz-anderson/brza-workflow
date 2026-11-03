@@ -222,6 +222,19 @@ class WorkstreamTest(RepoTest):
         self.run_hook({"session_id": "s", "tool_name": "mcp__a__b"}, mode="mcp")  # sem cwd
         self.assertIsNone(self.logged()[-1]["workstream"])
 
+    def test_code_worktree_on_plan_branch_writes_workstream_and_configured_account(self):
+        tree = self.studio_tree("feat/pln-007-chat-preview")
+        session = os.path.join(self.tmp.name, "code-turn.jsonl")
+        write(session, json.dumps({"type": "assistant", "requestId": "r1", "message": {
+            "model": "claude-opus-5-5", "content": [], "usage": {"input_tokens": 5}}}) + "\n")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/Users/x/.claude-adm"}):
+            self.run_hook({"session_id": "s", "cwd": tree, "transcript_path": session}, mode="turn")
+            self.run_hook({"session_id": "s", "cwd": tree, "agent_type": "collector", "agent_id": "a1",
+                           "agent_transcript_path": session}, mode="subagent")
+        rows = [r for r in self.logged() if r["event"] in ("turn", "subagent")]
+        self.assertEqual([(r["event"], r["workstream"], r["account"]) for r in rows],
+                         [("turn", "studio", ".claude-adm"), ("subagent", "studio", ".claude-adm")])
+
 
 class MemoryTest(RepoTest):
     def setUp(self):
