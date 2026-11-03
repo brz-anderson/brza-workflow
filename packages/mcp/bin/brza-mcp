@@ -6,6 +6,7 @@
   brza mcp stop               descarrega o agente
   brza mcp status             diz se o agente está carregado e se o /health responde; sai 0 de pé e 3 parado
   brza mcp token              imprime o token Bearer, criando-o se falta
+  brza mcp config [<chave> [<valor>]]   lê ou grava as sobreposições da política; sai 3 com o servidor parado
 
 O código está em packages/mcp/brza_mcp/; este arquivo só o põe no sys.path pelo caminho real, para valer também pelo
 link em ~/.local/bin.

@@ -5,8 +5,8 @@
 Só `role: "consultant"` sem `account` entra direto na fila. Qualquer outro papel, ou a troca de conta, devolve
 `{"gate": {...}}` com a proposta e grava o pedido `gated`; a sessão principal pergunta a Anderson e chama `dispatch`
 de novo com `approved: <id do gate>`, pelo mesmo chamador. O chamador é o `X-Brza-Session` (H1) e, sem o header, o
-argumento `caller`. As sobreposições da política ficam na tabela `config` do SQLite da fila; o `brza.toml` é do P4,
-que as funde pelo `get_overrides()`.
+argumento `caller`. As sobreposições da política ficam na tabela `config` do SQLite da fila; o `Policy` (P4) as
+funde por cima do `brza.toml`.
 """
 import json
 import os
@@ -14,6 +14,7 @@ import secrets
 from datetime import date
 
 from . import limits as limits_mod
+from . import policy as policy_mod
 from . import queue as queue_mod
 
 ROLE_CONSULTANT = 'consultant'
@@ -86,11 +87,14 @@ def get_overrides(queue) -> dict:
 
 
 class Orchestrator:
-    def __init__(self, queue, limits=None, workspace=None, index_reader=queue_mod.git_index_reader):
+    def __init__(self, queue, limits=None, workspace=None, index_reader=queue_mod.git_index_reader, policy=None,
+                 resolver=None):
         self.queue = queue
         self.limits = limits or limits_mod.Limits()
         self.base_config = dict(self.limits.config)
         self.workspace = workspace if workspace is not None else os.environ.get('BRZA_WORKSPACE')
+        self.policy = policy or policy_mod.Policy(self.workspace, overrides=self.get_overrides)
+        self.resolver = resolver
         self.index_reader = index_reader
         with queue.lock:
             queue.conn.executescript(GATES_SCHEMA)
@@ -101,7 +105,8 @@ class Orchestrator:
         return get_overrides(self.queue)
 
     def sync_limits(self):
-        self.limits.config = {**self.base_config, **self.get_overrides()}
+        # o `brza.toml` (ou os padrões do D4) por baixo, o que o `Limits` recebeu em cima dele, e as sobreposições
+        self.limits.config = {**self.policy.load(), **self.base_config, **self.get_overrides()}
 
     def _index(self, ref):
         if not self.workspace:
@@ -144,6 +149,8 @@ class Orchestrator:
                 return self.approve(args['approved'], caller)
             fields = {k: args[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref',
                                            'deadline', 'blocks', 'priority') if k in args}
+            decided = self.policy.decide_model(fields, self.resolver)
+            fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
             reason = self.gate_reason(args)
             if reason is None:
                 return self.queued(self.queue.enqueue(**fields, caller=caller, index=self._index))
@@ -212,7 +219,7 @@ class Orchestrator:
         if ceilings['quota.hard_cap_percent'] is None:
             ceilings['quota.hard_cap_percent'] = limits_mod.DEFAULT_HARD_CAP
         return {'queued': [brief(r, i) for i, r in enumerate(pending, 1)], 'gated': [brief(r) for r in gated],
-                'running': [brief(r) for r in running], 'ceilings': ceilings}
+                'running': [brief(r) for r in running], 'ceilings': ceilings, 'suggestion': self.policy.suggestion()}
 
     # ---- config ----
 
@@ -245,9 +252,11 @@ class Orchestrator:
             return _error(str(e))
 
 
-def install(registry, queue=None, limits=None, workspace=None, index_reader=queue_mod.git_index_reader):
+def install(registry, queue=None, limits=None, workspace=None, index_reader=queue_mod.git_index_reader, policy=None,
+            resolver=None):
     """Registra as três ferramentas no `registry`; sem `queue`, abre a fila do BRZA_HOME. Devolve o serviço."""
-    service = Orchestrator(queue if queue is not None else queue_mod.Queue(), limits, workspace, index_reader)
+    service = Orchestrator(queue if queue is not None else queue_mod.Queue(), limits, workspace, index_reader, policy,
+                           resolver)
     registry.register('dispatch', 'Pede um worker: o consultor entra na fila; outro papel ou troca de conta devolve '
                       'um gate, que se aprova chamando de novo com approved.', service.dispatch, DISPATCH_SCHEMA)
     registry.register('status', 'A fila, os gates, os workers abertos e os tetos vigentes.', service.status,

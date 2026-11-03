@@ -1,0 +1,134 @@
+{
+  "description": "Os casos do M11 (PLN-003, medição de 2026-11-03), refeitos a partir da descrição: 10 de camada pelo texto e 5 de conta por cota (usedPercent da janela de 5 h e da semanal), com teto de 90% e margem de 5 pontos; cada conta roda nas duas ordens.",
+  "hard_cap": 90,
+  "margin": 5,
+  "layers": [
+    {
+      "id": "L1",
+      "text": "Desenhar a arquitetura do módulo de filas e decidir entre SQLite e arquivos planos",
+      "layer": "alta"
+    },
+    {
+      "id": "L2",
+      "text": "Decidir qual das duas alternativas de cache cabe no plano, com o custo de cada uma",
+      "layer": "alta"
+    },
+    {
+      "id": "L3",
+      "text": "Revisar de forma adversária o plano de migração antes da execução",
+      "layer": "alta"
+    },
+    {
+      "id": "L4",
+      "text": "Julgar se a divergência entre o desenho e o disco pede uma rodada com quem pediu",
+      "layer": "alta"
+    },
+    {
+      "id": "L5",
+      "text": "Implementar a função que lê o brza.toml, com testes unitários",
+      "layer": "media"
+    },
+    {
+      "id": "L6",
+      "text": "Levantar em todos os arquivos de hooks onde o brza_root é importado e agregar a lista",
+      "layer": "media"
+    },
+    {
+      "id": "L7",
+      "text": "Rodar a suíte tests/cli e reportar as falhas por arquivo",
+      "layer": "media"
+    },
+    {
+      "id": "L8",
+      "text": "Extrair de dez notas do plano os campos priority e deadline para uma tabela",
+      "layer": "media"
+    },
+    {
+      "id": "L9",
+      "text": "Listar os arquivos .md de uma pasta",
+      "layer": "rapida"
+    },
+    {
+      "id": "L10",
+      "text": "Contar quantas linhas tem o arquivo de log",
+      "layer": "rapida"
+    }
+  ],
+  "accounts": [
+    {
+      "id": "A1",
+      "title": "menor uso vence",
+      "candidates": {
+        "conta-a": [
+          20,
+          30
+        ],
+        "conta-b": [
+          60,
+          70
+        ]
+      },
+      "account": "conta-a"
+    },
+    {
+      "id": "A2",
+      "title": "conta no teto sai",
+      "candidates": {
+        "conta-a": [
+          95,
+          10
+        ],
+        "conta-b": [
+          50,
+          50
+        ]
+      },
+      "account": "conta-b"
+    },
+    {
+      "id": "A3",
+      "title": "empate na margem: ordem alfabética",
+      "candidates": {
+        "conta-a": [
+          50,
+          40
+        ],
+        "conta-b": [
+          52,
+          45
+        ]
+      },
+      "account": "conta-a"
+    },
+    {
+      "id": "A4",
+      "title": "todas no teto",
+      "candidates": {
+        "conta-a": [
+          91,
+          20
+        ],
+        "conta-b": [
+          92,
+          10
+        ]
+      },
+      "account": null
+    },
+    {
+      "id": "A5",
+      "title": "janela semanal manda",
+      "candidates": {
+        "conta-a": [
+          88,
+          10
+        ],
+        "conta-b": [
+          60,
+          62
+        ]
+      },
+      "account": "conta-b"
+    }
+  ]
+}

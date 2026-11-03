@@ -1,10 +1,11 @@
-"""O `brza-mcp`: serve, start, stop, status e token."""
+"""O `brza-mcp`: serve, start, stop, status, token e config."""
 import argparse
 import json
 import os
 import signal
 import sys
 import time
+import urllib.request
 
 from . import launchd, paths, server, tools
 from .registry import REGISTRY
@@ -32,6 +33,38 @@ def serve(port: int):
         info.unlink(missing_ok=True)
 
 
+def call_config(args, timeout=5.0):
+    """A ferramenta `config` do servidor de pé, por HTTP com o token: o resultado decodificado; OSError se está parado."""
+    body = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'config', 'arguments': args}}
+    req = urllib.request.Request(f'http://127.0.0.1:{paths.default_port()}/mcp', data=json.dumps(body).encode(),
+                                 headers={'Authorization': f'Bearer {paths.read_token()}',
+                                          'Content-Type': 'application/json'})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+        result = json.load(r)['result']
+    text = result['content'][0]['text']
+    return result.get('isError', False), (json.loads(text) if not result.get('isError') else text)
+
+
+def parse_value(text):
+    """O valor da linha de comando: JSON quando decodifica (true, 3, 0.5, null), senão o texto."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def config_command(key, value):
+    args = {} if key is None else {'key': key} if value is None else {'key': key, 'value': parse_value(value)}
+    try:
+        is_error, out = call_config(args)
+    except (OSError, ValueError, KeyError):
+        print('brza-mcp parado: o servidor não responde (brza mcp start)', file=sys.stderr)
+        sys.exit(3)
+    if is_error:
+        sys.exit(f'brza mcp config: {out}')
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='brza mcp', description='O servidor MCP residente do BrzA Studio.')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -42,6 +75,9 @@ def main(argv=None):
     sub.add_parser('stop', help='descarrega o agente')
     sub.add_parser('status', help='agente carregado e /health; sai 0 de pé, 3 parado')
     sub.add_parser('token', help='imprime o token Bearer, criando-o se falta')
+    p = sub.add_parser('config', help='lê ou grava as sobreposições da política no servidor de pé; sai 3 parado')
+    p.add_argument('key', nargs='?', help='chave do brza.toml, como policy.enforce')
+    p.add_argument('value', nargs='?', help='valor em JSON (false, 3, "opus"); null apaga a sobreposição')
     a = ap.parse_args(argv)
     if a.cmd == 'serve':
         serve(paths.default_port() if a.port is None else a.port)
@@ -58,5 +94,7 @@ def main(argv=None):
         print(f'carregado: {"sim" if loaded else "não"}')
         print(f'health: {"responde (pid %s)" % data["pid"] if data else "não responde"}')
         sys.exit(0 if data else 3)
+    elif a.cmd == 'config':
+        config_command(a.key, a.value)
     elif a.cmd == 'token':
         print(paths.ensure_token())
