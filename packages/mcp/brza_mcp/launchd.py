@@ -13,6 +13,10 @@ from pathlib import Path
 
 from . import LABEL, paths
 
+# Quanto o `stop` espera o agente descarregar. No SIGTERM o `serve` espera o `scheduler.stop()`, cuja thread pode estar
+# num subprocess de até 120 s, e o launchd só manda o SIGKILL depois do ExitTimeOut padrão de 20 s: com 25 s, o `stop`
+# vê o desfecho real.
+STOP_TIMEOUT = 25.0
 ENTRY = Path(__file__).resolve().parents[1] / 'bin' / 'brza-mcp'
 
 
@@ -145,11 +149,22 @@ def start(timeout: float = 15.0) -> dict:
     return data
 
 
-def stop() -> bool:
-    """Descarrega o agente; False se ele não estava carregado."""
+def stop(timeout: float = STOP_TIMEOUT) -> bool:
+    """Descarrega o agente e apaga o plist; False se ele não estava carregado. Levanta RuntimeError se o launchctl
+    falha com o agente ainda carregado, ou se ele segue carregado depois de `timeout`."""
+    plist = paths.plist_path()
     if not is_loaded():
+        plist.unlink(missing_ok=True)  # o plist órfão carregaria o agente no próximo login
         return False
     r = run_launchctl('bootout', target())
-    if r.returncode != 0:
+    if r.returncode != 0 and is_loaded():
         raise RuntimeError(f'o launchctl falhou ({r.returncode}): {(r.stderr or r.stdout).strip()}')
+    # bootout com erro e agente descarregado: ele saiu entre a consulta e o bootout, e o resultado é o pedido
+    plist.unlink(missing_ok=True)  # com RunAtLoad, o plist faria o login subir o serviço de novo
+    deadline = time.monotonic() + timeout
+    while is_loaded():  # o bootout termina assíncrono: o agente ainda aparece carregado logo depois dele
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f'o agente segue carregado {timeout:g}s depois do bootout; o plist foi apagado, '
+                               f'então o login não o carrega de novo. Confira com `launchctl print {target()}`')
+        time.sleep(0.1)
     return True

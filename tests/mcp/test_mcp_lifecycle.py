@@ -470,6 +470,111 @@ class LifecycleTest(HomeCase):
         self.assertEqual(code, 1)
         self.assertIn('Boot-out failed', err)
 
+    def async_bootout(self, still_loaded_for):
+        """Um launchctl cujo bootout termina assíncrono: o `print` diz carregado nas próximas `still_loaded_for`
+        consultas (None: para sempre)."""
+        real, state = self.fake, {'left': 0, 'prints': 0}
+
+        def run(*args):
+            if args[0] == 'bootout':
+                real(*args)
+                state['left'] = still_loaded_for
+                return CompletedProcess(args, 0, '', '')
+            if args[0] == 'print':
+                state['prints'] += 1
+                if state['left'] is None or state['left'] > 0:
+                    if state['left']:
+                        state['left'] -= 1
+                    return CompletedProcess(args, 0, '', '')
+            return real(*args)
+        run.state = state
+        return run
+
+    def test_stop_removes_the_plist_so_that_the_login_does_not_load_the_agent(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        self.assertTrue(paths.plist_path().exists())
+        self.assertTrue(launchd.stop())
+        self.assertFalse(paths.plist_path().exists())
+
+    def test_stop_waits_for_the_agent_to_unload(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        run = self.async_bootout(3)
+        with patch.object(launchd, 'run_launchctl', run):
+            self.assertTrue(launchd.stop())
+            self.assertFalse(launchd.is_loaded())
+        self.assertGreaterEqual(run.state['prints'], 5)  # a consulta do início, 3 carregadas e a que enfim diz descarregado
+
+    def test_stop_with_an_agent_that_stays_loaded_raises_with_the_plist_already_removed(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        run = self.async_bootout(None)
+        with patch.object(launchd, 'run_launchctl', run):
+            with self.assertRaises(RuntimeError) as cm:
+                launchd.stop(0.3)
+        self.assertIn('carregado', str(cm.exception))
+        self.assertFalse(paths.plist_path().exists())
+
+    def test_stop_with_an_agent_that_stays_loaded_is_an_error_in_the_cli(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        with patch.object(launchd, 'run_launchctl', self.async_bootout(None)):
+            code, _, err = self.main('stop', '--timeout', '0.3')
+        self.assertEqual(code, 1)
+        self.assertIn('carregado', err)
+
+    def test_stop_without_a_loaded_agent_removes_an_orphan_plist(self):  # P8
+        launchd.write_plist()
+        code, out, _ = self.main('stop')
+        self.assertEqual(code, 0)
+        self.assertIn('plist órfão foi apagado', out)
+        self.assertFalse(paths.plist_path().exists())
+
+    def test_stop_without_a_loaded_agent_nor_plist_does_not_mention_the_plist(self):  # P8
+        code, out, _ = self.main('stop')
+        self.assertEqual(code, 0)
+        self.assertNotIn('plist', out)
+
+    def test_stop_with_a_failing_bootout_and_the_agent_gone_removes_the_plist(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        real = self.fake
+
+        def gone(*args):
+            if args[0] == 'bootout':
+                real.loaded = False  # saiu entre a consulta e o bootout
+                return CompletedProcess(args, 3, '', 'No such process')
+            return real(*args)
+        with patch.object(launchd, 'run_launchctl', gone):
+            self.assertTrue(launchd.stop())
+        self.assertFalse(paths.plist_path().exists())
+
+    def test_stop_with_a_failing_bootout_and_the_agent_loaded_keeps_the_plist(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        real = self.fake
+
+        def failing(*args):
+            if args[0] == 'bootout':
+                return CompletedProcess(args, 5, '', 'Boot-out failed: 5')
+            return real(*args)
+        with patch.object(launchd, 'run_launchctl', failing):
+            with self.assertRaises(RuntimeError):
+                launchd.stop()
+        self.assertTrue(paths.plist_path().exists())
+
+    def test_start_after_stop_writes_the_plist_again(self):  # P8
+        self.fake.loaded = True
+        launchd.write_plist()
+        launchd.stop()
+        self.assertFalse(paths.plist_path().exists())
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        self.fake.on_bootstrap = lambda: self.live_server(info=True)
+        code, _, err = self.main('start', '--timeout', '5')
+        self.assertEqual(code, 0, err)
+        self.assertTrue(paths.plist_path().exists())
+
     def test_start_refuses_python_below_3_10_before_any_launchctl_call(self):  # A4
         with patch.object(sys, 'version_info', (3, 9, 6, 'final', 0)):
             code, _, err = self.main('start')

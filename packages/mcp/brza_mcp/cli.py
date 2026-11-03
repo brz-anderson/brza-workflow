@@ -125,7 +125,8 @@ def main(argv=None):
     p.add_argument('--port', type=int, default=None, help='porta em 127.0.0.1 (padrão 4242)')
     p = sub.add_parser('start', help='grava o agente do launchd, carrega e espera o /health')
     p.add_argument('--timeout', type=float, default=15.0, help='segundos de espera do /health')
-    sub.add_parser('stop', help='descarrega o agente')
+    p = sub.add_parser('stop', help='descarrega o agente e apaga o plist, para o login não o carregar')
+    p.add_argument('--timeout', type=float, default=launchd.STOP_TIMEOUT, help='segundos de espera do descarregamento')
     sub.add_parser('status', help='agente carregado e /health; sai 0 de pé, 3 parado')
     p = sub.add_parser('url', help='imprime a URL do /mcp, para o .mcp.json')
     p.add_argument('--port', type=int, default=None, help='porta; senão a BRZA_MCP_PORT, o [mcp] port ou 4242')
@@ -143,11 +144,15 @@ def main(argv=None):
             sys.exit(str(e))
         print(f'brza-mcp de pé: o /health responde (pid {data["pid"]}, versão {data["version"]})')
     elif a.cmd == 'stop':
+        orphan = paths.plist_path().exists()
         try:
-            stopped = launchd.stop()
+            stopped = launchd.stop(a.timeout)
         except RuntimeError as e:
             sys.exit(str(e))
-        print('brza-mcp parado' if stopped else 'brza-mcp já estava parado: o agente não está carregado')
+        if stopped:
+            print('brza-mcp parado')
+        else:
+            print('brza-mcp já estava parado: o agente não está carregado' + ('; o plist órfão foi apagado' if orphan else ''))
     elif a.cmd == 'status':
         loaded, data = launchd.is_loaded(), launchd.health()
         print(f'carregado: {"sim" if loaded else "não"}')

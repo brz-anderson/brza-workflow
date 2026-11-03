@@ -3,7 +3,7 @@
 
   brza mcp serve [--port N]   roda o servidor em primeiro plano, só em 127.0.0.1 (porta 4242): é o que o launchd executa
   brza mcp start              grava o agente do launchd e o carrega; espera o /health responder
-  brza mcp stop               descarrega o agente
+  brza mcp stop [--timeout S] descarrega o agente e apaga o plist, para o login não o carregar
   brza mcp status             diz se o agente está carregado e se o /health responde; sai 0 de pé e 3 parado
   brza mcp url [--port N]     imprime http://127.0.0.1:<porta>/mcp, para o .mcp.json
   brza mcp token              imprime o token Bearer, criando-o se falta
