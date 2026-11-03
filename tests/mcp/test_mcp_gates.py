@@ -77,9 +77,11 @@ class GateTest(ToolsCase):
     def test_the_gate_survives_the_service(self):
         gate = self.gate({'task': 't', 'role': 'executor'})
         from brza_mcp import tools
+        from brza_mcp.telemetry import Telemetry
         from brza_mcp.registry import ToolRegistry
         other = ToolRegistry()
-        tools.install(other, queue=self.queue, limits=self.limits, workspace='/ws', index_reader=lambda w: '')
+        tools.install(other, queue=self.queue, limits=self.limits, workspace='/ws', index_reader=lambda w: '',
+                      telemetry=Telemetry(None))
         from brza_mcp.registry import CallContext
         out = other.call('dispatch', {'task': 't', 'role': 'executor', 'approved': gate['id']}, CallContext('s1'))
         self.assertFalse(out['isError'])

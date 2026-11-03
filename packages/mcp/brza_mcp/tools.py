@@ -16,6 +16,7 @@ from datetime import date
 from . import limits as limits_mod
 from . import policy as policy_mod
 from . import queue as queue_mod
+from .telemetry import Telemetry
 
 ROLE_CONSULTANT = 'consultant'
 RUNTIMES = ('claude',)
@@ -89,7 +90,7 @@ def get_overrides(queue) -> dict:
 
 class Orchestrator:
     def __init__(self, queue, limits=None, workspace=None, index_reader=queue_mod.git_index_reader, policy=None,
-                 resolver=None, on_queued=None):
+                 resolver=None, on_queued=None, telemetry=None):
         self.queue = queue
         self.on_queued = on_queued  # o `Scheduler.kick` (P5): acorda o ciclo quando um pedido entra na fila
         self.limits = limits or limits_mod.Limits()
@@ -97,6 +98,8 @@ class Orchestrator:
         self.workspace = workspace if workspace is not None else os.environ.get('BRZA_WORKSPACE')
         self.policy = policy or policy_mod.Policy(self.workspace, overrides=self.get_overrides)
         self.resolver = resolver
+        self.telemetry = telemetry or Telemetry(self.workspace)
+        queue.on_decision = self.telemetry.decided
         self.index_reader = index_reader
         with queue.lock:
             queue.conn.executescript(GATES_SCHEMA)
@@ -158,11 +161,16 @@ class Orchestrator:
                 fields['client'] = client
             reason = self.gate_reason(args)
             if reason is None:
-                return self.queued(self.queue.enqueue(**fields, caller=caller, index=self._index))
+                request = self.queue.enqueue(**fields, caller=caller, index=self._index)
+                self.telemetry.policy(self.queue.get(request), decided)
+                self.telemetry.emit('queued', self.queue.get(request), reason=decided['reason'])
+                return self.queued(request)
             request = self.queue.enqueue(**fields, caller=caller, state='gated', index=self._index)
             gate_id = 'gate-' + secrets.token_hex(8)
             self.queue._run('INSERT INTO gates (id, request_id, caller, reason, created_at) VALUES (?,?,?,?,?)',
                             (gate_id, request, caller, reason, self.queue.get(request)['created_at']))
+            self.telemetry.policy(self.queue.get(request), decided)
+            self.telemetry.emit('gated', self.queue.get(request), reason=reason, gate=gate_id)
             proposal = {k: args.get(k) for k in ('task', 'role', 'account') if k in args}
             proposal.update({k: args[k] for k in ('target', 'model', 'effort', 'ref') if k in args})
             return {'gate': {'id': gate_id, 'reason': reason, 'proposal': proposal}}
@@ -192,6 +200,8 @@ class Orchestrator:
             self.queue.set_state(request['id'], 'queued')
             self.queue._run('UPDATE gates SET approved_at = ? WHERE id = ?', (self.queue.get(request['id'])['updated_at'],
                                                                               gate_id))
+        self.telemetry.emit('approved', self.queue.get(request['id']), reason=gate['reason'], gate=gate_id)
+        self.telemetry.emit('queued', self.queue.get(request['id']), reason='gate aprovado')
         return self.queued(request['id'])
 
     def queued(self, request_id):
@@ -260,10 +270,10 @@ class Orchestrator:
 
 
 def install(registry, queue=None, limits=None, workspace=None, index_reader=queue_mod.git_index_reader, policy=None,
-            resolver=None, on_queued=None):
+            resolver=None, on_queued=None, telemetry=None):
     """Registra as três ferramentas no `registry`; sem `queue`, abre a fila do BRZA_HOME. Devolve o serviço."""
     service = Orchestrator(queue if queue is not None else queue_mod.Queue(), limits, workspace, index_reader, policy,
-                           resolver, on_queued)
+                           resolver, on_queued, telemetry)
     registry.register('dispatch', 'Pede um worker: o consultor entra na fila; outro papel ou troca de conta devolve '
                       'um gate, que se aprova chamando de novo com approved.', service.dispatch, DISPATCH_SCHEMA)
     registry.register('status', 'A fila, os gates, os workers abertos e os tetos vigentes.', service.status,

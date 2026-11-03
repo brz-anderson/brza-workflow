@@ -77,11 +77,12 @@ def find_task(obj, task_id):
 
 class Scheduler:
     def __init__(self, queue, limits, run=default_run, detect=clients_mod.detect, prepare=None,
-                 interval=DEFAULT_INTERVAL, log=None):
+                 interval=DEFAULT_INTERVAL, log=None, telemetry=None):
         self.queue, self.limits, self.run, self.detect = queue, limits, run, detect
         self.prepare = prepare  # o `sync_limits` do serviço: refaz a configuração antes de cada decisão
         self.interval = interval
         self.log = log or (lambda message: None)
+        self.telemetry = telemetry  # a linha `route` do fim do worker (P6)
         self.wake = threading.Event()
         self.stop_event = threading.Event()
         self.thread = None
@@ -173,6 +174,7 @@ class Scheduler:
                     self.errors[request['id']] = str(e)
                     self.log(f'pedido {request["id"]}: {e}')
                     self.queue.mark_done(request['id'], failed=True)
+                    self._route('failed', request['id'], str(e))
                     continue
                 self.queue.mark_running(request['id'], session=json.dumps(state))
                 opened.append(request['id'])
@@ -189,6 +191,11 @@ class Scheduler:
                 continue
             if outcome:
                 self.queue.mark_done(row['request_id'], failed=outcome == 'failed')
+                self._route(outcome, row['request_id'], f'task {outcome} no worker')
+
+    def _route(self, decision, request_id, reason):
+        if self.telemetry:
+            self.telemetry.emit(decision, self.queue.get(request_id), reason=reason)
 
     # ---- a thread ----
 

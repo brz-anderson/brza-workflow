@@ -78,6 +78,7 @@ class Queue:
         if self.db_path != ':memory:':
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.on_decision = None  # `(request, decision, chosen)`: a telemetria `route` (P6); nunca levanta
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
         self.conn.row_factory = sqlite3.Row
         with self.lock:
@@ -142,6 +143,8 @@ class Queue:
             chosen = None
             for request in self.pending():
                 decision = limits.decide(request, self)
+                if self.on_decision:
+                    self.on_decision(request, decision, decision.admit and chosen is None)
                 if decision.admit:
                     held = (None, None)
                     chosen = chosen or request

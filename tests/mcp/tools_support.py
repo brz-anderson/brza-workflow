@@ -5,6 +5,7 @@ import json
 from mcp_support import ServerCase
 
 from brza_mcp import limits as lim, queue as q, tools  # noqa: E402
+from brza_mcp.telemetry import Telemetry  # noqa: E402
 
 INDEX = '\n'.join(json.dumps(e) for e in (
     {'id': 'PLN-9', 'priority': 'low', 'blocks': 'PLN-3', 'deadline': '2026-12-01'},
@@ -22,7 +23,7 @@ class ToolsCase(ServerCase):
         self.addCleanup(self.queue.close)
         self.limits = lim.Limits(self.config, machine=self.machine)
         self.service = tools.install(self.registry, queue=self.queue, limits=self.limits, workspace='/ws',
-                                     index_reader=lambda workspace: INDEX)
+                                     index_reader=lambda workspace: INDEX, telemetry=Telemetry(None))
 
     def call(self, name, arguments=None, session=None, client=None):
         """(isError, conteúdo): o JSON do texto quando decodifica, senão o texto."""

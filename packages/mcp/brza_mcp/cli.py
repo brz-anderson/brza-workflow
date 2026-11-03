@@ -10,19 +10,24 @@ import time
 import urllib.request
 
 from . import accounts as accounts_mod
-from . import cycle, launchd, limits as limits_mod, paths, queue as queue_mod, server, tools
+from . import cycle, launchd, limits as limits_mod, paths, queue as queue_mod, resolver as resolver_mod, server, tools
 from .registry import REGISTRY
 
 
-def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=cycle.DEFAULT_INTERVAL, detect=None):
+def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=cycle.DEFAULT_INTERVAL, detect=None,
+          limits=None, resolver=None, with_resolver=False):
     """Fila, tetos com o provedor de uso das contas, ferramentas e o `Scheduler` (ainda parado). Devolve
-    `(serviço, scheduler)`; nos testes, tudo vem injetado."""
+    `(serviço, scheduler)`; nos testes, tudo vem injetado. `with_resolver` liga o desempatador real (o `serve`): o
+    papel ausente ou desconhecido do `dispatch` passa pelo `tev1` e pelo Haiku; sem ele (ou um `resolver` injetado),
+    fica a linha do `consultant`."""
     accounts = accounts or accounts_mod.Accounts()
     queue = queue if queue is not None else queue_mod.Queue()
-    limits = limits_mod.Limits(usage=accounts.usage)
-    service = tools.install(registry, queue=queue, limits=limits)
+    limits = limits or limits_mod.Limits(usage=accounts.usage)
+    service = tools.install(registry, queue=queue, limits=limits, resolver=resolver)
+    if with_resolver and resolver is None:
+        service.resolver = resolver_mod.Resolver(config=service.policy.config)
     scheduler = cycle.Scheduler(queue, limits, run=run, prepare=service.sync_limits, interval=interval,
-                                log=lambda m: print(m, file=sys.stderr, flush=True),
+                                log=lambda m: print(m, file=sys.stderr, flush=True), telemetry=service.telemetry,
                                 **({'detect': detect} if detect else {}))
     service.on_queued = scheduler.kick
     return service, scheduler
@@ -30,7 +35,7 @@ def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=c
 
 def serve(port: int):
     token = paths.ensure_token()
-    service, scheduler = build(REGISTRY)
+    service, scheduler = build(REGISTRY, with_resolver=True)
     try:
         srv = server.make_server(port, token)
     except OSError as e:
