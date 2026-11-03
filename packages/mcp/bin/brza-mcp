@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""O servidor MCP residente do BrzA Studio e o controle dele.
+
+  brza mcp serve [--port N]   roda o servidor em primeiro plano, só em 127.0.0.1 (porta 4242): é o que o launchd executa
+  brza mcp start              grava o agente do launchd e o carrega; espera o /health responder
+  brza mcp stop               descarrega o agente
+  brza mcp status             diz se o agente está carregado e se o /health responde; sai 0 de pé e 3 parado
+  brza mcp token              imprime o token Bearer, criando-o se falta
+
+O código está em packages/mcp/brza_mcp/; este arquivo só o põe no sys.path pelo caminho real, para valer também pelo
+link em ~/.local/bin.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from brza_mcp import cli  # noqa: E402
+
+if __name__ == '__main__':
+    cli.main()
