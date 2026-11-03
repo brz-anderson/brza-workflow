@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Abre, lista, manda mensagem, dá título e fecha as sessões do Claude Code em modo chat no BrzA Studio, pelo nome.
+"""Abre, lista, manda mensagem, dá título e fecha as sessões de agentes em modo chat no BrzA Studio, pelo nome.
 
 O open abre o chat e dá à aba o título do --title, ou o <nome> sem ele, pelo `agentSession.rename` do app; o prompt da
 tarefa entra na abertura. O --rename manda antes o `/rename <nome>`, que dá o nome à sessão do Claude, e o prompt entra
@@ -12,6 +12,10 @@ lê o `.claude/settings.json` do projeto pelo `--setting-sources`. Num checkout 
 chegam pelo `agentCmdOverrides.claude` apontado para o claude-brza; sem ele, o script avisa numa linha CHECK e abre
 assim mesmo.
 
+O --agent escolhe o agente (padrão: claude); agy vira antigravity antes do launch. As checagens de claude-brza,
+hooks, processos e transcripts só se aplicam a Claude. O --rename e o --wait são exclusivos de Claude: com outro
+agente, são recusados antes de abrir. Nos demais agentes, o nome vem do mapa; o título da aba usa o mesmo RPC.
+
 O mapa de sessões é o .sessions/sessions.jsonl do workspace do cwd (o `brza_root.find`), fora do git, uma linha por evento: `open`, `session`
 (o id da sessão do Claude, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
 aberto no app, ou que roda com o /rename (<config>/sessions/<pid>.json; o config é o ~/.claude ou o de uma conta do app,
@@ -23,6 +27,7 @@ transcript da sessão do Claude (<config>/projects/*/<id>.jsonl), cujo id vem do
 
 Uso:
   brza sessions <nome>                                  # abre o chat no workspace; o `open` é opcional
+  brza sessions <nome> --agent codex                    # abre Codex; --agent agy abre Antigravity
   brza sessions <nome> --title "PLN-001: Coordenador"   # com o título na aba; sem ele, o <nome>
   brza sessions <nome> --rename                         # e dá o nome à sessão do Claude, para o correio
   brza sessions <nome> --prompt "<tarefa>"              # e manda a tarefa
@@ -92,7 +97,7 @@ def session_map() -> dict[str, dict]:
             continue
         if event == 'open':
             entries[chat] = {'name': row.get('name'), 'title': row.get('title'), 'opened': row.get('at'),
-                             'claude_session': None}
+                             'claude_session': None, 'agent': row.get('agent')}
         elif event == 'close':
             entries.pop(chat, None)
         elif chat in entries and event == 'title':
@@ -202,6 +207,8 @@ def provider_session(chat: str) -> str | None:
         found = rpc('agentSession.history', {'sessionId': chat, 'direction': 'tail', 'limit': 1})
     except BrzaError:
         return None
+    if found.get('agent') not in (None, 'claude'):
+        return None
     return (found.get('providerSession') or {}).get('id')
 
 
@@ -232,8 +239,11 @@ def chats() -> list[dict]:
     found = []
     for worktree, tab in open_tabs():
         chat = tab['sessionId']
-        claude_session = provider_session(chat)
         entry = mapped.get(chat)
+        # Abas antigas podem não trazer o agente; o prefixo do id identifica Claude nesse contrato legado.
+        agent = (tab.get('agentSessionAgent') or (entry or {}).get('agent')
+                 or ('claude' if chat.startswith('claude_') else None))
+        claude_session = provider_session(chat) if agent == 'claude' else None
         name = entry['name'] if entry else (chat_name(claude_session) if claude_session else None)
         found.append({'name': name, 'title': tab.get('title'), 'chat': chat, 'claude_session': claude_session,
                       'worktree': worktree, 'state': (tab.get('chatStatus') or {}).get('state'),
@@ -338,17 +348,23 @@ def main():
     ap = argparse.ArgumentParser(prog='brza sessions', description=__doc__.split('\n\n')[0],
                                  epilog='Os outros verbos: brza sessions list|send|title|close --help.')
     ap.add_argument('name')
+    ap.add_argument('--agent', default='claude', help='o id do agente; padrão: claude; agy é alias de antigravity')
     ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
-    ap.add_argument('--rename', action='store_true', help='manda o /rename <nome>, para o correio achar a sessão')
+    ap.add_argument('--rename', action='store_true', help='só Claude: manda o /rename <nome>, para o correio achar a sessão')
     ap.add_argument('--checkout', type=Path, default=WORKSPACE,
                     help='o checkout do chat; o relativo parte da raiz do workspace, não do cwd; padrão a raiz do workspace')
     group = ap.add_mutually_exclusive_group()
     group.add_argument('--prompt')
     group.add_argument('--prompt-file', type=Path)
     ap.add_argument('--wait', action='store_true',
-                    help='espera a sessão do Claude no ar, e com --rename o nome, antes de anunciar')
+                    help='só Claude: espera a sessão no ar, e com --rename o nome, antes de anunciar')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
+    agent = 'antigravity' if args.agent == 'agy' else args.agent
+    if agent != 'claude' and (args.rename or args.wait):
+        flags = ' e '.join(flag for flag, enabled in (('--rename', args.rename), ('--wait', args.wait)) if enabled)
+        print(f'CHECK:    {args.name}: {flags} só tem suporte com --agent claude; agente escolhido: {agent}; nada foi aberto')
+        return 1
 
     try:
         checkout = resolve_checkout(args.checkout)
@@ -357,19 +373,20 @@ def main():
         return 1
     prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
     title = args.title or args.name
-    if running(args.name) or mapped_and_open(args.name):
+    if (agent == 'claude' and running(args.name)) or mapped_and_open(args.name):
         print(f'running:  {args.name}')
         return 0
-    if blocker := chat_blocker(checkout):
+    if agent == 'claude' and (blocker := chat_blocker(checkout)):
         print(f'CHECK:    {args.name}: {blocker}')
     if args.dry_run:
-        extras = [f'título "{title}"', *(['com /rename'] if args.rename else []), *(['com prompt'] if prompt else [])]
+        extras = [f'agente {agent}', f'título "{title}"', *(['com /rename'] if args.rename else []),
+                  *(['com prompt'] if prompt else [])]
         print(f'abriria:  {args.name}  (chat, {checkout}), {", ".join(extras)}')
         return 0
 
     first = f'/rename {args.name}' if args.rename else prompt
     try:
-        launched = brza('agent', 'launch', '--agent', 'claude', '--surface', 'chat', '--worktree', f'path:{checkout}',
+        launched = brza('agent', 'launch', '--agent', agent, '--surface', 'chat', '--worktree', f'path:{checkout}',
                         *(['--prompt', first] if first else []))
     except BrzaError as e:
         print(f'CHECK:    {args.name} não abriu: {e}')
@@ -384,7 +401,8 @@ def main():
         rpc('agentSession.rename', {'sessionId': session_id, 'name': title})
     except BrzaError as e:
         print(f'CHECK:    {args.name} abriu, mas a aba não ganhou o título: {e}')
-    record('open', name=args.name, title=title, chat=session_id, checkout=str(checkout), renamed=args.rename)
+    record('open', name=args.name, title=title, chat=session_id, checkout=str(checkout), renamed=args.rename,
+           **({'agent': agent} if agent != 'claude' else {}))
     if args.rename and prompt:
         try:
             send_to_chat(session_id, prompt)

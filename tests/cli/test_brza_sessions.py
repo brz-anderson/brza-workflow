@@ -359,6 +359,96 @@ class CommandTest(unittest.TestCase):
                          {'event': 'open', 'name': 'pln-009', 'title': 'PLN-002 P9: prova', 'chat': 'claude_n',
                           'checkout': str(self.workspace), 'renamed': False})
         self.assertRegex(event['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$')
+        self.assertEqual(launch[launch.index('--agent') + 1], 'claude')
+
+    def test_non_claude_launch_passes_agent_prompt_checkout_and_title_without_claude_checks(self):
+        def forbidden(*args):
+            self.fail('contrato Claude aplicado a outro agente')
+
+        for requested, canonical in (('codex', 'codex'), ('agy', 'antigravity'), ('antigravity', 'antigravity')):
+            with self.subTest(agent=requested), patch.dict(GLOBALS, {'running': forbidden, 'chat_blocker': forbidden,
+                                                                    'wait_for_session': forbidden}):
+                code, out = self.run_main('correcao', '--agent', requested, '--checkout', '/tmp/checkout com espaço',
+                                         '--title', 'Correção do CLI', '--prompt', 'Faça a correção')
+                self.assertEqual(code, 0, out)
+                launch = self.launches[-1]
+                self.assertEqual(launch, ('agent', 'launch', '--agent', canonical, '--surface', 'chat', '--worktree',
+                                          f'path:{Path("/tmp/checkout com espaço").resolve()}',
+                                          '--prompt', 'Faça a correção'))
+                self.assertEqual(self.read_map()[-1]['agent'], canonical)
+                self.assertEqual(self.calls('agentSession.rename')[-1]['name'], 'Correção do CLI')
+                self.assertFalse(self.read_map()[-1]['renamed'])
+                self.assertEqual(self.calls('agentSession.send'), [])
+
+    def test_non_claude_rejects_rename_and_wait_before_any_side_effect_even_in_dry_run(self):
+        def forbidden(*args):
+            self.fail('a recusa deve ocorrer antes de acessar o app ou os arquivos Claude')
+
+        for agent in ('codex', 'agy', 'antigravity'):
+            for flags in (('--rename',), ('--wait',), ('--rename', '--wait'), ('--wait', '--dry-run')):
+                with self.subTest(agent=agent, flags=flags), patch.dict(GLOBALS, {
+                    'running': forbidden, 'mapped_and_open': forbidden, 'chat_blocker': forbidden,
+                    'resolve_checkout': forbidden,
+                }):
+                    code, out = self.run_main('correcao', '--agent', agent, *flags)
+                    self.assertEqual(code, 1)
+                    self.assertIn('só tem suporte com --agent claude', out)
+                    self.assertIn('nada foi aberto', out)
+                    for flag in flags:
+                        if flag != '--dry-run':
+                            self.assertIn(flag, out)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.app.calls, [])
+        self.assertEqual(self.read_map(), [])
+
+    def test_non_claude_dry_run_shows_canonical_agent_and_does_not_launch(self):
+        for agent, canonical in (('codex', 'codex'), ('agy', 'antigravity')):
+            code, out = self.run_main('correcao', '--agent', agent, '--dry-run')
+            self.assertEqual(code, 0)
+            self.assertIn(f'agente {canonical}', out)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.read_map(), [])
+
+    def test_non_claude_mapped_chat_preserves_all_public_json_contracts(self):
+        for agent in ('codex', 'antigravity'):
+            with self.subTest(agent=agent):
+                chat = f'{agent}_1'
+                self.app.tabs = [tab(chat, 'Correção')]
+                # Mesmo id no provider e num transcript Claude: jamais deve ser usado como nome ou claude_session.
+                self.app.providers[chat] = 'uuid-b'
+                self.write_map({'event': 'open', 'name': 'correcao', 'chat': chat, 'agent': agent})
+                code, out = self.run_main('list', '--json')
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(out), {'sessions': [{
+                    'name': 'correcao', 'title': 'Correção', 'chat': chat, 'claude_session': None,
+                    'worktree': '/Users/x/brza-workspace', 'state': 'done', 'source': 'map',
+                    'opened': '2026-10-29T12:00:00-03:00',
+                }]})
+                self.assertEqual(self.run_main('correcao', '--agent', agent), (0, 'running:  correcao\n'))
+                self.assertEqual(json.loads(self.run_main('send', 'correcao', 'oi', '--json')[1]),
+                                 {'sent': True, 'name': 'correcao', 'chat': chat})
+                self.assertEqual(json.loads(self.run_main('title', 'correcao', 'Novo', '--json')[1]),
+                                 {'titled': True, 'name': 'correcao', 'chat': chat, 'title': 'Novo'})
+                self.assertEqual(json.loads(self.run_main('close', 'correcao', '--json')[1]),
+                                 {'closed': True, 'name': 'correcao', 'chat': chat})
+                self.assertEqual(self.launches, [])
+
+    def test_non_claude_unmapped_tabs_do_not_discover_names_in_claude_transcripts(self):
+        self.app.tabs = [tab('codex_1', 'Codex'),
+                         {**tab('claude_legacy', 'Antigravity'), 'agentSessionAgent': 'antigravity'},
+                         tab('antigravity_1', 'Antigravity'), tab('unknown_1', 'Desconhecido')]
+        self.app.providers = {t['sessionId']: 'uuid-b' for t in self.app.tabs}
+        code, out = self.run_main('list', '--json')
+        self.assertEqual(code, 0)
+        for session in json.loads(out)['sessions']:
+            self.assertIsNone(session['name'])
+            self.assertIsNone(session['claude_session'])
+            self.assertIsNone(session['source'])
+        self.assertEqual(self.calls('agentSession.history'), [])
+
+    def test_provider_metadata_does_not_return_non_claude_id_as_claude_session(self):
+        with patch.dict(GLOBALS, {'rpc': lambda *args: {'agent': 'codex', 'providerSession': {'id': 'uuid-b'}}}):
+            self.assertIsNone(SESSIONS['provider_session']('codex_1'))
 
     def test_open_without_title_titles_the_tab_with_the_name(self):
         self.run_main('pln-009')

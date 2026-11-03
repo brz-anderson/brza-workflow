@@ -93,6 +93,26 @@ source "$HOME/Projects/brza-workflow/packages/client/shell/brza.zsh"
 Com ele, a função `claude` sobe com o `--settings` do workspace certo. Fora de workspace, ela chama a sua
 `brza_claude_fallback`, se você a definir, e senão o `claude` de sempre.
 
+## Sessões no BrzA Studio
+
+O pacote do cliente abre chats pelo nome com `brza sessions`. O `--agent <id>` escolhe o agente; sem ele, o padrão
+continua sendo `claude`. O alias `agy` é enviado ao app como `antigravity`.
+Rode de dentro do workspace ou informe sua raiz em `BRZA_WORKSPACE`, para localizar o mapa de sessões, inclusive
+quando o `--checkout` aponta para outro repositório.
+
+```bash
+brza sessions correcao-cli --agent codex --checkout "$HOME/Projects/brza-workflow"
+```
+
+O `--title` define o título da aba (sem ele, usa o nome), e `--prompt` ou `--prompt-file` envia a tarefa na abertura.
+O `--dry-run` mostra o agente canônico e o checkout sem abrir sessão. Só Claude usa as checagens de `claude-brza` e
+hooks; `--rename` e `--wait` também são exclusivos de Claude e são recusados com outros agentes antes do lançamento.
+O `--rename` envia `/rename` ao Claude, enquanto o título da aba usa `agentSession.rename` para todos os agentes.
+
+O mapa local de sessões associa o nome ao chat de qualquer agente. `list`, `send`, `title` e `close` mantêm seus
+contratos, inclusive `--json`; `claude_session` fica `null` para outros agentes. A descoberta de nomes fora do mapa
+por transcripts e processos continua exclusiva de Claude. O wrapper não instala hooks de outros runtimes.
+
 ## O índice das notas
 
 A branch da norma do workspace guarda, além da norma, o `.brza/index.jsonl`: uma linha por plano (`PLN-NNN`), revisão
