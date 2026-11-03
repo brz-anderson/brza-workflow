@@ -35,8 +35,11 @@ class HomeCase(unittest.TestCase):
         p = patch.dict(os.environ, {'BRZA_HOME': str(self.home), 'BRZA_LAUNCH_AGENTS_DIR': str(self.agents)})
         p.start()
         self.addCleanup(p.stop)
-        for var in ('BRZA_MCP_PORT',):
+        for var in ('BRZA_MCP_PORT', 'BRZA_WORKSPACE'):
             os.environ.pop(var, None)
+        cwd = os.getcwd()  # fora de qualquer workspace: o brza_root.find do cwd não acha nada
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
 
 
 class ServerCase(HomeCase):

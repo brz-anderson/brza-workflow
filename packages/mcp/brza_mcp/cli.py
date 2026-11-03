@@ -1,4 +1,6 @@
 """O `brza-mcp`: serve, start, stop, status e token."""
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -39,10 +41,12 @@ def main(argv=None):
     p.add_argument('--timeout', type=float, default=15.0, help='segundos de espera do /health')
     sub.add_parser('stop', help='descarrega o agente')
     sub.add_parser('status', help='agente carregado e /health; sai 0 de pé, 3 parado')
+    p = sub.add_parser('url', help='imprime a URL do /mcp, para o .mcp.json')
+    p.add_argument('--port', type=int, default=None, help='porta; senão a BRZA_MCP_PORT, o [mcp] port ou 4242')
     sub.add_parser('token', help='imprime o token Bearer, criando-o se falta')
     a = ap.parse_args(argv)
     if a.cmd == 'serve':
-        serve(paths.default_port() if a.port is None else a.port)
+        serve(paths.default_port(a.port))
     elif a.cmd == 'start':
         try:
             data = launchd.start(a.timeout)
@@ -55,6 +59,8 @@ def main(argv=None):
         loaded, data = launchd.is_loaded(), launchd.health()
         print(f'carregado: {"sim" if loaded else "não"}')
         print(f'health: {"responde (pid %s)" % data["pid"] if data else "não responde"}')
-        sys.exit(0 if data else 3)
+        sys.exit(0 if loaded and data else 3)
+    elif a.cmd == 'url':
+        print(f'http://127.0.0.1:{paths.default_port(a.port)}/mcp')
     elif a.cmd == 'token':
         print(paths.ensure_token())

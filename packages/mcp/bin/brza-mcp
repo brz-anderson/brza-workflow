@@ -5,7 +5,12 @@
   brza mcp start              grava o agente do launchd e o carrega; espera o /health responder
   brza mcp stop               descarrega o agente
   brza mcp status             diz se o agente está carregado e se o /health responde; sai 0 de pé e 3 parado
+  brza mcp url [--port N]     imprime http://127.0.0.1:<porta>/mcp, para o .mcp.json
   brza mcp token              imprime o token Bearer, criando-o se falta
+
+A porta: `--port`, depois a BRZA_MCP_PORT, depois o `[mcp] port` do <BRZA_WORKSPACE>/brza.toml (o workspace do cwd, sem a
+variável), e por fim 4242. O `start` grava no plist a BRZA_WORKSPACE, a BRZA_HOME e a BRZA_MCP_PORT que achar, e recusa
+Python abaixo do 3.10.
 
 O código está em packages/mcp/brza_mcp/; este arquivo só o põe no sys.path pelo caminho real, para valer também pelo
 link em ~/.local/bin.

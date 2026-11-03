@@ -3,6 +3,8 @@
 HTTP/1.1 com Content-Length em toda resposta que não é SSE, e uma thread por conexão: o Claude Code mantém um `GET /mcp`
 aberto enquanto faz os `POST /mcp`. Escuta só em 127.0.0.1.
 """
+from __future__ import annotations
+
 import hmac
 import json
 import os
@@ -62,6 +64,8 @@ class Handler(BaseHTTPRequestHandler):
             self.post_mcp(body)
         elif self.command == 'GET' and path == '/mcp':
             self.get_mcp()
+        elif self.command == 'DELETE' and path == '/mcp':  # o cliente encerra a sessão do Mcp-Session-Id
+            self.reply(200)
         else:
             self.reply(404, {'error': 'not found'})
 

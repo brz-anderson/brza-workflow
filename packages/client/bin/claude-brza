@@ -59,12 +59,24 @@ def code_agents(workspace: Path):
     return ['--agents', agents] if agents else []
 
 
+def mcp_token(environ):
+    """O token do servidor MCP (${BRZA_HOME:-$HOME/.brza}/runtime/mcp.token), ou '' sem o arquivo ou com ele vazio."""
+    home = environ.get('BRZA_HOME') or os.path.join(environ.get('HOME') or os.path.expanduser('~'), '.brza')
+    try:
+        return Path(home, 'runtime', 'mcp.token').read_text().strip()
+    except OSError:
+        return ''
+
+
 def command(claude, argv, cwd: Path, environ):
     """(argumentos, ambiente) da chamada."""
     found = workspace_of(cwd, environ)
     if found is None:
         return [claude, *argv], environ
     env = {**environ, 'BRZA_WORKSPACE': str(found.root)}
+    token = mcp_token(environ)
+    if token:  # o .mcp.json lê o Bearer de ${BRZA_MCP_TOKEN}
+        env['BRZA_MCP_TOKEN'] = token
     agents = []
     if found.role == 'code' and not any(a == '--agents' or a.startswith('--agents=') for a in argv):
         agents = code_agents(found.root)

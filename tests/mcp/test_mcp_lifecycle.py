@@ -107,6 +107,14 @@ class ProtocolTest(ServerCase):
         self.assertNotIn('packages/mcp', str(Path(queue.__file__)))
 
 
+class SessionEndTest(ServerCase):
+    def test_delete_ends_the_session_with_200(self):  # A5
+        status, headers, body = self.request('DELETE', '/mcp', headers={'Mcp-Session-Id': 'abc'})
+        self.assertEqual((status, body), (200, b''))
+        self.assertEqual(headers['Content-Length'], '0')
+        self.assertEqual(self.request('DELETE', '/mcp', token=None)[0], 401)
+
+
 class SseTest(ServerCase):
     def open_sse(self):
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
@@ -262,13 +270,14 @@ class LifecycleTest(HomeCase):
         self.assertIn(['bootstrap', f'gui/{self.uid}', str(paths.plist_path())], self.fake.calls)
         self.assertIn('responde', out)
 
-    def test_start_on_a_loaded_agent_kickstarts_it(self):
+    def test_start_on_a_loaded_agent_boots_it_out_and_bootstraps_again_to_reread_the_plist(self):  # A6
         self.fake.loaded = True
-        self.live_server()
+        self.fake.on_bootstrap = self.live_server
         code, _, err = self.main('start', '--timeout', '5')
         self.assertEqual(code, 0, err)
-        self.assertIn(['kickstart', '-k', f'gui/{self.uid}/com.brza.orchestrator'], self.fake.calls)
-        self.assertNotIn('bootstrap', self.fake.verbs())
+        verbs = self.fake.verbs()
+        self.assertEqual(verbs[verbs.index('bootout'):][:2], ['bootout', 'bootstrap'])
+        self.assertNotIn('kickstart', verbs)
 
     def test_start_without_a_health_before_the_deadline_fails(self):
         os.environ['BRZA_MCP_PORT'] = str(free_port())
@@ -309,6 +318,72 @@ class LifecycleTest(HomeCase):
         self.assertEqual(code, 0)
         self.assertIn('carregado: sim', out)
         self.assertIn('health: responde', out)
+
+    def test_status_is_3_when_the_health_answers_but_the_agent_is_not_loaded(self):  # A6
+        self.live_server()
+        code, out, _ = self.main('status')
+        self.assertEqual(code, 3)
+        self.assertIn('carregado: não', out)
+        self.assertIn('health: responde', out)
+
+    def test_status_is_3_when_the_agent_is_loaded_but_the_health_does_not_answer(self):  # A6
+        os.environ['BRZA_MCP_PORT'] = str(free_port())
+        self.fake.loaded = True
+        self.assertEqual(self.main('status')[0], 3)
+
+    def test_start_refuses_python_below_3_10_before_any_launchctl_call(self):  # A4
+        with patch.object(sys, 'version_info', (3, 9, 6, 'final', 0)):
+            code, _, err = self.main('start')
+        self.assertEqual(code, 1)
+        self.assertIn('3.10', err)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(paths.plist_path().exists())
+
+    def test_url_prints_the_mcp_url_with_the_port_precedence(self):  # A2
+        self.assertEqual(self.main('url')[1].strip(), 'http://127.0.0.1:4242/mcp')
+        ws = self.tmp / 'ws'
+        ws.mkdir()
+        (ws / 'brza.toml').write_text('[mcp]\nport = 4300\n')
+        os.environ['BRZA_WORKSPACE'] = str(ws)
+        self.assertEqual(self.main('url')[1].strip(), 'http://127.0.0.1:4300/mcp')
+        os.environ['BRZA_MCP_PORT'] = '4400'
+        self.assertEqual(self.main('url')[1].strip(), 'http://127.0.0.1:4400/mcp')
+        self.assertEqual(self.main('url', '--port', '4500')[1].strip(), 'http://127.0.0.1:4500/mcp')
+
+    def test_the_toml_is_read_by_the_hooks_parser_below_python_3_11(self):  # A2
+        ws = self.tmp / 'ws'
+        ws.mkdir()
+        (ws / 'brza.toml').write_text('[mcp]\nport = 4301\n')
+        os.environ['BRZA_WORKSPACE'] = str(ws)
+        with patch.dict(sys.modules, {'tomllib': None}):
+            self.assertEqual(paths.default_port(), 4301)
+
+    def test_a_workspace_without_the_key_or_the_file_keeps_4242(self):  # A2
+        ws = self.tmp / 'ws'
+        ws.mkdir()
+        os.environ['BRZA_WORKSPACE'] = str(ws)
+        self.assertEqual(paths.default_port(), 4242)
+        (ws / 'brza.toml').write_text('[outro]\nx = 1\n')
+        self.assertEqual(paths.default_port(), 4242)
+
+    def test_the_plist_carries_the_workspace_of_the_environment_or_of_the_cwd(self):  # A3
+        self.assertNotIn('BRZA_WORKSPACE', launchd.build_plist()['EnvironmentVariables'])
+        ws = self.tmp / 'ws'
+        (ws / '.brza').mkdir(parents=True)
+        (ws / '.brza' / 'workspace.toml').write_text('schema = 1\n\n[workspace]\nname = "w"\n')
+        subprocess.run(['git', '-C', str(ws), 'init', '-q'], check=True)
+        os.chdir(ws)
+        self.assertEqual(launchd.build_plist()['EnvironmentVariables']['BRZA_WORKSPACE'], str(ws.resolve()))
+        other = self.tmp / 'outro'
+        os.environ['BRZA_WORKSPACE'] = str(other)
+        self.assertEqual(launchd.build_plist()['EnvironmentVariables']['BRZA_WORKSPACE'], str(other))
+
+    @unittest.skipUnless(Path('/usr/bin/python3').exists(), 'sem /usr/bin/python3')
+    def test_the_package_imports_on_the_system_python(self):  # A4
+        r = subprocess.run(['/usr/bin/python3', str(ENTRY), '--help'], capture_output=True, text=True,
+                           env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_token_prints_and_creates_it(self):
         code, out, _ = self.main('token')

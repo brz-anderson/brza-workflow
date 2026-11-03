@@ -1,4 +1,6 @@
 """O agente do launchd: o plist, o launchctl e a espera do /health."""
+from __future__ import annotations
+
 import json
 import os
 import plistlib
@@ -34,6 +36,9 @@ def agent_path() -> str:
 
 def build_plist() -> dict:
     env = {'HOME': str(Path.home()), 'PATH': agent_path()}
+    root = paths.workspace_root()  # o serve acha o brza.toml do workspace fora do cwd do terminal
+    if root is not None:
+        env['BRZA_WORKSPACE'] = str(root)
     for var in ('BRZA_HOME', 'BRZA_MCP_PORT'):  # o agente vê a mesma base e a mesma porta que quem o carregou
         if os.environ.get(var):
             env[var] = os.environ[var]
@@ -78,14 +83,26 @@ def wait_health(timeout: float) -> dict | None:
         time.sleep(0.1)
 
 
+def check_python():
+    """O agente fixa o interpretador que roda o `start`, e o servidor pede o 3.10."""
+    if sys.version_info < (3, 10):
+        v = '.'.join(str(n) for n in sys.version_info[:3])
+        raise RuntimeError(f'o brza mcp pede Python 3.10 ou mais, e {sys.executable} é o {v}; rode com um python3 mais novo')
+
+
 def start(timeout: float = 15.0) -> dict:
-    """Grava o plist, carrega (ou reinicia) o agente e espera o /health. Levanta RuntimeError se algo falha."""
+    """Grava o plist, carrega o agente e espera o /health. Levanta RuntimeError se algo falha. Agente já carregado é
+    descarregado antes: o `kickstart -k` não relê o plist."""
+    check_python()
     paths.ensure_token()
     plist = write_plist()
     if is_loaded():
-        r = run_launchctl('kickstart', '-k', target())
-    else:
+        run_launchctl('bootout', target())
+    for attempt in range(5):  # o bootout termina assíncrono: o bootstrap logo depois pode falhar com erro 5
         r = run_launchctl('bootstrap', domain(), str(plist))
+        if r.returncode == 0:
+            break
+        time.sleep(0.3)
     if r.returncode != 0:
         raise RuntimeError(f'o launchctl falhou ({r.returncode}): {(r.stderr or r.stdout).strip()}')
     data = wait_health(timeout)

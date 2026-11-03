@@ -19,6 +19,7 @@ BLOCK = ROOT / 'packages' / 'client' / 'shell' / 'brza.zsh'
 IDENTITY = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
 MANIFEST = 'schema = 1\n\n[workspace]\nname = "acme notes"\n\n[code]\nname = "acme-app"\npath = "{code}"\n'
 FAKE_CLAUDE = f'#!{sys.executable}\nimport json, os, sys\nprint(json.dumps([sys.argv[1:], os.environ.get("BRZA_WORKSPACE")]))\n'
+FAKE_TOKEN = f'#!{sys.executable}\nimport os\nprint(os.environ.get("BRZA_MCP_TOKEN", "(sem)"))\n'
 
 
 def init_repo(path: Path):
@@ -73,6 +74,31 @@ class ShellBlockTest(unittest.TestCase):
     def test_the_workspace_gets_the_settings_and_the_root_and_no_agents(self):
         out = json.loads(self.claude(self.workspace, '-p', 'oi'))
         self.assertEqual(out, [[*self.settings(), '-p', 'oi'], str(self.workspace)])
+
+    def with_token_claude(self):
+        (self.base / 'real' / 'claude').write_text(FAKE_TOKEN)
+
+    def test_the_token_of_the_runtime_is_exported_inside_a_workspace(self):
+        self.with_token_claude()
+        token = self.base / 'brza-home' / 'runtime' / 'mcp.token'
+        token.parent.mkdir(parents=True)
+        token.write_text('segredo-123\n')
+        for cwd in (self.workspace, self.code):
+            self.assertEqual(self.claude(cwd, '-p', 'oi', env={'BRZA_HOME': str(self.base / 'brza-home')}), 'segredo-123')
+        # sem BRZA_HOME, o ~/.brza do HOME
+        home_token = self.base / '.brza' / 'runtime' / 'mcp.token'
+        home_token.parent.mkdir(parents=True)
+        home_token.write_text('do-home\n')
+        self.assertEqual(self.claude(self.workspace, '-p', 'oi'), 'do-home')
+
+    def test_without_the_token_file_or_with_it_empty_nothing_is_exported(self):
+        self.with_token_claude()
+        env = {'BRZA_HOME': str(self.base / 'brza-home')}
+        self.assertEqual(self.claude(self.workspace, '-p', 'oi', env=env), '(sem)')
+        token = self.base / 'brza-home' / 'runtime' / 'mcp.token'
+        token.parent.mkdir(parents=True)
+        token.write_text('\n')
+        self.assertEqual(self.claude(self.workspace, '-p', 'oi', env=env), '(sem)')
 
     def test_the_code_gets_the_settings_the_root_and_the_agents_of_the_workspace(self):
         argv, root = json.loads(self.claude(self.code, '-p', 'oi'))

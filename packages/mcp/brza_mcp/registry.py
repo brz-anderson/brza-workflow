@@ -6,6 +6,8 @@
 O handler recebe (argumentos, contexto) e devolve texto, um dict (vira JSON em texto) ou o resultado MCP inteiro
 (um dict com `content`). A exceção vira resultado com `isError`.
 """
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 

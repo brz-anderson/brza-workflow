@@ -1,6 +1,9 @@
 """Onde cada coisa mora: a base (~/.brza, ou a BRZA_HOME), o runtime, o token e o agente do launchd."""
+from __future__ import annotations
+
 import os
 import secrets
+import sys
 from pathlib import Path
 
 from . import DEFAULT_PORT, LABEL
@@ -38,9 +41,55 @@ def plist_path() -> Path:
     return launch_agents_dir() / f'{LABEL}.plist'
 
 
-def default_port() -> int:
-    """A 4242, ou a BRZA_MCP_PORT (para teste e para quem tem a porta ocupada)."""
-    return int(os.environ.get('BRZA_MCP_PORT') or DEFAULT_PORT)
+def _brza_root():
+    """O módulo brza_root dos hooks do núcleo, que acha o workspace do cwd e lê o TOML no 3.9 e no 3.10."""
+    hooks = Path(__file__).resolve().parents[3] / 'core' / '.claude' / 'hooks'
+    if str(hooks) not in sys.path:
+        sys.path.insert(0, str(hooks))
+    import brza_root
+    return brza_root
+
+
+def workspace_root() -> Path | None:
+    """O workspace: a BRZA_WORKSPACE, ou o do cwd pelo brza_root; None fora de um."""
+    env = os.environ.get('BRZA_WORKSPACE')
+    if env:
+        return Path(env).expanduser()
+    try:
+        found = _brza_root().find(Path.cwd())
+    except Exception:  # noqa: BLE001 - sem workspace legível, a porta cai no padrão
+        return None
+    return found.root if found else None
+
+
+def _read_toml(path: Path) -> dict:
+    text = path.read_text()
+    try:
+        import tomllib
+    except ImportError:  # Python < 3.11
+        return _brza_root().parse_toml(text)
+    return tomllib.loads(text)
+
+
+def workspace_port() -> int | None:
+    """O `[mcp] port` do <workspace>/brza.toml, ou None sem workspace, sem arquivo ou sem a chave."""
+    root = workspace_root()
+    if root is None or not (root / 'brza.toml').is_file():
+        return None
+    try:
+        port = _read_toml(root / 'brza.toml').get('mcp', {}).get('port')
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(f'{root / "brza.toml"} ilegível: {e}')
+    return port if isinstance(port, int) and not isinstance(port, bool) else None
+
+
+def default_port(port: int | None = None) -> int:
+    """A porta: o `--port` (o argumento), a BRZA_MCP_PORT, o `[mcp] port` do brza.toml do workspace, ou 4242."""
+    if port is not None:
+        return port
+    if os.environ.get('BRZA_MCP_PORT'):
+        return int(os.environ['BRZA_MCP_PORT'])
+    return workspace_port() or DEFAULT_PORT
 
 
 def ensure_runtime() -> Path:
