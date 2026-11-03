@@ -19,6 +19,7 @@ from . import queue as queue_mod
 
 ROLE_CONSULTANT = 'consultant'
 RUNTIMES = ('claude',)
+CLIENTS = ('studio', 'orca')  # o header X-Brza-Client
 
 _STRINGS = ('task', 'role', 'target', 'model', 'effort', 'account', 'ref', 'caller', 'approved')
 _ARGUMENTS = _STRINGS + ('runtime', 'deadline', 'blocks', 'priority')
@@ -88,8 +89,9 @@ def get_overrides(queue) -> dict:
 
 class Orchestrator:
     def __init__(self, queue, limits=None, workspace=None, index_reader=queue_mod.git_index_reader, policy=None,
-                 resolver=None):
+                 resolver=None, on_queued=None):
         self.queue = queue
+        self.on_queued = on_queued  # o `Scheduler.kick` (P5): acorda o ciclo quando um pedido entra na fila
         self.limits = limits or limits_mod.Limits()
         self.base_config = dict(self.limits.config)
         self.workspace = workspace if workspace is not None else os.environ.get('BRZA_WORKSPACE')
@@ -151,6 +153,9 @@ class Orchestrator:
                                            'deadline', 'blocks', 'priority') if k in args}
             decided = self.policy.decide_model(fields, self.resolver)
             fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
+            client = next((v for k, v in (ctx.headers or {}).items() if k.lower() == 'x-brza-client'), None)
+            if client in CLIENTS:
+                fields['client'] = client
             reason = self.gate_reason(args)
             if reason is None:
                 return self.queued(self.queue.enqueue(**fields, caller=caller, index=self._index))
@@ -195,6 +200,8 @@ class Orchestrator:
         with self.queue.lock:
             self.queue.next_admissible(self.limits)  # grava o teto de cada pedido que espera
             pending = self.queue.pending()
+        if self.on_queued:
+            self.on_queued()
         position = next(i for i, r in enumerate(pending, 1) if r['id'] == request_id)
         row = pending[position - 1]
         return {'request': request_id, 'state': 'queued', 'position': position, 'held_by': row['held_by'],
@@ -253,10 +260,10 @@ class Orchestrator:
 
 
 def install(registry, queue=None, limits=None, workspace=None, index_reader=queue_mod.git_index_reader, policy=None,
-            resolver=None):
+            resolver=None, on_queued=None):
     """Registra as três ferramentas no `registry`; sem `queue`, abre a fila do BRZA_HOME. Devolve o serviço."""
     service = Orchestrator(queue if queue is not None else queue_mod.Queue(), limits, workspace, index_reader, policy,
-                           resolver)
+                           resolver, on_queued)
     registry.register('dispatch', 'Pede um worker: o consultor entra na fila; outro papel ou troca de conta devolve '
                       'um gate, que se aprova chamando de novo com approved.', service.dispatch, DISPATCH_SCHEMA)
     registry.register('status', 'A fila, os gates, os workers abertos e os tetos vigentes.', service.status,

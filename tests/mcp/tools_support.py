@@ -24,9 +24,12 @@ class ToolsCase(ServerCase):
         self.service = tools.install(self.registry, queue=self.queue, limits=self.limits, workspace='/ws',
                                      index_reader=lambda workspace: INDEX)
 
-    def call(self, name, arguments=None, session=None):
+    def call(self, name, arguments=None, session=None, client=None):
         """(isError, conteúdo): o JSON do texto quando decodifica, senão o texto."""
-        headers = {'X-Brza-Session': session} if session else None
+        headers = {'X-Brza-Session': session} if session else {}
+        if client:
+            headers['X-Brza-Client'] = client
+        headers = headers or None
         status, _, msg = self.rpc('tools/call', {'name': name, 'arguments': arguments or {}}, headers=headers)
         self.assertEqual(status, 200)
         result = msg['result']

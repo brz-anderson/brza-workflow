@@ -7,13 +7,28 @@ import sys
 import time
 import urllib.request
 
-from . import launchd, paths, server, tools
+from . import accounts as accounts_mod
+from . import cycle, launchd, limits as limits_mod, paths, queue as queue_mod, server, tools
 from .registry import REGISTRY
+
+
+def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=cycle.DEFAULT_INTERVAL, detect=None):
+    """Fila, tetos com o provedor de uso das contas, ferramentas e o `Scheduler` (ainda parado). Devolve
+    `(serviço, scheduler)`; nos testes, tudo vem injetado."""
+    accounts = accounts or accounts_mod.Accounts()
+    queue = queue if queue is not None else queue_mod.Queue()
+    limits = limits_mod.Limits(usage=accounts.usage)
+    service = tools.install(registry, queue=queue, limits=limits)
+    scheduler = cycle.Scheduler(queue, limits, run=run, prepare=service.sync_limits, interval=interval,
+                                log=lambda m: print(m, file=sys.stderr, flush=True),
+                                **({'detect': detect} if detect else {}))
+    service.on_queued = scheduler.kick
+    return service, scheduler
 
 
 def serve(port: int):
     token = paths.ensure_token()
-    tools.install(REGISTRY)
+    service, scheduler = build(REGISTRY)
     try:
         srv = server.make_server(port, token)
     except OSError as e:
@@ -26,9 +41,11 @@ def serve(port: int):
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: srv.request_stop())
     print(f'brza-mcp escutando em 127.0.0.1:{actual}', file=sys.stderr, flush=True)
+    scheduler.start()
     try:
         srv.serve_forever()
     finally:
+        scheduler.stop()
         srv.server_close()
         info.unlink(missing_ok=True)
 

@@ -20,13 +20,13 @@ STATES = ('queued', 'gated', 'running', 'done', 'failed', 'cancelled')
 PRIORITIES = ('high', 'medium', 'low')
 _PRIORITY_RANK = {p: i for i, p in enumerate(PRIORITIES)}
 _FIELDS = ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref', 'deadline', 'blocks',
-           'priority', 'caller')
+           'priority', 'caller', 'client')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task TEXT NOT NULL, role TEXT NOT NULL, target TEXT, runtime TEXT, model TEXT, effort TEXT, account TEXT,
-    ref TEXT, deadline TEXT, blocks TEXT NOT NULL DEFAULT '[]', priority TEXT, caller TEXT,
+    ref TEXT, deadline TEXT, blocks TEXT NOT NULL DEFAULT '[]', priority TEXT, caller TEXT, client TEXT,
     state TEXT NOT NULL DEFAULT 'queued', held_by TEXT, held_reason TEXT,
     created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL
 );
@@ -82,6 +82,8 @@ class Queue:
         self.conn.row_factory = sqlite3.Row
         with self.lock:
             self.conn.executescript(SCHEMA)
+            if 'client' not in {r['name'] for r in self.conn.execute('PRAGMA table_info(requests)')}:
+                self.conn.execute('ALTER TABLE requests ADD COLUMN client TEXT')  # banco do P2 a P4
             self.conn.commit()
 
     def close(self):
@@ -101,7 +103,7 @@ class Queue:
     # ---- pedidos ----
 
     def enqueue(self, *, task, role, target=None, runtime=None, model=None, effort=None, account=None, ref=None,
-                deadline=None, blocks=None, priority=None, caller=None, state='queued', index=None) -> int:
+                deadline=None, blocks=None, priority=None, caller=None, client=None, state='queued', index=None) -> int:
         """Grava o pedido. O que veio no `dispatch` vence o índice; `index(ref)` completa o que faltou."""
         if state not in STATES:
             raise ValueError(f'state inválido: {state!r}')
@@ -114,9 +116,9 @@ class Queue:
         now = time.time()
         cur = self._run(
             'INSERT INTO requests (task, role, target, runtime, model, effort, account, ref, deadline, blocks,'
-            ' priority, caller, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            ' priority, caller, client, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (task, role, target, runtime, model, effort, account, ref, deadline, json.dumps(list(blocks or [])),
-             priority, caller, state, now, now))
+             priority, caller, client, state, now, now))
         return cur.lastrowid
 
     def get(self, request_id):
