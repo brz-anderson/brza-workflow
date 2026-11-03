@@ -351,8 +351,8 @@ class InstallOfflineTest(unittest.TestCase):
         bin_dir = self.base / 'bin'
         bin_dir.mkdir()
         pnpm = bin_dir / 'pnpm'
-        pnpm.write_text(f'#!/bin/sh\necho "$(pwd -P) $*" >> {self.base}/calls\necho falhou >&2\n'
-                        f'exit $(cat {self.base}/code)\n')
+        pnpm.write_text(f'#!/bin/sh\necho "$(pwd -P) $*" >> "{self.base}/calls"\necho falhou >&2\n'
+                        f'exit $(cat "{self.base}/code")\n')
         pnpm.chmod(0o755)
         p = patch.dict(os.environ, {'PATH': f'{bin_dir}:/usr/bin:/bin'})
         p.start()

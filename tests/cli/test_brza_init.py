@@ -181,6 +181,7 @@ class AcceptanceTest(InitBase):
         found = {}
         for path in files_of(self.root):
             text = (self.root / path).read_text(encoding='utf-8', errors='ignore')
+            text = text.replace(str(self.base), '/dummy/base')
             for term in FOREIGN + APP_TERMS:
                 if term in text:
                     found.setdefault(path, []).append(term)
