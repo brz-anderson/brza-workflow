@@ -28,6 +28,8 @@ WHY = {
     "norma-comum": "a norma comum se edita no `core/` do brza-workflow e chega pelo `brza sync`, e só a local se grava na "
                    "branch da norma (A3 do P9)",
     "exemplo": "o exemplo de workstream do glossário deixa de ser o do brza-workspace",
+    "aspas": "a regra dos blocos de shell manda aspas em caminho e expansão, depois do `head $(which brza)` sem aspas de "
+             "2026-11-02: o caminho do app tem espaço, e o bloco roda em bash",
 }
 
 DIFFERENCES = [
@@ -124,6 +126,13 @@ o que é só de lá.""", ""),
 """),
 
     # --- AGENTS.md
+    Difference("AGENTS.md", "aspas",
+               """num terminal do worktree do chat, nas cercas `sh`, `bash`, `zsh`, `shell` e `console`.
+""",
+               """num terminal do worktree do chat, nas cercas `sh`, `bash`, `zsh`, `shell` e `console`. **Caminho e expansão (`$(…)`,
+`$VAR`) vão entre aspas**: o caminho de um app, como `/Applications/BrzA Studio.app/…`, tem espaço, e o bloco
+roda em bash, que divide a expansão sem aspas nele; o zsh não divide, e por isso o erro só aparece no ▶.
+"""),
     Difference("AGENTS.md", "p4-indice",
                """- **Na `master`:** só a norma — este arquivo, o `CLAUDE.md`, o `README.md`, o `plans/README.md`, o `work/README.md`, o
   `.claude/`, o `scripts/` e o `.gitignore`.""",

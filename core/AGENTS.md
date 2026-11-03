@@ -11,7 +11,9 @@ descrição e o corpo seguem em português.
 
 **Comando para quem pediu rodar vai em bloco cercado com a linguagem de shell** — ` ```bash `, um comando por bloco
 quando cada um roda sozinho —, nunca em cerca sem linguagem. O chat do {{workspace.title}} só mostra o ▶, que roda o bloco
-num terminal do worktree do chat, nas cercas `sh`, `bash`, `zsh`, `shell` e `console`.
+num terminal do worktree do chat, nas cercas `sh`, `bash`, `zsh`, `shell` e `console`. **Caminho e expansão (`$(…)`,
+`$VAR`) vão entre aspas**: o caminho de um app, como `/Applications/{{workspace.title}}.app/…`, tem espaço, e o bloco
+roda em bash, que divide a expansão sem aspas nele; o zsh não divide, e por isso o erro só aparece no ▶.
 
 **Arquivo gravado na norma, em `plans/`, `wiki/`, `work/` ou `memory/` aparece na resposta**, criado ou editado, com o
 caminho. A chamada de ferramenta pode ficar recolhida, e o que vai ao git precisa estar à vista de quem pediu.
