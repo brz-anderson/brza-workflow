@@ -1,9 +1,17 @@
-"""As contas do cliente (D6): o `account list --json` vira contas e instantâneos de uso, o `claude_env` monta o env do
-`claude -p` pela regra do H2, e `switch_chat_account` troca a conta de uma sessão de chat pelo RPC do H3.
+"""As contas do cliente (D6, D4): o `account list --json` vira contas e instantâneos de uso dos quatro runtimes
+(`claude`, `codex`, `grok` e `antigravity`), o `claude_env` monta o env do `claude -p` pela regra do H2,
+`switch_chat_account` troca a conta de uma sessão de chat pelo RPC do H3, e `select_codex` seleciona a conta global
+do Codex pelo RPC do D5.
 
-O uso entra no formato que o `Limits` consome, `{account, runtime, windows: [{name, usedPercent, resetsAt}]}`: a conta
-ativa vem de `rateLimits.claude` e as outras de `rateLimits.inactiveClaudeAccounts`. Conta sem uso fica sem instantâneo
-(o `Limits` aplica a R2.5). Cada janela é a chave do bloco (`session`, `weekly`, ...), com `windowMinutes`.
+O uso entra no formato que o `Limits` consome, `{account, runtime, windows: [{name, usedPercent, resetsAt}]}`:
+- No Claude: a conta ativa vem de `rateLimits.claude` e as outras de `rateLimits.inactiveClaudeAccounts`.
+- No Codex: a conta ativa vem de `codex.activeAccountId` (ou `systemDefault`), com o uso da ativa em
+  `rateLimits.codex` e o das outras em `rateLimits.inactiveCodexAccounts`.
+- No Grok e no Antigravity: conta única (`systemDefault`, `active`), com o uso das janelas de topo de
+  `rateLimits.<runtime>` (o Grok guarda o `error` do bloco quando não relata porcentagem).
+
+Toda amostra leva o runtime do bloco. Conta sem uso fica sem instantâneo (o `Limits` aplica a R2.5). Cada janela é a
+chave do bloco (`session`, `weekly`, ...), com `windowMinutes`.
 """
 from __future__ import annotations
 
@@ -296,16 +304,16 @@ def switch_chat_account(session_id, account_id, client='studio', rpc=None):
     return result
 
 
-def select_codex(account_id, client='studio', rpc=None):
+def select_codex(account_id, client=None, rpc=None, user_data=None):
     """`accounts.selectCodex` com `accountId` (None = systemDefault). Global. Só com o gate aprovado (R3.3)."""
     runtime = _runtime_module() if rpc is None else None
     call = rpc or runtime.rpc
     target_id = None if account_id in (None, SYSTEM_DEFAULT) else account_id
     fields = {'accountId': target_id}
-    client_name = client or 'studio'
-    user_data = clients.CLIENTS.get(client_name, {}).get('user_data')
+    client_name = client or clients.detect() or 'studio'
+    target_user_data = user_data or clients.CLIENTS.get(client_name, {}).get('user_data')
     try:
-        with _client_env(user_data):
+        with _client_env(target_user_data):
             result = call('accounts.selectCodex', fields)
     except Exception as e:
         raise AccountError(f'a seleção de conta do Codex falhou: {e}') from None
@@ -338,7 +346,11 @@ def quota_report(data, queue, limits, now_ms=None) -> list:
                     samples = queue.samples(a['id'], rt, w['name'], w.get('resetsAt'))
                     windows.append({'name': w['name'], 'used': w['usedPercent'], 'resets_at': w.get('resetsAt'),
                                     'projected': Limits._project(samples, w, now)})
-            report.append({'runtime': rt, 'account': a['id'], 'label': a['label'],
-                           'system_default': a['system_default'], 'active': a['active'],
-                           'cap': cap, 'windows': windows})
+            row = {'runtime': rt, 'account': a['id'], 'label': a['label'],
+                   'system_default': a['system_default'], 'active': a['active'],
+                   'cap': cap, 'windows': windows}
+            error = a.get('error') or rt_data.get('error')
+            if error:
+                row['error'] = error
+            report.append(row)
     return report

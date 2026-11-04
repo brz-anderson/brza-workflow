@@ -217,16 +217,36 @@ class QuotaTest(unittest.TestCase):
         self.assertNotEqual(decision.ceiling, 'account_active')
 
     def test_codex_request_at_95_percent_holds_in_account_quota(self):
-        codex_snap = {'account': 'systemDefault', 'runtime': 'codex',
-                      'windows': [{'name': 'session', 'usedPercent': 95, 'resetsAt': RESETS}]}
+        payload = json.loads(FIXTURE.read_text())
+        payload['result']['rateLimits']['codex']['session']['usedPercent'] = 95
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(payload), ''))
         queue = q.Queue(':memory:')
-        limits = lim.Limits({'quota.hard_cap_percent': 90},
-                            usage=lambda account, runtime, **kw: codex_snap if runtime == 'codex' else None)
+        limits = lim.Limits({'quota.hard_cap_percent': 90}, usage=accounts.usage, active=accounts.active_id)
         rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='systemDefault')
         decision = limits.decide(queue.get(rid), queue)
         self.assertFalse(decision.admit)
         self.assertEqual(decision.ceiling, 'account_quota')
         self.assertIn('session', decision.reason)
+        self.assertIn('a troca de conta do Codex só é proposta num dispatch novo (PLN-013/R3.3)', decision.reason)
+        queue.close()
+
+    def test_codex_projection_over_cap_does_not_mention_new_dispatch_in_held_reason(self):
+        # A frase 'a troca de conta do Codex só é proposta num dispatch novo' sai só no caso 'já em'
+        queue = q.Queue(':memory:')
+        resets = 2_000_000_000_000
+        now = resets - 10 * 3_600_000
+        clock = Clock(now)
+        queue.record_usage(snap(10, resets=resets, account='systemDefault', runtime='codex'), now - 3_600_000)
+        snap_now = snap(60, resets=resets, account='systemDefault', runtime='codex')
+        limits = lim.Limits({'quota.hard_cap_percent': 90},
+                            usage=lambda account, runtime, **kw: snap_now if runtime == 'codex' else None,
+                            clock=clock)
+        rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='systemDefault')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_quota')
+        self.assertIn('projeta', decision.reason)
+        self.assertNotIn('a troca de conta do Codex só é proposta num dispatch novo', decision.reason)
         queue.close()
 
     def test_antigravity_request_with_weekly_at_99_percent_holds_in_account_quota(self):

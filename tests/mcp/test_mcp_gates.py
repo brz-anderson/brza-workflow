@@ -230,9 +230,10 @@ class GateTest(ToolsCase):
         calls = []
         real_select = acc.select_codex
 
-        def mock_select(account_id, client='studio', rpc=None):
+        def mock_select(account_id, client=None, rpc=None, user_data=None):
             # O dublê confere que o queue.lock não está com esta thread durante a chamada
-            calls.append((account_id, self.queue.lock._is_owned()))
+            # e registra o client e o user_data recebidos
+            calls.append((account_id, self.queue.lock._is_owned(), client, user_data))
             payload['result']['codex']['activeAccountId'] = account_id
             payload['result']['rateLimits']['codex']['session']['usedPercent'] = 10
             payload['result']['rateLimits']['inactiveCodexAccounts'] = []
@@ -240,7 +241,7 @@ class GateTest(ToolsCase):
 
         try:
             # 1. Com o RPC falhando, o gate segue sem uso e continua aberto
-            def failing_select(account_id, client='studio', rpc=None):
+            def failing_select(account_id, client=None, rpc=None, user_data=None):
                 raise RuntimeError('RPC caiu')
 
             acc.select_codex = failing_select
@@ -259,9 +260,39 @@ class GateTest(ToolsCase):
             self.assertFalse(err, out)
             self.assertEqual(out['state'], 'queued')
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0], ('b', False))
+            self.assertEqual(calls[0], ('b', False, 'orca', None))
             self.assertEqual(len(self.queue.pending()), 1)
             self.assertEqual(self.queue.get(out['request'])['account'], 'b')
+        finally:
+            acc.select_codex = real_select
+
+    def test_approve_passes_request_client_and_user_data_to_select_codex(self):
+        accounts, payload = self._setup_codex_accounts(active_used=95, inactive_used=10)
+        profile = self.tmp / 'custom-profile'
+        profile.mkdir()
+        (profile / 'orca-runtime.json').write_text('{}')
+        err, out = self.call('dispatch', {'task': 't-custom', 'role': 'consultant', 'runtime': 'codex'},
+                             session='s1', client=str(profile))
+        self.assertFalse(err, out)
+        gate = out['gate']
+
+        calls = []
+        real_select = acc.select_codex
+
+        def mock_select(account_id, client=None, rpc=None, user_data=None):
+            calls.append((account_id, client, user_data))
+            payload['result']['codex']['activeAccountId'] = account_id
+            payload['result']['rateLimits']['codex']['session']['usedPercent'] = 10
+            payload['result']['rateLimits']['inactiveCodexAccounts'] = []
+            return {'kind': 'done'}
+
+        try:
+            acc.select_codex = mock_select
+            err, out = self.call('dispatch', {'task': 't-custom', 'role': 'consultant', 'runtime': 'codex',
+                                              'approved': gate['id']}, session='s1')
+            self.assertFalse(err, out)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], ('b', 'studio', str(profile)))
         finally:
             acc.select_codex = real_select
 

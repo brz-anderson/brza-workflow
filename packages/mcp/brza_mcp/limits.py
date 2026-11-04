@@ -242,11 +242,7 @@ class Limits:
                 else:
                     over = f'janela {w["name"]} já em {w["used"]:g}%, quota.hard_cap_percent = {cap:g}'
             elif over is None and w['projected'] >= cap:
-                if runtime == 'codex':
-                    over = (f'janela {w["name"]} projeta {w["projected"]:.0f}% no reset, quota.hard_cap_percent = {cap:g}; '
-                            'a troca de conta do Codex só é proposta num dispatch novo (PLN-013/R3.3)')
-                else:
-                    over = f'janela {w["name"]} projeta {w["projected"]:.0f}% no reset, quota.hard_cap_percent = {cap:g}'
+                over = f'janela {w["name"]} projeta {w["projected"]:.0f}% no reset, quota.hard_cap_percent = {cap:g}'
         measures['quota'] = {'known': True, 'cap': cap, 'windows': report}
         if over:
             return Decision(False, 'account_quota', over)

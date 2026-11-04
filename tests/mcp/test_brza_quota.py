@@ -82,6 +82,31 @@ class QuotaTest(HomeCase):
         self.assertEqual([(w['name'], w['used']) for w in agy_active['windows']],
                          [('session', 12), ('weekly', 99)])
 
+    def test_grok_active_account_is_shown_as_active_without_windows_citing_the_error(self):
+        # Saída --json: a conta do Grok está ativa, sem janelas e traz o error do bloco
+        code, out, _ = self.run_quota('--json')
+        self.assertEqual(code, 0)
+        report = json.loads(out)['accounts']
+        grok_rows = [a for a in report if a.get('runtime') == 'grok']
+        self.assertEqual(len(grok_rows), 1)
+        grok = grok_rows[0]
+        self.assertTrue(grok['active'])
+        self.assertEqual(grok['windows'], [])
+        self.assertEqual(grok.get('error'), 'Grok did not report a usage percentage for this account')
+
+        # Saída humana: mostra [grok], [ativa] e cita o erro, e não 'conta inativa sem leitura'
+        code, out_human, _ = self.run_quota()
+        self.assertEqual(code, 0)
+        self.assertIn('[grok]', out_human)
+        self.assertIn('Grok did not report a usage percentage for this account', out_human)
+        lines = out_human.splitlines()
+        for i, line in enumerate(lines):
+            if '[grok]' in line:
+                next_line = lines[i + 1] if i + 1 < len(lines) else ''
+                self.assertIn('[ativa]', line)
+                self.assertIn('Grok did not report a usage percentage for this account', next_line)
+                self.assertNotIn('conta inativa', next_line)
+
     def test_the_cap_comes_from_the_brza_toml_and_the_overrides_like_in_the_server(self):  # P5 F-A3 = O-A9
         ws = self.tmp / 'ws'
         ws.mkdir()

@@ -383,15 +383,19 @@ class Orchestrator:
         #        accounts_mod.select_codex(request['account'], client)  # falhou: ToolError, e o gate segue aberto
         #        self.accounts.read(force=True, ...)
         if request.get('runtime') == 'codex':
-            active_codex = self.active_account(request.get('client'), request.get('user_data'), runtime='codex')
+            client = (request.get('client')
+                      or getattr(self.accounts, 'client', None)
+                      or (getattr(self.accounts, 'detect', clients_mod.detect)()))
+            user_data = request.get('user_data')
+            active_codex = self.active_account(client, user_data, runtime='codex')
             if request.get('account') and request.get('account') != active_codex:
                 try:
-                    accounts_mod.select_codex(request['account'], client=request.get('client') or 'studio')
+                    accounts_mod.select_codex(request['account'], client=client, user_data=user_data)
                 except Exception as e:
                     raise ToolError(f'a seleção de conta do Codex falhou: {e}') from None
                 if self.accounts and hasattr(self.accounts, 'read'):
                     try:
-                        self.accounts.read(force=True, client=request.get('client'), user_data=request.get('user_data'))
+                        self.accounts.read(force=True, client=client, user_data=user_data)
                     except Exception:
                         pass
 
