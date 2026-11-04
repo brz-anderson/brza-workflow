@@ -296,6 +296,24 @@ def switch_chat_account(session_id, account_id, client='studio', rpc=None):
     return result
 
 
+def select_codex(account_id, client='studio', rpc=None):
+    """`accounts.selectCodex` com `accountId` (None = systemDefault). Global. Só com o gate aprovado (R3.3)."""
+    runtime = _runtime_module() if rpc is None else None
+    call = rpc or runtime.rpc
+    target_id = None if account_id in (None, SYSTEM_DEFAULT) else account_id
+    fields = {'accountId': target_id}
+    client_name = client or 'studio'
+    user_data = clients.CLIENTS.get(client_name, {}).get('user_data')
+    try:
+        with _client_env(user_data):
+            result = call('accounts.selectCodex', fields)
+    except Exception as e:
+        raise AccountError(f'a seleção de conta do Codex falhou: {e}') from None
+    if isinstance(result, dict) and result.get('kind') == 'not-done':
+        raise AccountError(f'o app recusou a troca de conta: {result.get("notice")}')
+    return result
+
+
 # ---- o relatório do `brza quota` ----
 
 def quota_report(data, queue, limits, now_ms=None) -> list:

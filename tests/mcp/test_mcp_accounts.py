@@ -472,8 +472,48 @@ class SwitchTest(unittest.TestCase):
         self.assertEqual(os.environ.get('ORCA_USER_DATA_PATH'), before)
 
 
-if __name__ == '__main__':
-    unittest.main()
+class SelectCodexTest(unittest.TestCase):
+    def test_select_codex_sends_none_for_system_default(self):
+        calls = []
+
+        def rpc(method, params=None, timeout=10.0):
+            calls.append((method, params, os.environ.get('ORCA_USER_DATA_PATH')))
+            return {'kind': 'done'}
+
+        acc.select_codex('systemDefault', client='studio', rpc=rpc)
+        self.assertEqual(len(calls), 1)
+        method, params, env = calls[0]
+        self.assertEqual(method, 'accounts.selectCodex')
+        self.assertIsNone(params['accountId'])
+        self.assertTrue(env.endswith('brza-studio'))
+
+    def test_select_codex_sends_account_id_for_managed_account(self):
+        calls = []
+
+        def rpc(method, params=None, timeout=10.0):
+            calls.append((method, params, os.environ.get('ORCA_USER_DATA_PATH')))
+            return {'kind': 'done'}
+
+        acc.select_codex('codex-acc-2', client='studio', rpc=rpc)
+        self.assertEqual(len(calls), 1)
+        method, params, env = calls[0]
+        self.assertEqual(method, 'accounts.selectCodex')
+        self.assertEqual(params['accountId'], 'codex-acc-2')
+
+    def test_select_codex_raises_account_error_on_rpc_failure(self):
+        def rpc(method, params=None, timeout=10.0):
+            raise RuntimeError('conexão recusada')
+
+        with self.assertRaises(acc.AccountError) as cm:
+            acc.select_codex('codex-acc-2', client='studio', rpc=rpc)
+        self.assertIn('falhou', str(cm.exception))
+
+    def test_select_codex_raises_account_error_when_app_refuses(self):
+        def rpc(method, params=None, timeout=10.0):
+            return {'kind': 'not-done', 'notice': 'permissão negada'}
+
+        with self.assertRaisesRegex(acc.AccountError, 'permissão negada'):
+            acc.select_codex('codex-acc-2', client='studio', rpc=rpc)
 
 
 class ProfileAdmissionTest(unittest.TestCase):
@@ -501,3 +541,7 @@ class ProfileAdmissionTest(unittest.TestCase):
         self.assertEqual(accounts.active_id(client='studio', user_data='/tmp/dev-B'), 'dev-B')
         self.assertEqual(calls, ['/tmp/dev-A', '/tmp/dev-B'])
         queue.close()
+
+
+if __name__ == '__main__':
+    unittest.main()

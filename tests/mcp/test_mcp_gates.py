@@ -11,6 +11,7 @@ import unittest
 from tools_support import ToolsCase
 
 from brza_mcp import accounts as acc
+from brza_mcp import limits as lim
 
 FIXTURE = json.loads((Path(__file__).resolve().parent / 'fixtures' / 'orca-account-list.json').read_text())
 
@@ -180,6 +181,107 @@ class GateTest(ToolsCase):
                                            'account': 'outra-conta', 'approved': gate2['id']}, session='s1')
         self.assertTrue(err2)
         self.assertIn('o grok tem uma conta só no app (PLN-013/R2.1)', out2)
+
+    def _setup_codex_accounts(self, active_used=95, inactive_used=10):
+        payload = copy.deepcopy(FIXTURE)
+        payload['result']['codex']['accounts'] = [
+            {'id': 'b', 'email': 'b@example.com'}
+        ]
+        payload['result']['rateLimits']['codex']['session']['usedPercent'] = active_used
+        if inactive_used is not None:
+            payload['result']['rateLimits']['inactiveCodexAccounts'] = [
+                {'accountId': 'b', 'rateLimits': {'session': {'usedPercent': inactive_used, 'windowMinutes': 300,
+                                                               'resetsAt': 1793697776000}}}
+            ]
+        else:
+            payload['result']['rateLimits']['inactiveCodexAccounts'] = []
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(payload), ''))
+        limits = lim.Limits(self.config, usage=accounts.usage, active=accounts.active_id, machine=self.machine)
+        self.service.accounts = accounts
+        self.service.limits = limits
+        self.limits = limits
+        return accounts, payload
+
+    def test_codex_consultant_over_cap_proposes_switch_to_inactive_account(self):
+        self._setup_codex_accounts(active_used=95, inactive_used=10)
+        gate = self.gate({'task': 'analisa código', 'role': 'consultant', 'runtime': 'codex'})
+        self.assertEqual(gate['proposal']['account'], 'b')
+        self.assertEqual(gate['proposal']['runtime'], 'codex')
+        self.assertIn('troca para b', gate['reason'])
+        self.assertIn('95%', gate['reason'])
+        self.assertIn('10%', gate['reason'])
+        self.assertEqual(self.queue.pending(), [])
+
+    def test_codex_executor_over_cap_has_both_reasons_in_single_gate(self):
+        self._setup_codex_accounts(active_used=95, inactive_used=10)
+        gate = self.gate({'task': 'faz código', 'role': 'executor', 'runtime': 'codex'})
+        self.assertEqual(gate['proposal']['account'], 'b')
+        self.assertEqual(gate['proposal']['role'], 'executor')
+        self.assertEqual(gate['proposal']['runtime'], 'codex')
+        self.assertIn('não é consultant', gate['reason'])
+        self.assertIn('troca para b', gate['reason'])
+        self.assertIn(';', gate['reason'])
+        self.assertEqual(self.queue.pending(), [])
+
+    def test_approve_calls_select_codex_outside_lock_and_leaves_gate_open_on_error(self):
+        accounts, payload = self._setup_codex_accounts(active_used=95, inactive_used=10)
+        gate = self.gate({'task': 'analisa código', 'role': 'consultant', 'runtime': 'codex'})
+
+        calls = []
+        real_select = acc.select_codex
+
+        def mock_select(account_id, client='studio', rpc=None):
+            # O dublê confere que o queue.lock não está com esta thread durante a chamada
+            calls.append((account_id, self.queue.lock._is_owned()))
+            payload['result']['codex']['activeAccountId'] = account_id
+            payload['result']['rateLimits']['codex']['session']['usedPercent'] = 10
+            payload['result']['rateLimits']['inactiveCodexAccounts'] = []
+            return {'kind': 'done'}
+
+        try:
+            # 1. Com o RPC falhando, o gate segue sem uso e continua aberto
+            def failing_select(account_id, client='studio', rpc=None):
+                raise RuntimeError('RPC caiu')
+
+            acc.select_codex = failing_select
+            err, out = self.call('dispatch', {'task': 'analisa código', 'role': 'consultant',
+                                              'runtime': 'codex', 'approved': gate['id']}, session='s1')
+            self.assertTrue(err)
+            self.assertIn('falhou', out)
+            gated_row = self.queue._all('SELECT approved_at FROM gates WHERE id = ?', (gate['id'],))
+            self.assertIsNone(gated_row[0]['approved_at'])
+            self.assertEqual(self.queue.pending(), [])
+
+            # 2. Com o dublê funcionando, aprova, confere queue.lock livre e põe o pedido em queued
+            acc.select_codex = mock_select
+            err, out = self.call('dispatch', {'task': 'analisa código', 'role': 'consultant',
+                                              'runtime': 'codex', 'approved': gate['id']}, session='s1')
+            self.assertFalse(err, out)
+            self.assertEqual(out['state'], 'queued')
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], ('b', False))
+            self.assertEqual(len(self.queue.pending()), 1)
+            self.assertEqual(self.queue.get(out['request'])['account'], 'b')
+        finally:
+            acc.select_codex = real_select
+
+    def test_codex_over_cap_without_inactive_account_enters_queue_and_waits_in_account_quota(self):
+        payload = copy.deepcopy(FIXTURE)
+        payload['result']['codex']['accounts'] = []
+        payload['result']['rateLimits']['codex']['session']['usedPercent'] = 95
+        payload['result']['rateLimits']['inactiveCodexAccounts'] = []
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(payload), ''))
+        limits = lim.Limits(self.config, usage=accounts.usage, active=accounts.active_id, machine=self.machine)
+        self.service.accounts = accounts
+        self.service.limits = limits
+        self.limits = limits
+
+        err, out = self.call('dispatch', {'task': 'espera cota', 'role': 'consultant', 'runtime': 'codex'}, session='s1')
+        self.assertFalse(err, out)
+        self.assertNotIn('gate', out)
+        self.assertEqual(out['state'], 'queued')
+        self.assertEqual(out['held_by'], 'account_quota')
+        self.assertIn('a troca de conta do Codex só é proposta num dispatch novo (PLN-013/R3.3)', out['held_reason'])
 
     def test_the_gate_survives_the_service(self):
         gate = self.gate({'task': 't', 'role': 'executor'})

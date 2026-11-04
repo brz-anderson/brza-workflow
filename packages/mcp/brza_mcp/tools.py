@@ -163,7 +163,7 @@ class Orchestrator:
             raise ToolError(f'não consegui ler as contas do cliente para conferir {name!r}: {e}') from None
         if found is None:
             raise ToolError(f'conta desconhecida: {name!r}')
-        if active is not None and found['id'] != active['id']:
+        if active is not None and found['id'] != active['id'] and (expected is None or found['id'] != expected):
             raise ToolError(f'o worker abre na conta ativa do cliente ({active["label"]}), e o `worker-start` não tem '
                             f'flag de conta: {found["label"]} só vale se for a ativa; troque a conta ativa no app ou '
                             'tire o account do pedido')
@@ -257,7 +257,11 @@ class Orchestrator:
                     fields[k] = decided[k]
                 else:
                     fields.pop(k, None)
-            reason = self.gate_reason(args, fields, client)
+            switch = self.codex_switch(fields, client, user_data)
+            reasons = [r for r in (self.gate_reason(args, fields, client), switch and self.switch_reason(switch)) if r]
+            reason = '; '.join(reasons) or None
+            if switch:
+                fields['account'] = switch['account']
             if reason is None:
                 request = self.queue.enqueue(**fields, caller=caller, index=self._index)
                 self.telemetry.policy(self.queue.get(request), decided)
@@ -287,6 +291,55 @@ class Orchestrator:
         except (ToolError, ValueError) as e:
             return _error(str(e))
 
+    def codex_switch(self, fields, client=None, user_data=None):
+        if fields.get('runtime') != 'codex':
+            return None
+        active = self.active_account(client, user_data, runtime='codex') or accounts_mod.SYSTEM_DEFAULT
+        account = fields.get('account')
+        if account and account != active:
+            return None
+        if not self.accounts:
+            return None
+        active_usage = self.accounts.usage(active, runtime='codex', **self._for(client, user_data))
+        windows = [w for w in (active_usage or {}).get('windows') or [] if w.get('usedPercent') is not None]
+        cap = self.limits.hard_cap()
+        over = [w for w in windows if w['usedPercent'] >= cap]
+        if not over:
+            return None
+        used = max(w['usedPercent'] for w in over)
+        all_accounts = []
+        if hasattr(self.accounts, 'accounts'):
+            all_accounts = self.accounts.accounts(runtime='codex', **self._for(client, user_data))
+        elif hasattr(self.accounts, 'read'):
+            try:
+                data = self.accounts.read(client=client, user_data=user_data)
+                all_accounts = data.get('codex', {}).get('accounts', [])
+            except Exception:
+                all_accounts = []
+        inactives = [a['id'] for a in all_accounts if a['id'] != active]
+        if not inactives:
+            return None
+        snapshots = {}
+        for aid in inactives:
+            snap = self.accounts.usage(aid, runtime='codex', **self._for(client, user_data))
+            if snap:
+                snapshots[aid] = snap
+        if not snapshots:
+            return None
+        chosen = self.limits.pick_account(snapshots, self.queue, runtime='codex')
+        target = chosen.get('account') if chosen else None
+        if not target or target not in snapshots:
+            return None
+        target_windows = [w for w in snapshots[target].get('windows') or [] if w.get('usedPercent') is not None]
+        target_used = max((w['usedPercent'] for w in target_windows), default=0.0)
+        return {'account': target, 'from': active, 'used': used, 'target_used': target_used}
+
+    @staticmethod
+    def switch_reason(switch) -> str:
+        return (f"a conta ativa do Codex ({switch['from']}) está em {switch['used']:g}%; "
+                f"a troca para {switch['account']} ({switch['target_used']:g}%) é global "
+                "e vale para os próximos launches do Codex, chats e workers (R3.3)")
+
     def gate_reason(self, args, fields, client=None):
         if args['role'] != ROLE_CONSULTANT:
             return (f'o papel {args["role"]!r} não é consultant: abrir executor ou outro papel exige a '
@@ -303,12 +356,47 @@ class Orchestrator:
     def approve(self, gate_id, caller, args=None):
         args = args or {}
         account = args.get('account')
+
+        # 1. lê o gate e o pedido, e confere chamador, uso e campos, sem o lock (REV-010/A5)
+        rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
+        if not rows:
+            raise ToolError(f'gate desconhecido: {gate_id!r}')
+        gate = rows[0]
+        if gate['caller'] != caller:
+            raise ToolError(f'o gate {gate_id} foi aberto por outro chamador; só quem o abriu o aprova')
+        request = self.queue.get(gate['request_id'])
+        if gate['approved_at'] is not None or not request or request['state'] != 'gated':
+            raise ToolError(f'o gate {gate_id} já foi usado')
+
         if account is not None:
-            gate = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (gate_id,))
-            stored = (self.queue.get(gate[0]['request_id']) or {}) if gate else {}
-            account = self.normalize_account(account, runtime=stored.get('runtime', 'claude'),
-                                             client=stored.get('client'), user_data=stored.get('user_data'),
-                                             expected=stored.get('account'))  # a leitura das contas pode demorar: fora do lock global
+            account = self.normalize_account(account, runtime=request.get('runtime', 'claude'),
+                                             client=request.get('client'), user_data=request.get('user_data'),
+                                             expected=request.get('account'))  # fora do lock global
+
+        for name in ('task', 'role', 'account'):
+            given = account if name == 'account' else args.get(name)
+            if given is not None and given != request[name]:
+                raise ToolError(f'o gate {gate_id} foi aberto para {name} {request[name]!r}: a aprovação é da '
+                                f'proposta guardada, e veio {args[name]!r}; abra outra proposta')
+
+        # 2. se request['runtime'] == 'codex' e request['account'] != accounts.active_id('codex', ...):
+        #        accounts_mod.select_codex(request['account'], client)  # falhou: ToolError, e o gate segue aberto
+        #        self.accounts.read(force=True, ...)
+        if request.get('runtime') == 'codex':
+            active_codex = self.active_account(request.get('client'), request.get('user_data'), runtime='codex')
+            if request.get('account') and request.get('account') != active_codex:
+                try:
+                    accounts_mod.select_codex(request['account'], client=request.get('client') or 'studio')
+                except Exception as e:
+                    raise ToolError(f'a seleção de conta do Codex falhou: {e}') from None
+                if self.accounts and hasattr(self.accounts, 'read'):
+                    try:
+                        self.accounts.read(force=True, client=request.get('client'), user_data=request.get('user_data'))
+                    except Exception:
+                        pass
+
+        # 3. com o lock: confere de novo e faz o UPDATE de hoje (tools.py:278-304); a segunda aprovação perde ali
+        #    (a troca para a mesma conta é idempotente)
         with self.queue.lock:  # a leitura, a conferência e a gravação são um passo só: duas aprovações não passam juntas
             rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
             if not rows:
@@ -317,7 +405,7 @@ class Orchestrator:
             if gate['caller'] != caller:
                 raise ToolError(f'o gate {gate_id} foi aberto por outro chamador; só quem o abriu o aprova')
             request = self.queue.get(gate['request_id'])
-            if gate['approved_at'] is not None or request['state'] != 'gated':
+            if gate['approved_at'] is not None or not request or request['state'] != 'gated':
                 raise ToolError(f'o gate {gate_id} já foi usado')
             for name in ('task', 'role', 'account'):
                 given = account if name == 'account' else args.get(name)
