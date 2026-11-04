@@ -13,8 +13,10 @@ chegam pelo `agentCmdOverrides.claude` apontado para o claude-brza; sem ele, o s
 assim mesmo.
 
 O --agent escolhe o agente (padrão: claude); agy vira antigravity antes do launch. As checagens de claude-brza,
-hooks, processos e transcripts só se aplicam a Claude. O --rename e o --wait são exclusivos de Claude: com outro
-agente, são recusados antes de abrir. Nos demais agentes, o nome vem do mapa; o título da aba usa o mesmo RPC.
+hooks, processos e transcripts só se aplicam a Claude. O --rename dá nome à sessão no Claude (pelo /rename) e no
+Codex (pelo título da aba gravado em session_index.jsonl); no Grok e Antigravity, dá o título da aba e grava no mapa,
+avisando em linha CHECK que o agente não recebe /rename pelo chat. Com --rename, o título da aba é sempre o <nome>,
+mesmo com --title. O --wait espera a sessão nos quatro agentes e, com --rename, a confirmação do nome nos runtimes que suportam.
 
 O mapa de sessões é o .sessions/sessions.jsonl do workspace do cwd (o `brza_root.find`), fora do git, uma linha por evento: `open`, `session`
 (o id da sessão do Claude, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
@@ -29,12 +31,12 @@ Uso:
   brza sessions <nome>                                  # abre o chat no workspace; o `open` é opcional
   brza sessions <nome> --agent grok                     # abre Grok; codex e agy (antigravity) também aceitos
   brza sessions <nome> --title "PLN-001: Coordenador"   # com o título na aba; sem ele, o <nome>
-  brza sessions <nome> --rename                         # e dá o nome à sessão do Claude, para o correio
+  brza sessions <nome> --rename                         # e dá o nome à sessão (Claude, Codex; Grok/agy na aba e mapa)
   brza sessions <nome> --prompt "<tarefa>"              # e manda a tarefa
   brza sessions <nome> --prompt-file <arquivo>          # a tarefa lida de um arquivo
   brza sessions <nome> --checkout <caminho>             # noutro checkout, como um worktree do código; o relativo
                                                         # parte da raiz do workspace, não do cwd
-  brza sessions <nome> --wait                           # só anuncia com a sessão do Claude no ar; com --rename, nomeada
+  brza sessions <nome> --wait                           # só anuncia com a sessão no ar; com --rename, nomeada
   brza sessions <nome> --dry-run                        # só mostra o que faria
   brza sessions list [--json]                           # os chats do app: nome, estado, chat, worktree, título
   brza sessions send <nome> <texto> [--json]            # manda ao chat, na fila se ele estiver num turno
@@ -182,13 +184,55 @@ def chat_blocker(checkout: Path) -> str | None:
     return None
 
 
-def wait_for_name(name: str) -> bool:
+def codex_home() -> Path:
+    return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+
+
+def codex_thread_name(sid: str | None) -> str | None:
+    """O `thread_name` da sessão no `session_index.jsonl` do Codex, na linha cujo `id` é o `provider_session`."""
+    if not sid:
+        return None
+    index_file = codex_home() / 'session_index.jsonl'
+    try:
+        lines = index_file.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return None
+    name = None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if row.get('id') == sid and 'thread_name' in row:
+            name = row.get('thread_name')
+    return name
+
+
+NAMED = {
+    'claude': lambda name, sid: running(name),
+    'codex': lambda name, sid: codex_thread_name(sid) == name,
+    'grok': None,
+    'antigravity': None,
+}
+
+
+def wait_for_name(name: str, agent: str = 'claude', sid: str | None = None) -> bool:
+    checker = NAMED.get(agent)
+    if checker is None:
+        return True
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
-        if running(name):
+        if checker(name, sid):
             return True
         time.sleep(1)
     return False
+
+
+def _check_name(name: str, agent: str, sid: str | None) -> bool:
+    try:
+        return wait_for_name(name, agent, sid)
+    except TypeError:
+        return wait_for_name(name)
 
 
 def wait_for_session(chat: str) -> str | None:
@@ -352,7 +396,8 @@ def main():
     ap.add_argument('--agent', default='claude',
                     help='o id do agente: claude, codex, grok ou antigravity (agy); padrão: claude')
     ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
-    ap.add_argument('--rename', action='store_true', help='só Claude: manda o /rename <nome>, para o correio achar a sessão')
+    ap.add_argument('--rename', action='store_true',
+                    help='dá o nome à sessão no runtime que suporta; no Grok e Antigravity, na aba e no mapa')
     ap.add_argument('--checkout', type=Path, default=WORKSPACE,
                     help='o checkout do chat; o relativo parte da raiz do workspace, não do cwd; padrão a raiz do workspace')
     group = ap.add_mutually_exclusive_group()
@@ -368,9 +413,6 @@ def main():
         print(f'CHECK:    {args.name}: --agent {args.agent} não é claude, codex, grok nem antigravity (agy); '
               'nada foi aberto')
         return 1
-    if agent != 'claude' and args.rename:
-        print(f'CHECK:    {args.name}: --rename só tem suporte com --agent claude; agente escolhido: {agent}; nada foi aberto')
-        return 1
 
     try:
         checkout = resolve_checkout(args.checkout)
@@ -378,7 +420,11 @@ def main():
         print(f'recusado: {e}')
         return 1
     prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
-    title = args.title or args.name
+    if args.rename and args.title:
+        print(f'CHECK:    {args.name}: o --title foi trocado pelo nome')
+        title = args.name
+    else:
+        title = args.title or args.name
     if (agent == 'claude' and running(args.name)) or mapped_and_open(args.name):
         print(f'running:  {args.name}')
         return 0
@@ -390,7 +436,7 @@ def main():
         print(f'abriria:  {args.name}  (chat, {checkout}), {", ".join(extras)}')
         return 0
 
-    first = f'/rename {args.name}' if args.rename else prompt
+    first = f'/rename {args.name}' if (args.rename and agent == 'claude') else prompt
     try:
         launched = brza('agent', 'launch', '--agent', agent, '--surface', 'chat', '--worktree', f'path:{checkout}',
                         *(['--prompt', first] if first else []))
@@ -409,7 +455,9 @@ def main():
         print(f'CHECK:    {args.name} abriu, mas a aba não ganhou o título: {e}')
     record('open', name=args.name, title=title, chat=session_id, checkout=str(checkout), renamed=args.rename,
            **({'agent': agent} if agent != 'claude' else {}))
-    if args.rename and prompt:
+    if args.rename and NAMED.get(agent) is None:
+        print(f'CHECK:    {args.name}: o {agent} não recebe o /rename pelo chat do app; o nome ficou na aba e no mapa')
+    if args.rename and agent == 'claude' and prompt:
         try:
             send_to_chat(session_id, prompt)
         except BrzaError as e:
@@ -422,8 +470,9 @@ def main():
             return 1
         record('session', name=args.name, chat=session_id, provider_session=sid,
                **({'claude_session': sid} if agent == 'claude' else {}))
-        if args.rename and not wait_for_name(args.name):
-            print(f'CHECK:    {args.name} não registrou o nome em {WAIT_SECONDS:g} s; confira o /rename na aba')
+        if args.rename and NAMED.get(agent) is not None and not _check_name(args.name, agent, sid):
+            detail = 'confira o /rename na aba' if agent == 'claude' else 'confira a aba'
+            print(f'CHECK:    {args.name} não registrou o nome em {WAIT_SECONDS:g} s; {detail}')
             return 1
     print(f'open:     {args.name}  (chat, {checkout}, {session_id})')
     return 0

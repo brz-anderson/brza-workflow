@@ -404,23 +404,81 @@ class CommandTest(unittest.TestCase):
                     self.assertEqual(events[1].get('provider_session'), f'provider-{canonical}')
                     self.assertNotIn('claude_session', events[1])
 
-    def test_non_claude_rejects_rename_before_any_side_effect_even_in_dry_run(self):
-        def forbidden(*args):
-            self.fail('a recusa deve ocorrer antes de acessar o app ou os arquivos Claude')
+    def test_rename_codex_sets_the_tab_title_and_waits_for_thread_name(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        codex_dir = Path(temp.name)
+        index_file = codex_dir / 'session_index.jsonl'
+        index_file.write_text(json.dumps({'id': 'uuid-codex-1', 'thread_name': 'correcao'}) + '\n')
 
-        for agent in ('codex', 'grok', 'agy', 'antigravity'):
-            for flags in (('--rename',), ('--rename', '--dry-run')):
-                with self.subTest(agent=agent, flags=flags), patch.dict(GLOBALS, {
-                    'running': forbidden, 'mapped_and_open': forbidden, 'chat_blocker': forbidden,
-                    'resolve_checkout': forbidden,
-                }):
-                    code, out = self.run_main('correcao', '--agent', agent, *flags)
-                    self.assertEqual(code, 1)
-                    self.assertIn('--rename só tem suporte com --agent claude', out)
-                    self.assertIn('nada foi aberto', out)
-        self.assertEqual(self.launches, [])
-        self.assertEqual(self.app.calls, [])
-        self.assertEqual(self.read_map(), [])
+        self.app.providers['codex_n'] = 'uuid-codex-1'
+        chat = 'codex_n'
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_dir)}), \
+                patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+            code, out = self.run_main('correcao', '--agent', 'codex', '--title', 'Título Antigo', '--rename',
+                                     '--wait', '--prompt', 'tarefa do codex')
+            self.assertEqual(code, 0, out)
+            self.assertIn('CHECK:    correcao: o --title foi trocado pelo nome', out)
+            self.assertIn(f'open:     correcao  (chat, {self.workspace}, {chat})', out)
+
+            # Não manda o /rename: o prompt no launch é a tarefa, sem chamada extra a send.
+            launch = self.launches[-1]
+            self.assertEqual(launch[launch.index('--prompt') + 1], 'tarefa do codex')
+            self.assertEqual(self.calls('agentSession.send'), [])
+
+            # O título da aba é o nome, e não o --title passado.
+            rename_calls = [c for c in self.calls('agentSession.rename') if c['sessionId'] == chat]
+            self.assertEqual(rename_calls[-1]['name'], 'correcao')
+
+            # O mapa gravou open com o nome no title e renamed=True, e session com provider_session.
+            events = self.read_map()
+            self.assertEqual(events[0]['title'], 'correcao')
+            self.assertTrue(events[0]['renamed'])
+            self.assertEqual(events[1]['provider_session'], 'uuid-codex-1')
+
+        # Vencendo o prazo com thread_name diferente ou ausente, sai com erro.
+        index_file.write_text(json.dumps({'id': 'uuid-codex-1', 'thread_name': 'outro_nome'}) + '\n')
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_dir)}), \
+                patch.dict(GLOBALS, {'WAIT_SECONDS': 0,
+                                     'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+            code, out = self.run_main('correcao', '--agent', 'codex', '--rename', '--wait')
+            self.assertEqual(code, 1)
+            self.assertIn('CHECK:    correcao não registrou o nome em 0 s; confira a aba', out)
+
+    def test_rename_without_a_reader_gives_tab_and_map_and_a_check_line(self):
+        for requested, canonical in (('grok', 'grok'), ('antigravity', 'antigravity'), ('agy', 'antigravity')):
+            with self.subTest(agent=requested):
+                self.app.providers.clear()
+                self.app.calls.clear()
+                self.launches.clear()
+                if self.map.exists():
+                    self.map.unlink()
+                chat = f'{canonical}_n'
+                self.app.providers[chat] = f'provider-{canonical}'
+                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                    code, out = self.run_main('correcao', '--agent', requested, '--rename', '--wait',
+                                             '--prompt', 'tarefa sem slash')
+                    self.assertEqual(code, 0, out)
+                    self.assertIn(f'CHECK:    correcao: o {canonical} não recebe o /rename pelo chat do app; '
+                                  'o nome ficou na aba e no mapa', out)
+                    self.assertIn(f'open:     correcao  (chat, {self.workspace}, {chat})', out)
+
+                    # Não manda o /rename no launch nem depois.
+                    launch = self.launches[-1]
+                    self.assertEqual(launch[launch.index('--prompt') + 1], 'tarefa sem slash')
+                    self.assertEqual(self.calls('agentSession.send'), [])
+
+                    # Título da aba e mapa registrados com o nome.
+                    rename_calls = [c for c in self.calls('agentSession.rename') if c['sessionId'] == chat]
+                    self.assertEqual(rename_calls[-1]['name'], 'correcao')
+                    events = self.read_map()
+                    self.assertEqual(len(events), 2)
+                    self.assertEqual(events[0]['event'], 'open')
+                    self.assertEqual(events[0]['title'], 'correcao')
+                    self.assertEqual(events[0]['agent'], canonical)
+                    self.assertTrue(events[0]['renamed'])
+                    self.assertEqual(events[1]['event'], 'session')
+                    self.assertEqual(events[1]['provider_session'], f'provider-{canonical}')
 
     def test_the_session_map_reads_the_provider_session(self):
         chat = 'codex_1'
