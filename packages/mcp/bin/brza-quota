@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""O uso por conta do cliente: o `usedPercent` de cada janela, o `resetsAt` e a projeção no reset.
+
+  brza quota [--client studio|orca] [--json]
+
+Lê o `account list --json` do cliente (o `brza` do BrzA Studio ou o `orca`), grava as amostras na fila do orquestrador
+(`<BRZA_HOME>/orchestrator.db`) e projeta pela mesma conta do `limits.py`. Sai 0; 3 sem cliente ou sem resposta.
+"""
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from brza_mcp import accounts, limits, paths, policy, queue, tools  # noqa: E402
+
+
+def render(report):
+    lines = []
+    for a in report:
+        tag = ' (systemDefault)' if a['system_default'] else ''
+        lines.append(f'{a["label"]}{tag}{"  [ativa]" if a["active"] else ""}  id={a["account"]}')
+        if not a['windows']:
+            lines.append('  sem uso (conta inativa sem leitura): só o teto de sessões vale')
+        for w in a['windows']:
+            reset = (datetime.fromtimestamp(w['resets_at'] / 1000).strftime('%Y-%m-%d %H:%M')
+                     if w.get('resets_at') else '-')
+            flag = '  ACIMA DO TETO' if w['projected'] >= a['cap'] else ''
+            lines.append(f'  {w["name"]:<12} usado {w["used"]:g}%  reset {reset}  projeção {w["projected"]:.0f}%'
+                         f' (teto {a["cap"]:g}%){flag}')
+    return '\n'.join(lines)
+
+
+def main(argv=None, reader=None, db=None):
+    ap = argparse.ArgumentParser(prog='brza quota', description='O uso por conta, com a projeção do orquestrador.')
+    ap.add_argument('--client', choices=('studio', 'orca'), default=None, help='o cliente; sem ele, o do processo vivo')
+    ap.add_argument('--json', action='store_true', help='saída para máquina')
+    a = ap.parse_args(argv)
+    try:
+        data = (reader or accounts.Accounts(client=a.client)).read()
+    except accounts.AccountError as e:
+        print(f'brza quota: {e}', file=sys.stderr)
+        return 3
+    q = queue.Queue(db)
+    try:
+        # a configuração é a do servidor: o `brza.toml` do workspace, e por cima as sobreposições do `brza mcp config`
+        q.conn.executescript(tools.GATES_SCHEMA)
+        try:
+            config = {**policy.Policy(paths.workspace_root()).load(), **tools.get_overrides(q)}
+        except policy.PolicyError as e:
+            print(f'brza quota: {e}', file=sys.stderr)
+            return 2
+        report = accounts.quota_report(data, q, limits.Limits(config))
+    finally:
+        q.close()
+    print(json.dumps({'accounts': report}, ensure_ascii=False, indent=2) if a.json else render(report))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

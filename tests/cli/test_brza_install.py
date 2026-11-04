@@ -57,6 +57,8 @@ class InstallCase(unittest.TestCase):
         (self.core / 'brza-rascunho').write_text('não executável\n')
         for name in ('brza-doctor', 'brza-run', 'claude-brza'):
             make_exec(self.client / name)
+        self.mcp = self.workflow / 'packages' / 'mcp' / 'bin'
+        make_exec(self.mcp / 'brza-mcp')
         self.workspace = self.base / 'ws'
         self.local = self.workspace / 'scripts' / 'brza'
         for name in ('brza-app', 'brza-tree'):
@@ -106,6 +108,18 @@ class LinksTest(InstallCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.linked(), ['brza-doctor', 'brza-run'])
         self.assertEqual(self.target('brza-run'), self.client / 'brza-run')
+
+    def test_mcp_links_the_mcp_commands_and_nothing_else(self):
+        code, _, _ = self.run_main('--mcp')
+        self.assertEqual(code, 0)
+        self.assertEqual(self.linked(), ['brza-mcp'])
+        self.assertEqual(self.target('brza-mcp'), self.mcp / 'brza-mcp')
+
+    def test_mcp_with_the_package_missing_is_refused(self):
+        shutil.rmtree(self.workflow / 'packages' / 'mcp')
+        code, _, err = self.run_main('--mcp')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.linked(), [])
 
     def test_all_and_client_together(self):
         self.assertEqual(self.run_main('--all', '--client')[0], 0)
@@ -279,8 +293,9 @@ class ShowTest(InstallCase):
 
     def test_expected_links_are_the_core_the_client_and_the_claude_brza_in_the_checkout(self):
         found = dict(INSTALL['expected_links']())
-        self.assertEqual(sorted(found), ['brza-doctor', 'brza-install', 'brza-note', 'brza-run', 'brza-where',
-                                         'claude-brza'])
+        self.assertEqual(sorted(found), ['brza-doctor', 'brza-install', 'brza-mcp', 'brza-note', 'brza-run',
+                                         'brza-where', 'claude-brza'])
+        self.assertEqual(found['brza-mcp'], self.mcp / 'brza-mcp')
         self.assertEqual(found['claude-brza'], self.client / 'claude-brza')
         self.assertEqual(found['brza-note'], self.core / 'brza-note')
 
@@ -351,6 +366,16 @@ class ProcessTest(unittest.TestCase):
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('brza-note: ausente', r.stdout)
+        self.assertIn('brza-mcp: ausente', r.stdout)
+
+    def test_mcp_links_the_real_brza_mcp_and_the_link_runs(self):
+        r = self.run_install('--mcp')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        link = self.home / '.local' / 'bin' / 'brza-mcp'
+        self.assertEqual(link.resolve(), (ROOT / 'packages' / 'mcp' / 'bin' / 'brza-mcp').resolve())
+        r = subprocess.run([str(link), '--help'], capture_output=True, text=True, cwd=str(self.home), env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('serve', r.stdout)
 
 
 if __name__ == '__main__':

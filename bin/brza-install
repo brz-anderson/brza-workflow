@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Instala os comandos `brza-*` em ~/.local/bin, como links para o checkout do brza-workflow, e o override do chat.
 
-  brza install                  mostra o estado: cada link do núcleo e do pacote do cliente, e o agentCmdOverrides.claude
+  brza install                  mostra o estado: cada link do núcleo, do pacote do cliente e do pacote do MCP, e o agentCmdOverrides.claude
   brza install --all            liga todo brza-* executável de bin/ do checkout, inclusive o brza-install; o primeiro
                                 roda pelo caminho inteiro, <checkout>/bin/brza-install --all, porque o link dele ainda
                                 não existe
   brza install --client         liga todo brza-* executável de packages/client/bin/ (devices, doctor, print, run,
                                 sessions); o claude-brza fica de fora, e segue só pelo --chat-command
+  brza install --mcp            liga todo brza-* executável de packages/mcp/bin/ (mcp): o servidor MCP residente e o
+                                controle dele, que o `brza mcp <verbo>` alcança pelo despacho brza-<sub>
   brza install --local <dir>    liga os brza-* executáveis de um diretório local: o scripts/brza/ de um workspace (dê a
                                 raiz dele ou a própria pasta), que guarda os comandos do código do projeto — app, dev,
                                 test, tree, shot —, e não do brza-workflow
@@ -62,16 +64,20 @@ def client_dir() -> Path:
     return workflow_root() / 'packages' / 'client' / 'bin'
 
 
+def mcp_dir() -> Path:
+    return workflow_root() / 'packages' / 'mcp' / 'bin'
+
+
 def commands(folder: Path) -> list[str]:
     """Todo brza-* executável de `folder`."""
     return sorted(p.name for p in folder.glob('brza-*') if p.is_file() and os.access(p, os.X_OK))
 
 
 def expected_links() -> list[tuple[str, Path]]:
-    """(nome, fonte) de todo link que uma máquina com o núcleo e o cliente tem: o bin/, o packages/client/bin/ e o
-    claude-brza. Pasta que não existe não tem link."""
+    """(nome, fonte) de todo link que uma máquina com o núcleo, o cliente e o MCP tem: o bin/, o packages/client/bin/, o
+    packages/mcp/bin/ e o claude-brza. Pasta que não existe não tem link."""
     out = []
-    for folder in (core_dir(), client_dir()):
+    for folder in (core_dir(), client_dir(), mcp_dir()):
         if folder.is_dir():
             out += [(name, folder / name) for name in commands(folder)]
     if (client_dir() / CHAT_COMMAND).is_file():
@@ -182,6 +188,7 @@ def main(argv: list[str] | None = None):
                                  description='Liga os brza-* do brza-workflow em ~/.local/bin e o claude-brza no app.')
     ap.add_argument('--all', action='store_true', help='liga todo brza-* de bin/, inclusive o brza-install')
     ap.add_argument('--client', action='store_true', help='liga todo brza-* de packages/client/bin/')
+    ap.add_argument('--mcp', action='store_true', help='liga todo brza-* de packages/mcp/bin/')
     ap.add_argument('--local', type=Path, metavar='dir', help='liga os brza-* do scripts/brza/ de um workspace')
     ap.add_argument('--chat-command', action='store_true', help=f'liga {CHAT_COMMAND} e o põe no override do chat')
     ap.add_argument('--run', action='store_true', help=f'liga {RUN}')
@@ -189,7 +196,7 @@ def main(argv: list[str] | None = None):
     ap.add_argument('--relink', action='store_true', help='troca o link que aponta para outro lugar')
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args(argv)
-    if not (a.all or a.client or a.local or a.chat_command or a.run or a.sessions):
+    if not (a.all or a.client or a.mcp or a.local or a.chat_command or a.run or a.sessions):
         show()
         return
     warn_if_worktree()
@@ -200,6 +207,8 @@ def main(argv: list[str] | None = None):
         wanted += folder_commands(client_dir(), 'o pacote do cliente do checkout do brza-workflow')
     else:
         wanted += [(name, client_dir() / name) for name, flag in ((RUN, a.run), (SESSIONS, a.sessions)) if flag]
+    if a.mcp:
+        wanted += folder_commands(mcp_dir(), 'o pacote do MCP do checkout do brza-workflow')
     if a.local:
         folder = local_folder(a.local)
         wanted += [(name, folder / name) for name in commands(folder)]

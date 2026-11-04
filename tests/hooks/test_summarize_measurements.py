@@ -156,6 +156,54 @@ class ByWorkstreamTest(unittest.TestCase):
                       self.summarize.to_json(agg)["compact_guard"])
 
 
+def route(decision, request=1, held_by=None, resolver=None, **extra):
+    return {"event": "route", "timestamp": "2026-11-03T12:00:00-03:00", "workstream": "tools-kit", "caller": "s1",
+            "request": request, "decision": decision, "held_by": held_by, "resolver": resolver, **extra}
+
+
+class RouteTest(unittest.TestCase):
+    """As linhas `route` do orquestrador MCP (PLN-009/P6), numa seção própria."""
+
+    ROWS = [route("queued"), route("admitted"), route("held", 2, "workspace"), route("held", 3, "workspace"),
+            route("held", 4, "machine"), route("resolved", 5, resolver={"path": "tev1", "confidence": 0.9}),
+            route("resolved", 6, resolver={"path": "haiku", "confidence": None}),
+            route("resolved", 7, resolver={"path": "tev1", "confidence": 0.7}), route("done"), route("failed", 8)]
+
+    def setUp(self):
+        self.summarize = load()
+
+    def test_route_lines_are_counted_by_decision_held_by_and_resolver_path(self):
+        agg = self.summarize.aggregate(self.ROWS)
+        self.assertEqual(agg["route"]["decision"], {"queued": 1, "admitted": 1, "held": 3, "resolved": 3, "done": 1,
+                                                    "failed": 1})
+        self.assertEqual(agg["route"]["held_by"], {"workspace": 2, "machine": 1})
+        self.assertEqual(agg["route"]["resolver"], {"tev1": 2, "haiku": 1})
+
+    def test_the_other_sections_do_not_change(self):
+        with_route = self.summarize.aggregate(ROWS + self.ROWS)
+        without = self.summarize.aggregate(ROWS)
+        for key in ("agents", "models", "turns", "skills", "commands", "failures", "mcp", "guard", "compact"):
+            self.assertEqual(with_route[key], without[key])
+        self.assertEqual(without["route"]["decision"], {})
+
+    def test_command_line_prints_the_section_and_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "measurements.jsonl"), "w", encoding="utf-8") as f:
+                f.write("\n".join(json.dumps(r) for r in self.ROWS) + "\n")
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["summarize", "--dir", tmp]), contextlib.redirect_stdout(out):
+                self.assertEqual(self.summarize.main(), 0)
+            text = out.getvalue()
+            self.assertIn("Roteamento do orquestrador", text)
+            for expected in ("workspace", "machine", "tev1", "haiku", "held"):
+                self.assertIn(expected, text)
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["summarize", "--dir", tmp, "--json"]), contextlib.redirect_stdout(out):
+                self.summarize.main()
+            data = json.loads(out.getvalue())["route"]
+            self.assertEqual(data["held_by"], {"workspace": 2, "machine": 1})
+            self.assertEqual(data["resolver"], {"tev1": 2, "haiku": 1})
+
 def fact(day, agent, fact_id, kind, confidence, agent_id="a1", **extra):
     return {"event": "fact", "timestamp": f"{day}T10:00:00-03:00", "agent_id": agent_id, "agent_type": agent,
             "workstream": "studio", "fact_id": fact_id, "kind": kind, "confidence": confidence, "text": "t", **extra}

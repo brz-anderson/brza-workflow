@@ -133,6 +133,7 @@ def aggregate(measurements):
     mcp = collections.defaultdict(lambda: {"n": 0, "failed": 0, "duration_ms": 0})
     guard = collections.defaultdict(lambda: {"n": 0, "cost": 0.0, "no_cost": 0, "context": 0, "idle_min": 0})
     compact = collections.Counter()  # (workstream, decisão) da trava do /compact
+    route = {"decision": collections.Counter(), "held_by": collections.Counter(), "resolver": collections.Counter()}
     reasons = collections.Counter()
     denials = []
     hook_errors = 0
@@ -171,6 +172,12 @@ def aggregate(measurements):
             server["n"] += 1
             server["failed"] += 1 if row.get("failed") else 0
             server["duration_ms"] += int(row.get("duration_ms") or 0)
+        elif event == "route":  # o orquestrador MCP: uma linha por decisão de roteamento
+            route["decision"][label(row.get("decision"))] += 1
+            if row.get("held_by"):
+                route["held_by"][str(row["held_by"])] += 1
+            if isinstance(row.get("resolver"), dict) and row["resolver"].get("path"):
+                route["resolver"][str(row["resolver"]["path"])] += 1
         elif event == "guard" and row.get("kind") == "compact":
             compact[(label(row.get("workstream")), label(row.get("decision")))] += 1
         elif event == "guard":
@@ -188,7 +195,7 @@ def aggregate(measurements):
     return {
         "agents": agents, "models": models, "versions": versions, "turns": turns, "turns_by_skill": turns_by_skill,
         "skills": skills, "commands": commands, "failures": failures, "mcp": mcp, "guard": guard, "compact": compact,
-        "reasons": reasons,
+        "route": route, "reasons": reasons,
         "denials": denials, "hook_errors": hook_errors,
     }
 
@@ -265,6 +272,13 @@ def print_report(agg, show_denials):
                  for d, b in sorted(agg["guard"].items())])
     print_table("Trava do /compact, por workstream e decisão", ("workstream", "decisão", "n"), ("<", "<", ">"),
                 [(w, d, n) for (w, d), n in sorted(agg["compact"].items())])
+    if any(agg["route"].values()):
+        print_table("Roteamento do orquestrador (linha route), por decisão", ("decisão", "n"), ("<", ">"),
+                    agg["route"]["decision"].most_common())
+        print_table("Roteamento, pedidos segurados por teto (decisão held)", ("teto", "n"), ("<", ">"),
+                    agg["route"]["held_by"].most_common())
+        print_table("Roteamento, desempate do resolver por caminho", ("caminho", "n"), ("<", ">"),
+                    agg["route"]["resolver"].most_common())
     print_table("Negações de hook, por motivo", ("n", "motivo (sem o alvo)"), (">", "<"),
                 [(n, r) for r, n in agg["reasons"].most_common()])
     if show_denials and agg["denials"]:
@@ -293,6 +307,7 @@ def to_json(agg):
         "guard": bucket_rows(agg["guard"], ("decision",)),
         "compact_guard": [{"workstream": w, "decision": d, "n": n} for (w, d), n in agg["compact"].items()],
         "denial_reasons": dict(agg["reasons"]),
+        "route": {k: dict(v) for k, v in agg["route"].items()},
         "hook_errors": agg["hook_errors"],
     }
 

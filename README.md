@@ -14,8 +14,9 @@ a parte que é só do workspace.
 | `core/` | A norma: `AGENTS.md`, `CLAUDE.md`, `plans/README.md`, `work/README.md`, as skills e os papéis em `.claude/`, os hooks de medição e da trava do `/compact`, os scripts da medição | Sim, pelo `brza sync`, renderizado com o manifesto |
 | `templates/` | O que o `brza init` escreve uma vez: o manifesto, o `settings.json`, o `README.md`, a `.claude/rules/workspace.md`, as pastas de notas, o índice vazio | Sim, só no init; depois é local |
 | `packages/client/` | O pacote opcional do cliente — o `claude-brza` do chat, o `brza-sessions`, o `brza-run`, o `brza-doctor`, o `brza-print`, o `brza-devices` e o bloco do shell | Só com `packages = ["client"]` no manifesto |
+| `packages/mcp/` | O servidor MCP residente — o `brza-mcp` (`serve`, `start`, `stop`, `status`, `url`, `token`, `config`), em Python stdlib, sob o launchd, com a política no `<BRZA_WORKSPACE>/brza.toml` e as sobreposições do `brza mcp config`; `brza mcp <verbo>` chega a ele pelo despacho `brza-<sub>` | Não: roda deste checkout, ligado pelo `brza install --mcp` |
 | `bin/` | O CLI: `brza init`, `brza sync`, `brza note`, `brza register`, `brza where`, `brza install`, `brza agents` | Não: roda deste checkout |
-| `tests/` | Os testes do CLI, dos hooks e do checador de notas | Não |
+| `tests/` | Os testes do CLI, dos hooks, do MCP e do checador de notas | Não |
 
 A norma em `core/` é molde. Onde o texto depende do workspace, ele traz `{{tabela.chave}}`, como `{{workspace.name}}`
 ou `{{author.email}}`, e o valor vem do `.brza/workspace.toml` do workspace.
@@ -41,6 +42,9 @@ O `--all` liga os `brza-*` de `bin/` em `~/.local/bin`, inclusive o próprio `br
 install` basta:
 
 - `--client`: o pacote do cliente;
+- `--mcp`: o pacote do servidor MCP (`brza-mcp`). A porta, em ordem: `--port`, `BRZA_MCP_PORT`, o `[mcp] port` do
+  `brza.toml` do workspace e `4242`; `brza mcp url` imprime a URL do `/mcp`. O `claude-brza` e a função `claude` exportam
+  o `BRZA_MCP_TOKEN` quando o `~/.brza/runtime/mcp.token` existe;
 - `--local <workspace>`: os scripts próprios de um workspace, em `scripts/brza/`;
 - `--relink`: troca um link que aponta para outro lugar; sem ele, o install recusa tudo antes de mexer em qualquer
   link;
@@ -141,6 +145,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/cli
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/hooks
+```
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp
 ```
 
 ```bash

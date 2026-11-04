@@ -93,6 +93,18 @@ class WrapperTest(unittest.TestCase):
         self.assertEqual(out['BRZA_WORKSPACE'], str(self.workspace))
         self.assertNotIn('GH_CONFIG_DIR', out)
 
+    def test_the_mcp_token_is_exported_only_when_the_file_exists_and_is_not_empty(self):
+        home = self.base / 'brza-home'
+        env = {**self.env, 'BRZA_HOME': str(home)}
+        self.assertNotIn('BRZA_MCP_TOKEN', WRAPPER['command']('/x/claude', [], self.studio, env)[1])
+        (home / 'runtime').mkdir(parents=True)
+        (home / 'runtime' / 'mcp.token').write_text('\n')
+        self.assertNotIn('BRZA_MCP_TOKEN', WRAPPER['command']('/x/claude', [], self.studio, env)[1])
+        (home / 'runtime' / 'mcp.token').write_text('segredo-123\n')
+        self.assertEqual(WRAPPER['command']('/x/claude', [], self.studio, env)[1]['BRZA_MCP_TOKEN'], 'segredo-123')
+        # fora de workspace, nada muda
+        self.assertEqual(WRAPPER['command']('/x/claude', [], Path('/'), env)[1], env)
+
     def test_the_variable_overrides_the_root_and_the_role_still_comes_from_the_cwd(self):
         other = self.base / 'outro-ws'
         (other / '.brza').mkdir(parents=True)
