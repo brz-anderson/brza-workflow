@@ -20,6 +20,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 BIN = ROOT / 'bin'
 os.environ['BRZA_REGISTRY'] = '/nonexistent/brza/workspaces.toml'  # nada aqui lê o registro real da máquina
+os.environ['BRZA_FOREIGN'] = '/nonexistent/brza/foreign.txt'  # nem os nomes proibidos da máquina
 sys.path.insert(0, str(ROOT / 'core' / '.claude' / 'hooks'))
 import brza_root  # noqa: E402
 
@@ -27,8 +28,9 @@ INIT = runpy.run_path(str(BIN / 'brza-init'))
 init_workspace, InitError, main = INIT['init_workspace'], INIT['InitError'], INIT['main']
 
 IDENTITY = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
-# o que veio de outro workspace: nada disso pode sobrar no que o init escreve (R1.2, R8.2)
-FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'Fixfy', 'claude-501')
+# o que veio de outro workspace: nada disso pode sobrar no que o init escreve (R1.2, R8.2); o resto vem do arquivo da
+# máquina, fora do git (D11 do PLN-008), e tem os testes dele no ForeignFileTest
+FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'claude-501')
 APP_TERMS = ('orca', 'ORCA')  # o texto do app mora só no pacote do cliente (A8 do P9)
 CHECKER = ('.claude', 'skills', 'notes-checker', 'scripts', 'check_notes.py')
 
@@ -222,7 +224,8 @@ class AcceptanceTest(InitBase):
         self.assertIn('acme-app', readme)
         self.assertIn('packages/client/shell/brza.zsh', readme)
         self.assertNotIn('brza_claude()', readme)
-        self.assertNotIn('fixfy', readme.lower())
+        for term in FOREIGN:
+            self.assertNotIn(term.lower(), readme.lower())
 
     def test_it_registers_the_pair_and_prints_the_registry_path(self):
         self.assertEqual(brza_root.read_registry(), [{'root': str(self.root), 'code': str(self.code)}])
@@ -516,6 +519,65 @@ class CheckTest(InitBase):
             with self.assertRaises(InitError) as caught:
                 self.init()
         self.assertIn('check_notes', str(caught.exception))
+        self.assertEqual(self.registry_text(), '')
+
+
+class ForeignFileTest(InitBase):
+    """Os nomes proibidos que não ficam no código vêm de um arquivo da máquina, fora do git (D11 do PLN-008): um nome
+    por linha, com `#` de comentário. Sem o arquivo, a guarda segue só com os nomes do código."""
+
+    flow_with = CheckTest.flow_with
+
+    def machine_file(self, text):
+        path = self.base / 'config' / 'brza' / 'foreign.txt'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return patch.dict(os.environ, {'BRZA_FOREIGN': str(path)})
+
+    def test_a_name_from_the_machine_file_in_the_written_files_fails_the_check(self):
+        with self.machine_file('# os nomes desta máquina\n\nAcme Corp\n  Globex  \n'), \
+                self.flow_with('named-flow', 'core/AGENTS.md', '\nVeja a Globex.\n'):
+            with self.assertRaises(INIT['CheckError']) as caught:
+                self.init()
+        self.assertIn('AGENTS.md', str(caught.exception))
+        self.assertIn('Globex', str(caught.exception))
+        self.assertEqual(self.registry_text(), '')
+
+    def test_the_names_of_the_code_still_count_with_the_machine_file(self):
+        with self.machine_file('Acme Corp\n'), self.flow_with('dirty-flow', 'core/AGENTS.md', '\nVeja o brza-studio.\n'):
+            with self.assertRaises(INIT['CheckError']) as caught:
+                self.init()
+        self.assertIn('brza-studio', str(caught.exception))
+
+    def test_without_the_machine_file_nothing_breaks(self):
+        self.assertFalse(Path(os.environ['BRZA_FOREIGN']).exists())
+        with self.flow_with('named-flow', 'core/AGENTS.md', '\nVeja a Globex.\n'):
+            result, out = self.init()
+        self.assertTrue(result.committed)
+        self.assertIn('Veja a Globex.', (self.root / 'AGENTS.md').read_text())
+        self.assertEqual(INIT['foreign_names'](), list(INIT['FOREIGN']))
+
+    def test_comments_and_blank_lines_are_not_names(self):
+        with self.machine_file('# Globex\n\n   \nAcme Corp # o cliente\nInitech\n'):
+            names = INIT['foreign_names']()
+        self.assertEqual(names, list(INIT['FOREIGN']) + ['Acme Corp', 'Initech'])
+
+    def test_the_file_lives_beside_the_registry(self):
+        env = {k: v for k, v in os.environ.items() if k != 'BRZA_FOREIGN'}
+        with patch.dict(os.environ, env, clear=True):
+            with patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.base / 'xdg')}):
+                self.assertEqual(INIT['foreign_path'](), self.base / 'xdg' / 'brza' / 'foreign.txt')
+            os.environ.pop('XDG_CONFIG_HOME', None)
+            self.assertEqual(INIT['foreign_path'](), self.home / '.config' / 'brza' / 'foreign.txt')
+
+    def test_an_unreadable_machine_file_is_refused_before_anything_is_written(self):
+        folder = self.base / 'config' / 'brza' / 'foreign.txt'
+        folder.mkdir(parents=True)
+        with patch.dict(os.environ, {'BRZA_FOREIGN': str(folder)}):
+            with self.assertRaises(InitError) as caught:
+                self.init()
+        self.assertIn(str(folder), str(caught.exception))
+        self.assertFalse(self.root.exists())
         self.assertEqual(self.registry_text(), '')
 
 

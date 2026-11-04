@@ -30,8 +30,8 @@ def full():
         'session': {'usedPercent': 55, 'windowMinutes': 300, 'resetsAt': 1793701800586},
         'weekly': None}}
     return {'ok': True, 'result': {
-        'claude': {'accounts': [{'id': ADM, 'email': 'admin@fixfy.com.br', 'home': HOME}], 'activeAccountId': None,
-                   'systemDefaultHome': '/Users/x/.claude', 'systemDefaultEmail': 'anderson@fixfy.com.br'},
+        'claude': {'accounts': [{'id': ADM, 'email': 'admin@outro-workspace.example', 'home': HOME}], 'activeAccountId': None,
+                   'systemDefaultHome': '/Users/x/.claude', 'systemDefaultEmail': 'anderson@outro-workspace.example'},
         'rateLimits': {**copy.deepcopy(FIXTURE['result']['rateLimits']), 'inactiveClaudeAccounts': [inactive]}}}
 
 
@@ -58,7 +58,7 @@ class ParseTest(unittest.TestCase):
         default, managed = data['accounts']
         self.assertTrue(default['system_default'] and default['active'])
         self.assertEqual((managed['label'], managed['home'], managed['system_default']),
-                         ('admin@fixfy.com.br', HOME, False))
+                         ('admin@outro-workspace.example', HOME, False))
         self.assertEqual(data['usage'][ADM]['windows'], [{'name': 'session', 'usedPercent': 55,
                                                           'resetsAt': 1793701800586, 'windowMinutes': 300}])
 

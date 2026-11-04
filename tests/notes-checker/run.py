@@ -116,7 +116,7 @@ def check_rules(root):
     expect("tag que ecoa campo é aviso", ("tag-echoes-field", w) in warnings)
     expect("tag fora do vocabulário é aviso", ("tag-out-of-vocabulary", w) in warnings)
     tags = {t for r, w_, t in out["warnings"] if r == "tag-out-of-vocabulary" and w_ == w}
-    expect("as tags da Fixfy (payment, vault) estão fora do vocabulário", {"payment", "vault"} <= tags)
+    expect("as tags do workspace de origem (payment, vault) estão fora do vocabulário", {"payment", "vault"} <= tags)
     expect("as tags do vocabulário passam", not any(r == "tag-out-of-vocabulary" and w_ in (i + "ok-issue.md", "wiki/guides/guia.md")
                                                    for r, w_, _ in out["warnings"]))
     p = "work/reviews/pln-997-revisado.md"
@@ -125,7 +125,7 @@ def check_rules(root):
     expect("### A em código não conta", "A3" not in missing)
     expect("nota em ordem não aparece", not any(i + "ok-issue.md" in w_ for _, w_ in errors | warnings))
     expect("com erro, sai com 1", exit_code == 1)
-    expect("o vocabulário não tem o que é só da Fixfy",
+    expect("o vocabulário não tem o que é só do workspace de origem",
            "vault" not in cn.TAGS and "payment" not in cn.TAGS and not ({"sprint", "card"} & cn.ORIGINS))
 
     print(f"\n{total - fails} de {total} casos passaram." if fails else f"\n{total} casos, todos passaram.")

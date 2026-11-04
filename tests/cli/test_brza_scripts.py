@@ -1,4 +1,4 @@
-"""Testes do claude-brza e do brza-run. Os do brza-run vêm dos do orca-run da Fixfy. O brza-install tem o
+"""Testes do claude-brza e do brza-run. Os do brza-run vêm dos do orca-run do workspace de origem. O brza-install tem o
 test_brza_install.py.
 
     python3 -m unittest discover -s tests/cli
@@ -75,7 +75,7 @@ class WrapperTest(unittest.TestCase):
             self.assertEqual((found.role, found.root), (role, self.workspace), path)
 
     def test_other_repos_root_and_unregistered_code_are_not_found(self):
-        other = self.base / 'fixfy'
+        other = self.base / 'outro-workspace'
         other.mkdir()
         git('-C', str(other), 'init', '-q')
         for path in (other, Path('/'), Path(str(self.studio) + '-outro')):

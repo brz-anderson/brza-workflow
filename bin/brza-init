@@ -19,7 +19,8 @@ Os passos, na ordem do D8 do PLN-006:
   6. a camada 1 do `brza sync` (`sync_core`, sem git): a norma, os hooks, as skills, os agentes, a chave `hooks`, o
      `.gitattributes` e o lock;
   8. confere: o `check_notes.py` do próprio workspace verde, e nada de `brza-workspace`, `brza-studio`, `Anderson`,
-     `brz-anderson` ou `Fixfy` que não tenha vindo do manifesto;
+     `brz-anderson`, nem dos nomes do arquivo da máquina (`~/.config/brza/foreign.txt`), que não tenha vindo do
+     manifesto;
   9. commita `chore: brza init (brza-workflow@<sha7>)`, com o autor do manifesto, e **não dá o push**;
   7. por último, registra `{root, code}` no registro e imprime `registro: <caminho>`: é o único arquivo fora do
      diretório novo, e cada escrita dele vai ao worklog, em "## Fora do workspace".
@@ -56,8 +57,9 @@ sync_core, SyncError, flow_dir = SYNC['sync_core'], SYNC['SyncError'], SYNC['flo
 SETTINGS = '.claude/settings.json'
 # O molde do manifesto é só a amostra do `dump_manifest` (X19); o manifesto sai do dump, e o molde não é copiado
 MANIFEST_TEMPLATE = '.brza/workspace.toml'
-# O que veio de outro workspace: não pode sobrar no que o init escreve, a menos que o manifesto o traga (R1.2, R8.2)
-FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'Fixfy', 'claude-501')
+# O que veio de outro workspace: não pode sobrar no que o init escreve, a menos que o manifesto o traga (R1.2, R8.2).
+# Os nomes que não ficam no código vêm do arquivo da máquina, fora do git (`foreign_path`, D11 do PLN-008)
+FOREIGN = ('brza-workspace', 'brza-studio', 'Anderson', 'brz-anderson', 'claude-501')
 # O texto do app (o chat, o scratch dele) mora no pacote do cliente; no resto do que o init escreve não pode sobrar (A8)
 APP_TERMS = ('orca', 'ORCA')
 CHECKER = ('.claude', 'skills', 'notes-checker', 'scripts', 'check_notes.py')
@@ -215,11 +217,40 @@ def manifest_strings(node) -> List[str]:
     return []
 
 
-def foreign_terms(root: Path, manifest: dict, app_files: Sequence[str] = ()) -> Dict[str, List[str]]:
+def foreign_path() -> Path:
+    """O arquivo dos nomes proibidos desta máquina, ao lado do registro: BRZA_FOREIGN (os testes), ou
+    $XDG_CONFIG_HOME/brza/foreign.txt, ou ~/.config/brza/foreign.txt."""
+    explicit = os.environ.get('BRZA_FOREIGN')
+    if explicit:
+        return Path(explicit)
+    base = os.environ.get('XDG_CONFIG_HOME')
+    return (Path(base) if base else Path.home() / '.config') / 'brza' / 'foreign.txt'
+
+
+def foreign_names() -> List[str]:
+    """O `FOREIGN` e os nomes do arquivo da máquina: um por linha, e o que vem depois de `#` é comentário. Sem o
+    arquivo, só o `FOREIGN`; o arquivo que existe e não se lê é recusado, para a guarda não cair calada."""
+    path = foreign_path()
+    try:
+        text = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return list(FOREIGN)
+    except (OSError, UnicodeDecodeError) as e:
+        raise InitError('o arquivo dos nomes proibidos %s não se lê (%s); conserte à mão' % (path, e))
+    names = list(FOREIGN)
+    for line in text.splitlines():
+        name = line.split('#', 1)[0].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def foreign_terms(root: Path, manifest: dict, app_files: Sequence[str] = (),
+                  names: Optional[Sequence[str]] = None) -> Dict[str, List[str]]:
     """Os arquivos do workspace com um termo de outro workspace, fora do que o manifesto traz. Os `app_files` — o que
     veio dos pacotes — podem nomear o app (`APP_TERMS`); no resto, o nome do app também é termo de fora."""
     own = manifest_strings(manifest)
-    terms = [t for t in FOREIGN if not any(t in value for value in own)]
+    terms = [t for t in (foreign_names() if names is None else names) if not any(t in value for value in own)]
     app_terms = [t for t in APP_TERMS if not any(t in value for value in own)]
     packaged = set(app_files)
     found = {}  # type: Dict[str, List[str]]
@@ -249,9 +280,9 @@ def run_checker(root: Path):
                          % (root, done.returncode, (done.stdout + done.stderr).strip()))
 
 
-def check_workspace(root: Path, manifest: dict, app_files: Sequence[str] = ()):
+def check_workspace(root: Path, manifest: dict, app_files: Sequence[str] = (), names: Optional[Sequence[str]] = None):
     """O passo 8: o notes-checker verde, e nenhum termo de outro workspace."""
-    found = foreign_terms(root, manifest, app_files)
+    found = foreign_terms(root, manifest, app_files, names)
     if found:
         raise CheckError('sobrou nome de outro workspace no que foi escrito: %s' % '; '.join(
             '%s (%s)' % (path, ', '.join(terms)) for path, terms in sorted(found.items())))
@@ -326,6 +357,7 @@ def init_workspace(root, name: str, code, title: Optional[str] = None, owner: Op
     check_empty(root)
     main_code = code_checkout(Path(os.path.expanduser(str(code))))
     check_registry(Path(os.path.realpath(str(root))), main_code)
+    names = foreign_names()  # o arquivo da máquina ilegível recusa aqui, antes de escrever
     # 2. o autor
     author = resolve_author(author_name, author_email, author_login)
     github = code_github or github_of(main_code, 'origin', '%s/%s' % (author['login'], main_code.name))
@@ -343,7 +375,7 @@ def init_workspace(root, name: str, code, title: Optional[str] = None, owner: Op
         synced = build(target, flow, manifest, out)
         files = list_files(target)
         # 8. a conferência
-        check_workspace(target, manifest, package_files(flow, synced.commit, manifest['core']['packages']))
+        check_workspace(target, manifest, package_files(flow, synced.commit, manifest['core']['packages']), names)
     except CheckError:
         if scratch is not None:
             shutil.rmtree(str(scratch), ignore_errors=True)

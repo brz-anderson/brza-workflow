@@ -11,7 +11,7 @@ description: >-
 
 Conferência determinística da forma das notas — `work/`, `plans/` e `wiki/` na raiz do brza-workspace — contra a norma
 do [`work/README.md`](../../../work/README.md) e do [`plans/README.md`](../../../plans/README.md). O molde do plano, na
-`plan-runner`, entra só para resolver links que apontem para ele. Adaptada do `notes-checker` do workspace da Fixfy, sem
+`plan-runner`, entra só para resolver links que apontem para ele. Adaptada do `notes-checker` do workspace de origem, sem
 o que é só de lá. É um script, e não uma leitura do agente, de propósito: regra conferida por agente varia entre
 execuções. A skill só o roda e lê o resultado.
 

@@ -52,7 +52,7 @@ ROWS = [
      "estimated_cost_usd": 0.4},
     {"event": "subagent", "timestamp": "2026-10-28T11:30:00-03:00", "workstream": "studio", "agent_type": "collector",
      "estimated_cost_usd": 0.6},
-    {"event": "subagent", "timestamp": "2026-10-28T12:00:00-03:00", "workstream": "studio", "agent_type": "fixfy:reviewer",
+    {"event": "subagent", "timestamp": "2026-10-28T12:00:00-03:00", "workstream": "studio", "agent_type": "outro:reviewer",
      "estimated_cost_usd": 2.0},
     mem("2026-10-28", "09", "studio", "session", "created", "memory/a.md", "feedback"),
     mem("2026-10-28", "09", "studio", "session", "created", "memory/b.md", "user"),
@@ -293,7 +293,7 @@ class FactsTest(unittest.TestCase):
         rows = [fact("2026-10-28", "designer", "C1", "doc", 85), fact("2026-10-28", "collector", "F2", "inferido", 60),
                 fact("2026-10-28", "designer", "F1", "inferido", 95), fact("2026-10-28", "designer", "F3", "rodado", 95),
                 fact("2026-10-28", "designer", "F4", "lido", 70), fact("2026-10-28", "designer", "F5", "lido", 85),
-                fact("2026-10-28", "fixfy:collector", "F1", "lido", 99, agent_id="a9")]
+                fact("2026-10-28", "outro:collector", "F1", "lido", 99, agent_id="a9")]
         self.assertEqual(list(self.agg(rows)["rows"]), [
             ("collector", "fato", "90+", "lido"), ("collector", "fato", "<80", "inferido"),
             ("designer", "fato", "90+", "rodado"), ("designer", "fato", "90+", "inferido"),
@@ -333,7 +333,7 @@ class FactsTest(unittest.TestCase):
 
     def test_captures_per_role_with_unmarked_and_malformed(self):
         rows = [capture("designer", 2, 1), capture("designer", 0, 0, unmarked=True),
-                capture("fixfy:designer", 1, 2), capture("collector", 3)]
+                capture("outro:designer", 1, 2), capture("collector", 3)]
         agg = self.agg(rows)
         self.assertEqual(agg["captures"]["designer"], {"read": 3, "unmarked": 1, "malformed": 3})
         self.assertEqual(agg["captures"]["collector"], {"read": 1, "unmarked": 0, "malformed": 0})

@@ -6,6 +6,7 @@ Fora de workspace, a função cai na `brza_claude_fallback` do usuário, se exis
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -133,8 +134,11 @@ class ShellBlockTest(unittest.TestCase):
         for fixed in ('brza-workspace', 'brza-studio', 'BRZA_STUDIO', 'Projects/', 'brza_where'):
             self.assertNotIn(fixed, text)
 
-    def test_the_block_calls_nothing_of_fixfy(self):
-        self.assertNotIn('fixfy', BLOCK.read_text().lower())
+    def test_the_block_calls_nothing_of_another_workspace(self):
+        # o fallback é o gancho `brza_claude_fallback`, e não a função `<outro>-claude` de outro workspace
+        text = BLOCK.read_text()
+        self.assertIn('brza_claude_fallback "$@"', text)
+        self.assertEqual(re.findall(r'[\w-]+-claude\b', text), [])
 
 
 if __name__ == '__main__':

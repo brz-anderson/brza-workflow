@@ -279,7 +279,7 @@ class FindTest(RootCase):
         self.assertIsNone(self.root.find(str(self.far)))
 
     def test_a_repo_that_is_not_in_the_registry_nor_a_workspace_has_none(self):
-        other = make_repo(self.base / "fixfy", "master")
+        other = make_repo(self.base / "outro-workspace", "master")
         plain = self.base / "plain"
         plain.mkdir()
         for cwd in (other, plain, self.base / "missing", "", None):
@@ -290,7 +290,7 @@ class FindTest(RootCase):
         environ = {"BRZA_WORKSPACE": str(self.notes)}
         found = self.root.find(str(self.far), environ=environ)
         self.assertEqual((found.root, found.role), (self.notes, "code"))
-        unrelated = make_repo(self.base / "fixfy", "master")
+        unrelated = make_repo(self.base / "outro-workspace", "master")
         found = self.root.find(str(unrelated), environ=environ)
         self.assertEqual((found.root, found.role), (self.notes, None))
         found = self.root.find(str(self.base), environ=environ)
@@ -303,7 +303,7 @@ class FindTest(RootCase):
         self.assertIn(str(other), message)
         self.assertIn(str(self.notes), message)
         self.assertIn("BRZA_WORKSPACE", message)
-        unrelated = make_repo(self.base / "fixfy", "master")
+        unrelated = make_repo(self.base / "outro-workspace", "master")
         self.assertIn(str(unrelated), self.root.foreign_cwd(self.root.find(str(unrelated), environ=environ)))
 
     def test_foreign_cwd_lets_the_workspace_its_worktrees_the_code_and_the_outside_through(self):  # A1

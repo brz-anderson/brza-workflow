@@ -1,5 +1,6 @@
 """A lista fechada de diferenças do teste de ouro (D4/D12 do PLN-006): tudo o que `render(core, manifesto do
-brza-workspace)` muda no texto da `master` do `brza-workspace@d85c783`, além de trocar os placeholders pelos valores.
+brza-workspace)` muda no texto da `master` do `brza-workspace@d85c783` — na cópia, o workspace de origem está em termo
+neutro (D11 do PLN-008) —, além de trocar os placeholders pelos valores.
 
 Cada diferença é uma troca de texto sobre a `master` — `old` aparece uma vez no arquivo, e vira `new` —, aplicada na
 ordem. O teste (`test_golden_render.py`) a aplica à cópia da `master` em `fixtures/golden/master/` e exige que o
@@ -16,7 +17,7 @@ Difference = namedtuple("Difference", "path why old new")
 WHY = {
     "p4-contador": "o `brza note plan-open` no lugar da linha \"Último PLN usado\" (P4, R5.3)",
     "p4-indice": "o índice `.brza/index.jsonl` na master, o campo `description` e a exceção da norma (P4, R5, R7.3)",
-    "fixfy": "as menções à Fixfy saem do núcleo (R8.2)",
+    "origem": "as menções ao workspace de origem saem do núcleo (R8.2)",
     "agents-md": "o `@AGENTS.md` na primeira linha do `CLAUDE.md` e o adaptador ajustado (R4.4, D5)",
     "rules-client": "a seção vai a `packages/client/core/.claude/rules/brza-client.md` (D3)",
     "rules-workspace": "a lista de plugins e de servidores MCP vai a `.claude/rules/workspace.md` (D3)",
@@ -60,8 +61,8 @@ DIFFERENCES = [
    pode ter arquivo de outra sessão — e `git pull --rebase` antes do push.
 2. Leve aos workstreams com `brza note sync`, que o `brza sync` já roda ao fim.
 """),
-    Difference(".claude/skills/notes-checker/SKILL.md", "fixfy",
-               """ Adaptada do `notes-checker` do workspace da Fixfy, sem
+    Difference(".claude/skills/notes-checker/SKILL.md", "origem",
+               """ Adaptada do `notes-checker` do workspace de origem, sem
 o que é só de lá.""", ""),
     Difference(".claude/skills/plan-runner/SKILL.md", "p4-contador",
                """**A norma é a do [`plans/README.md`](../../../plans/README.md)** — a linha "Último PLN usado", o mapa de `phase` e
@@ -199,7 +200,7 @@ workspace está em `.claude/rules/`, que o Claude Code também carrega no arranq
 O `.claude/settings.json` daqui **não é herdado** pelo `brza-studio`, que fica ao lado e não dentro deste repositório. Por
 isso a função `claude` do `~/.zshrc` passa `--settings ~/Projects/brza-workspace/.claude/settings.json` e
 `BRZA_WORKSPACE` sempre que o cwd está no `brza-workspace` ou no `brza-studio`, inclusive nos worktrees. Fora deles, ela
-segue para a função da Fixfy. O bloco está no `README.md`, em "Funções do shell".
+segue para a função do outro workspace. O bloco está no `README.md`, em "Funções do shell".
 
 O chat do BrzA Studio não passa pelo zsh de login: o app roda no lugar do `claude` o `agentCmdOverrides.claude`, que é
 o `~/.local/bin/claude-brza` (`scripts/brza/claude-brza`, instalado pelo `brza install --chat-command`). Ele faz o mesmo
@@ -215,8 +216,8 @@ os hooks e sem a identidade abaixo.
                """O `env` do `.claude/settings.json` define `GIT_AUTHOR_*` e `GIT_COMMITTER_*`:
 `Anderson Pereira Brzezinski <240569289+brz-anderson@users.noreply.github.com>`. A chave de acesso e o perfil do `gh`
 estão no `README.md`."""),
-    Difference("CLAUDE.md", "fixfy",
-               """e vence o ambiente da `fixfy-claude` que uma sessão
+    Difference("CLAUDE.md", "origem",
+               """e vence o ambiente da `outro-claude` que uma sessão
 herde. O `git var GIT_AUTHOR_IDENT` confere""",
                """e vence o ambiente que uma sessão herde. O `git var
 GIT_AUTHOR_IDENT` confere"""),
@@ -239,9 +240,9 @@ para a configuração de usuário.""",
                """- **Testes:** `tests/hooks/test_compact_guard.py`, no `brza-workflow`."""),
 
     # --- plans/README.md
-    Difference("plans/README.md", "fixfy",
-               """ Adaptada da norma de planos do workspace da
-Fixfy, sem o que é só de lá.""", ""),
+    Difference("plans/README.md", "origem",
+               """ Adaptada da norma de planos do workspace de
+origem, sem o que é só de lá.""", ""),
     Difference("plans/README.md", "p4-contador",
                """**Último PLN usado:** 007
 
@@ -251,11 +252,11 @@ Fixfy, sem o que é só de lá.""", ""),
                """O número é sequencial e não se reusa: sai do `brza note plan-open <slug> --title … --description …`, que o reserva no índice da `master` antes de o plano ser gravado |"""),
 
     # --- work/README.md
-    Difference("work/README.md", "fixfy",
+    Difference("work/README.md", "origem",
                """ Adaptada da norma do
-workspace da Fixfy, sem o que é só de lá.""", ""),
-    Difference("work/README.md", "fixfy",
-               """, ou uma nota do workspace da Fixfy""", ""),
+workspace de origem, sem o que é só de lá.""", ""),
+    Difference("work/README.md", "origem",
+               """, ou uma nota do workspace de origem""", ""),
     Difference("work/README.md", "p4-indice",
                """e recusa a `master`. O commit é com a identidade do""",
                """e recusa a `master`; quando o frontmatter, o H1 ou o
@@ -275,7 +276,7 @@ checkout. O commit é com a identidade do"""),
     Difference("work/README.md", "local",
                """ou alterado fora de `~/Projects/brza-workspace` e do `brza-studio`,""",
                """ou alterado fora deste repositório e do `brza-studio`,"""),
-    Difference("work/README.md", "fixfy",
-               """| Nota, plano ou decisão do workspace da Fixfy | No workspace da Fixfy; daqui se cita em crase, com o caminho, e não se linka |
+    Difference("work/README.md", "origem",
+               """| Nota, plano ou decisão do workspace de origem | No workspace de origem; daqui se cita em crase, com o caminho, e não se linka |
 """, ""),
 ]

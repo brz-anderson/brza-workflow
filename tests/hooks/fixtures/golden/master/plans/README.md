@@ -3,8 +3,8 @@
 Um plano responde a uma pergunta só: **como estou fazendo este trabalho**. Quem abre, conduz e fecha é a skill
 `plan-runner`, e o molde mora nela, em `references/plan-template.md`. As propriedades comuns a toda nota —
 `status`, `scope`, `opened`, `owner`, `blocks`, `tags` —, os links e o commit seguem o
-[`work/README.md`](../work/README.md); aqui fica só o que é de plano. Adaptada da norma de planos do workspace da
-Fixfy, sem o que é só de lá.
+[`work/README.md`](../work/README.md); aqui fica só o que é de plano. Adaptada da norma de planos do workspace de
+origem, sem o que é só de lá.
 
 **Último PLN usado:** 007
 

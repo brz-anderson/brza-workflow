@@ -78,12 +78,12 @@ class WhereTest(CliCase):
         self.assertFalse(self.registry.exists())
 
     def test_the_other_places_print_nothing(self):
-        other = make_repo(self.base / 'fixfy', 'master')
+        other = make_repo(self.base / 'outro-workspace', 'master')
         for cwd in (other, self.base):
             self.assertEqual(self.run_cli('brza-where', cwd=cwd)[:2], (0, ''), cwd)
 
     def test_the_override_is_honored_and_the_unrelated_cwd_still_prints_nothing(self):
-        other = make_repo(self.base / 'fixfy', 'master')
+        other = make_repo(self.base / 'outro-workspace', 'master')
         env = {'BRZA_WORKSPACE': str(self.notes)}
         self.assertEqual(self.run_cli('brza-where', cwd=other, env=env)[:2], (0, ''))
         self.assertEqual(self.run_cli('brza-where', cwd=self.notes, env=env)[1], f'{self.notes} notes\n')

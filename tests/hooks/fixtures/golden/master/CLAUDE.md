@@ -36,7 +36,7 @@ arquivo não existe. Antes de delegar, `ln -sfn "<scratch>/<pasta>" /private/tmp
 O `.claude/settings.json` daqui **não é herdado** pelo `brza-studio`, que fica ao lado e não dentro deste repositório. Por
 isso a função `claude` do `~/.zshrc` passa `--settings ~/Projects/brza-workspace/.claude/settings.json` e
 `BRZA_WORKSPACE` sempre que o cwd está no `brza-workspace` ou no `brza-studio`, inclusive nos worktrees. Fora deles, ela
-segue para a função da Fixfy. O bloco está no `README.md`, em "Funções do shell".
+segue para a função do outro workspace. O bloco está no `README.md`, em "Funções do shell".
 
 O chat do BrzA Studio não passa pelo zsh de login: o app roda no lugar do `claude` o `agentCmdOverrides.claude`, que é
 o `~/.local/bin/claude-brza` (`scripts/brza/claude-brza`, instalado pelo `brza install --chat-command`). Ele faz o mesmo
@@ -61,7 +61,7 @@ O `env` do `.claude/settings.json` define:
 - `GIT_AUTHOR_*` e `GIT_COMMITTER_*`: `Anderson Pereira Brzezinski <240569289+brz-anderson@users.noreply.github.com>`;
 - `GIT_SSH_COMMAND`: o `~/.ssh/config` padrão, onde mora o alias `personal`.
 
-Isso vale para os commits deste repositório e do `brza-studio`, e vence o ambiente da `fixfy-claude` que uma sessão
+Isso vale para os commits deste repositório e do `brza-studio`, e vence o ambiente da `outro-claude` que uma sessão
 herde. O `git var GIT_AUTHOR_IDENT` confere: deve sair o e-mail do `brz-anderson`.
 
 O `gh` usa o perfil padrão, com a conta `brz-anderson` ativa (`gh auth switch`).

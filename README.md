@@ -59,6 +59,10 @@ brza init ~/Projects/meu-workspace --name meu-workspace --code ~/Projects/meu-ap
 - **O que escreve:** o manifesto, a norma renderizada, o `settings.json` com os hooks e a identidade git, as pastas de
   notas e o índice vazio.
 - **A conferência:** o checador de notas tem de passar, e nada do que foi escrito pode citar outro workspace.
+- **Os nomes proibidos da máquina:** os nomes de outro workspace que não ficam no código vão a
+  `~/.config/brza/foreign.txt` (ou `$XDG_CONFIG_HOME/brza/foreign.txt`), ao lado do registro e fora do git: um nome
+  por linha, e o que vem depois de `#` é comentário. A conferência recusa esses nomes junto com os do código. Sem o
+  arquivo, ela segue só com os do código; o arquivo que existe e não se lê é recusado antes de escrever.
 - **O fim:** um commit local, sem push, e o registro do par workspace → código em `~/.config/brza/workspaces.toml`.
 - **O que recusa:** diretório que não esteja vazio, e código já ligado a outro workspace.
 - **A identidade:** vem do `git config --global user.*`, ou de `--author-name`, `--author-email` e `--author-login`.

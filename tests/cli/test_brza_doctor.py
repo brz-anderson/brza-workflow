@@ -168,12 +168,12 @@ class DoctorTest(unittest.TestCase):
         self.assertIn('[author].email', line)
 
     def test_identidade_errada_e_erro_com_o_conserto(self):
-        self.ident = 'Anderson Pereira Brzezinski <anderson@fixfy.com.br> 1793166405 -0300'
+        self.ident = 'Anderson Pereira Brzezinski <anderson@outro-workspace.example> 1793166405 -0300'
         code, out = self.run_doctor()
         self.assertEqual(code, 1)
         line = self.line(out, 'identidade')
         self.assertTrue(line.startswith('ERRO'), out)
-        self.assertIn('anderson@fixfy.com.br', line)
+        self.assertIn('anderson@outro-workspace.example', line)
         self.assertIn(EMAIL, line)
         self.assertIn('conserta:', out)
         self.assertIn('claude-brza', out.split(line, 1)[1].splitlines()[1])

@@ -1,5 +1,6 @@
 """O teste de ouro do PLN-006/P3: o render do núcleo, com o manifesto do brza-workspace, reproduz a `master` do
-brza-workspace@d85c783 — a cópia está em `fixtures/golden/master/` —, salvo a lista fechada de `golden_differences.py`.
+brza-workspace@d85c783 — a cópia está em `fixtures/golden/master/`, com o workspace de origem em termo neutro
+(D11 do PLN-008) —, salvo a lista fechada de `golden_differences.py`.
 
 Não depende do brza-workspace real: tudo o que o teste lê está no repositório.
 """
@@ -42,7 +43,7 @@ OTHER = {
     "core": {"ref": "master"},
 }
 # O que é do brza-workspace e não pode sobrar no que o render faz com outro manifesto (R1.2, R8.2)
-FORBIDDEN = ("brza-workspace", "brza-studio", "BrzA Studio", "Anderson", "brz-anderson", "Fixfy", "fixfy", "users.noreply.github.com",
+FORBIDDEN = ("brza-workspace", "brza-studio", "BrzA Studio", "Anderson", "brz-anderson", "users.noreply.github.com",
              "`personal`", "Último PLN usado", "tools-kit", "claude-501")
 # O texto do app (o chat, o scratch dele) mora no pacote do cliente; no núcleo e nos moldes não sobra (A8 do P9)
 APP_TERMS = ("orca", "ORCA", "orca-visual")
@@ -145,7 +146,8 @@ class GoldenRenderTest(unittest.TestCase):
         self.assertIn("## A configuração chega pela função do shell", out)
         self.assertIn("`~/.local/bin/claude-brza`", out)
         self.assertIn("não é herdado** pelo `brza-studio`", out)
-        self.assertNotIn("Fixfy", out)
+        self.assertIn("segue para a função que o `~/.zshrc` já tinha", out)
+        self.assertNotIn("segue para a função do outro workspace", out)
         left = [d for d in DIFFERENCES if d.why == "rules-client"]
         self.assertEqual(len(left), 1)
         self.assertNotIn("## A configuração chega pela função do shell", read(CORE, "CLAUDE.md"))

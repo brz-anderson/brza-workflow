@@ -2,7 +2,7 @@
 
 **A norma de escrita das notas do brza-workspace** — o que está em andamento, o que trava, o que foi decidido e como
 Anderson usa as ferramentas —, para quem escreve em `work/` ou em `wiki/`, pessoa ou agente. Adaptada da norma do
-workspace da Fixfy, sem o que é só de lá.
+workspace de origem, sem o que é só de lá.
 
 > [!IMPORTANT]
 >
@@ -180,7 +180,7 @@ que apontam para ela —, pelo `move_note.py`.
 **Link entre notas é Markdown relativo, com o H1 da nota de destino como rótulo:**
 `[Título da nota](../issues/assunto.md)`. `[[wikilink]]` não existe. Todo caminho é relativo **ao arquivo que contém o
 link**, e só quando o arquivo existe em disco; nome de arquivo solto em prosa fica em crase — é citação, não link. O
-que mora em outro repositório — o código do `brza-studio`, ou uma nota do workspace da Fixfy — se cita em crase, com o
+que mora em outro repositório — o código do `brza-studio`, ou uma nota do workspace de origem — se cita em crase, com o
 caminho, e não vira link. `README.md` de repositório nunca vira link de rótulo genérico: diga de qual repositório.
 
 **Callout** — os cinco tipos do GitHub (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), com a marca sozinha
@@ -399,4 +399,4 @@ carrega a ferramenta.
 | O código, o build e os testes | No `brza-studio` |
 | Procedimento que se repete | Skill |
 | Material de terceiros copiado | Em lugar nenhum daqui: a nota cita a fonte e guarda só o achado |
-| Nota, plano ou decisão do workspace da Fixfy | No workspace da Fixfy; daqui se cita em crase, com o caminho, e não se linka |
+| Nota, plano ou decisão do workspace de origem | No workspace de origem; daqui se cita em crase, com o caminho, e não se linka |
