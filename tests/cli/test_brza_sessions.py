@@ -192,7 +192,8 @@ class CommandTest(unittest.TestCase):
         sessions = json.loads(out)['sessions']
         self.assertEqual([s['name'] for s in sessions], ['pln-002-p7', 'pln-003', None])
         self.assertEqual(sessions[0], {'name': 'pln-002-p7', 'title': 'PLN-002 P7: renomear chat', 'chat': 'claude_a',
-                                       'claude_session': 'uuid-a', 'worktree': '/Users/x/brza-workspace',
+                                       'claude_session': 'uuid-a', 'provider_session': 'uuid-a',
+                                       'worktree': '/Users/x/brza-workspace',
                                        'state': 'working', 'source': 'transcript', 'opened': None})
         self.assertIsNone(sessions[2]['state'])
 
@@ -381,26 +382,70 @@ class CommandTest(unittest.TestCase):
                 self.assertFalse(self.read_map()[-1]['renamed'])
                 self.assertEqual(self.calls('agentSession.send'), [])
 
-    def test_non_claude_rejects_rename_and_wait_before_any_side_effect_even_in_dry_run(self):
+    def test_non_claude_wait_records_the_provider_session(self):
+        for requested, canonical in (('codex', 'codex'), ('grok', 'grok'), ('agy', 'antigravity')):
+            with self.subTest(agent=requested):
+                self.app.providers.clear()
+                self.app.calls.clear()
+                self.launches.clear()
+                if self.map.exists():
+                    self.map.unlink()
+                chat = f'{canonical}_n'
+                self.app.providers[chat] = f'provider-{canonical}'
+                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                    code, out = self.run_main('correcao', '--agent', requested, '--wait')
+                    self.assertEqual(code, 0, out)
+                    self.assertIn(f'open:     correcao  (chat, {self.workspace}, {chat})', out)
+                    events = self.read_map()
+                    self.assertEqual(len(events), 2)
+                    self.assertEqual(events[0]['event'], 'open')
+                    self.assertEqual(events[0].get('agent'), canonical)
+                    self.assertEqual(events[1]['event'], 'session')
+                    self.assertEqual(events[1].get('provider_session'), f'provider-{canonical}')
+                    self.assertNotIn('claude_session', events[1])
+
+    def test_non_claude_rejects_rename_before_any_side_effect_even_in_dry_run(self):
         def forbidden(*args):
             self.fail('a recusa deve ocorrer antes de acessar o app ou os arquivos Claude')
 
-        for agent in ('codex', 'agy', 'antigravity'):
-            for flags in (('--rename',), ('--wait',), ('--rename', '--wait'), ('--wait', '--dry-run')):
+        for agent in ('codex', 'grok', 'agy', 'antigravity'):
+            for flags in (('--rename',), ('--rename', '--dry-run')):
                 with self.subTest(agent=agent, flags=flags), patch.dict(GLOBALS, {
                     'running': forbidden, 'mapped_and_open': forbidden, 'chat_blocker': forbidden,
                     'resolve_checkout': forbidden,
                 }):
                     code, out = self.run_main('correcao', '--agent', agent, *flags)
                     self.assertEqual(code, 1)
-                    self.assertIn('só tem suporte com --agent claude', out)
+                    self.assertIn('--rename só tem suporte com --agent claude', out)
                     self.assertIn('nada foi aberto', out)
-                    for flag in flags:
-                        if flag != '--dry-run':
-                            self.assertIn(flag, out)
         self.assertEqual(self.launches, [])
         self.assertEqual(self.app.calls, [])
         self.assertEqual(self.read_map(), [])
+
+    def test_the_session_map_reads_the_provider_session(self):
+        chat = 'codex_1'
+        self.app.tabs = [tab(chat, 'Codex')]
+        self.write_map({'event': 'open', 'name': 'correcao', 'chat': chat, 'agent': 'codex'},
+                       {'event': 'session', 'name': 'correcao', 'chat': chat, 'provider_session': 'uuid-provider-1'})
+        code, out = self.run_main('list', '--json')
+        self.assertEqual(code, 0)
+        sessions = json.loads(out)['sessions']
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['provider_session'], 'uuid-provider-1')
+        self.assertIsNone(sessions[0]['claude_session'])
+
+    def test_list_reads_the_agent_key_of_real_tabs(self):
+        chat = 'session_sem_prefixo'
+        self.app.tabs = [{**tab(chat, 'Chat Claude'), 'agent': 'claude'}]
+        self.app.providers[chat] = 'uuid-b'
+        code, out = self.run_main('list', '--json')
+        self.assertEqual(code, 0)
+        sessions = json.loads(out)['sessions']
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['name'], 'pln-003')
+        self.assertEqual(sessions[0]['claude_session'], 'uuid-b')
+        self.assertEqual(sessions[0]['provider_session'], 'uuid-b')
+        self.assertEqual(sessions[0]['source'], 'transcript')
 
     def test_non_claude_dry_run_shows_canonical_agent_and_does_not_launch(self):
         for agent, canonical in (('codex', 'codex'), ('grok', 'grok'), ('agy', 'antigravity')):
@@ -438,11 +483,13 @@ class CommandTest(unittest.TestCase):
                 self.app.tabs = [tab(chat, 'Correção')]
                 # Mesmo id no provider e num transcript Claude: jamais deve ser usado como nome ou claude_session.
                 self.app.providers[chat] = 'uuid-b'
-                self.write_map({'event': 'open', 'name': 'correcao', 'chat': chat, 'agent': agent})
+                self.write_map({'event': 'open', 'name': 'correcao', 'chat': chat, 'agent': agent},
+                               {'event': 'session', 'name': 'correcao', 'chat': chat, 'provider_session': f'provider-{agent}'})
                 code, out = self.run_main('list', '--json')
                 self.assertEqual(code, 0)
                 self.assertEqual(json.loads(out), {'sessions': [{
                     'name': 'correcao', 'title': 'Correção', 'chat': chat, 'claude_session': None,
+                    'provider_session': f'provider-{agent}',
                     'worktree': '/Users/x/brza-workspace', 'state': 'done', 'source': 'map',
                     'opened': '2026-10-29T12:00:00-03:00',
                 }]})
@@ -465,12 +512,21 @@ class CommandTest(unittest.TestCase):
         for session in json.loads(out)['sessions']:
             self.assertIsNone(session['name'])
             self.assertIsNone(session['claude_session'])
+            self.assertIsNone(session['provider_session'])
             self.assertIsNone(session['source'])
         self.assertEqual(self.calls('agentSession.history'), [])
 
-    def test_provider_metadata_does_not_return_non_claude_id_as_claude_session(self):
+    def test_provider_session_returns_id_for_non_claude_and_list_does_not_put_it_in_claude_session(self):
         with patch.dict(GLOBALS, {'rpc': lambda *args: {'agent': 'codex', 'providerSession': {'id': 'uuid-b'}}}):
-            self.assertIsNone(SESSIONS['provider_session']('codex_1'))
+            self.assertEqual(SESSIONS['provider_session']('codex_1'), 'uuid-b')
+        self.app.tabs = [tab('codex_1', 'Codex')]
+        self.app.providers = {'codex_1': 'uuid-b'}
+        code, out = self.run_main('list', '--json')
+        self.assertEqual(code, 0)
+        session = json.loads(out)['sessions'][0]
+        self.assertIsNone(session['claude_session'])
+        self.assertIsNone(session['provider_session'])
+        self.assertEqual(self.calls('agentSession.history'), [])
 
     def test_open_without_title_titles_the_tab_with_the_name(self):
         self.run_main('pln-009')
@@ -496,8 +552,8 @@ class CommandTest(unittest.TestCase):
         self.app.providers['claude_n'] = 'uuid-n'
         code, _ = self.run_main('pln-009', '--wait')
         self.assertEqual(code, 0)
-        self.assertEqual([(e['event'], e.get('claude_session')) for e in self.read_map()],
-                         [('open', None), ('session', 'uuid-n')])
+        self.assertEqual([(e['event'], e.get('claude_session'), e.get('provider_session')) for e in self.read_map()],
+                         [('open', None, None), ('session', 'uuid-n', 'uuid-n')])
 
     def test_wait_with_rename_also_waits_for_the_name(self):
         self.app.providers['claude_n'] = 'uuid-n'

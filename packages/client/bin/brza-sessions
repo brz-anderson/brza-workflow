@@ -97,13 +97,14 @@ def session_map() -> dict[str, dict]:
             continue
         if event == 'open':
             entries[chat] = {'name': row.get('name'), 'title': row.get('title'), 'opened': row.get('at'),
-                             'claude_session': None, 'agent': row.get('agent')}
+                             'claude_session': None, 'provider_session': None, 'agent': row.get('agent')}
         elif event == 'close':
             entries.pop(chat, None)
         elif chat in entries and event == 'title':
             entries[chat]['title'] = row.get('title')
         elif chat in entries and event == 'session':
             entries[chat]['claude_session'] = row.get('claude_session')
+            entries[chat]['provider_session'] = row.get('provider_session') or row.get('claude_session')
     return entries
 
 
@@ -191,23 +192,21 @@ def wait_for_name(name: str) -> bool:
 
 
 def wait_for_session(chat: str) -> str | None:
-    """Espera o app dar o id da sessão do Claude por trás do chat."""
+    """Espera o app dar o id da sessão por trás do chat."""
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
-        if claude_session := provider_session(chat):
-            return claude_session
+        if sid := provider_session(chat):
+            return sid
         if time.monotonic() >= deadline:
             return None
         time.sleep(1)
 
 
 def provider_session(chat: str) -> str | None:
-    """O id da sessão do Claude por trás do chat, ou None quando o app não o dá."""
+    """O id da sessão do runtime por trás do chat, ou None quando o app não o dá."""
     try:
         found = rpc('agentSession.history', {'sessionId': chat, 'direction': 'tail', 'limit': 1})
     except BrzaError:
-        return None
-    if found.get('agent') not in (None, 'claude'):
         return None
     return (found.get('providerSession') or {}).get('id')
 
@@ -240,12 +239,14 @@ def chats() -> list[dict]:
     for worktree, tab in open_tabs():
         chat = tab['sessionId']
         entry = mapped.get(chat)
-        # Abas antigas podem não trazer o agente; o prefixo do id identifica Claude nesse contrato legado.
-        agent = (tab.get('agentSessionAgent') or (entry or {}).get('agent')
-                 or ('claude' if chat.startswith('claude_') else None))
+        # O agente pela chave real, a legada do app, o mapa e o prefixo do id do chat do app.
+        agent = (tab.get('agent') or tab.get('agentSessionAgent') or (entry or {}).get('agent')
+                 or next((a for a in ('claude', 'codex', 'grok', 'antigravity') if chat.startswith(f'{a}_')), None))
         claude_session = provider_session(chat) if agent == 'claude' else None
+        prov_session = claude_session if agent == 'claude' else ((entry or {}).get('provider_session'))
         name = entry['name'] if entry else (chat_name(claude_session) if claude_session else None)
         found.append({'name': name, 'title': tab.get('title'), 'chat': chat, 'claude_session': claude_session,
+                      'provider_session': prov_session,
                       'worktree': worktree, 'state': (tab.get('chatStatus') or {}).get('state'),
                       'source': 'map' if entry else ('transcript' if name else None),
                       'opened': entry['opened'] if entry else None, 'tab': tab['id']})
@@ -358,7 +359,7 @@ def main():
     group.add_argument('--prompt')
     group.add_argument('--prompt-file', type=Path)
     ap.add_argument('--wait', action='store_true',
-                    help='só Claude: espera a sessão no ar, e com --rename o nome, antes de anunciar')
+                    help='espera a sessão no ar, e com --rename o nome, antes de anunciar')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
     AGENTS = {'claude': 'claude', 'codex': 'codex', 'grok': 'grok', 'antigravity': 'antigravity', 'agy': 'antigravity'}
@@ -367,9 +368,8 @@ def main():
         print(f'CHECK:    {args.name}: --agent {args.agent} não é claude, codex, grok nem antigravity (agy); '
               'nada foi aberto')
         return 1
-    if agent != 'claude' and (args.rename or args.wait):
-        flags = ' e '.join(flag for flag, enabled in (('--rename', args.rename), ('--wait', args.wait)) if enabled)
-        print(f'CHECK:    {args.name}: {flags} só tem suporte com --agent claude; agente escolhido: {agent}; nada foi aberto')
+    if agent != 'claude' and args.rename:
+        print(f'CHECK:    {args.name}: --rename só tem suporte com --agent claude; agente escolhido: {agent}; nada foi aberto')
         return 1
 
     try:
@@ -416,11 +416,12 @@ def main():
             print(f'CHECK:    {args.name} abriu, mas o prompt não entrou: {e}')
             return 1
     if args.wait:
-        claude_session = wait_for_session(session_id)
-        if not claude_session:
-            print(f'CHECK:    {args.name} não deu a sessão do Claude em {WAIT_SECONDS:g} s; confira a aba')
+        sid = wait_for_session(session_id)
+        if not sid:
+            print(f'CHECK:    {args.name} não deu a sessão em {WAIT_SECONDS:g} s; confira a aba')
             return 1
-        record('session', name=args.name, chat=session_id, claude_session=claude_session)
+        record('session', name=args.name, chat=session_id, provider_session=sid,
+               **({'claude_session': sid} if agent == 'claude' else {}))
         if args.rename and not wait_for_name(args.name):
             print(f'CHECK:    {args.name} não registrou o nome em {WAIT_SECONDS:g} s; confira o /rename na aba')
             return 1
