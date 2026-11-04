@@ -265,6 +265,11 @@ class BrzaRunTest(unittest.TestCase):
     def test_fence_outgrows_backticks_in_the_output(self):
         self.assertEqual(RUN['fenced']('a ```b``` ````c', 'bash'), '`````bash\na ```b``` ````c\n`````')
 
+    def test_run_sets_shell_sessions_disable(self):
+        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp),                 contextlib.redirect_stdout(io.StringIO()):
+            RUN['run_here']('echo ok', Path(temp))
+            self.assertEqual(os.environ.get('SHELL_SESSIONS_DISABLE'), '1')
+
     def test_report_points_to_the_full_output_only_when_cut(self):
         log = Path('/tmp/r/output.log')
         self.assertEqual(RUN['report']('ls', 0, '', log), '```bash\nls\n```\n```\n(sem saída)\n```\nSaiu com 0.')

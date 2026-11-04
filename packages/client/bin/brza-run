@@ -98,7 +98,8 @@ def run_here(command: str, run: Path) -> tuple[int, str]:
         return data
 
     # sem pager: o less quebraria as linhas na largura da aba e, com saída longa, esperaria um q que ninguém digita
-    os.environ.update(PAGER='cat', GIT_PAGER='cat')
+    # M23: desativa sessão do shell que polui a saída
+    os.environ.update(PAGER='cat', GIT_PAGER='cat', SHELL_SESSIONS_DISABLE='1')
     status = pty.spawn([os.environ.get('SHELL') or '/bin/zsh', '-ic', command], read)
     code = os.waitstatus_to_exitcode(status)
     code = 128 - code if code < 0 else code
