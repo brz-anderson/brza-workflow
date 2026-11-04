@@ -417,7 +417,7 @@ def main():
     group.add_argument('--prompt')
     group.add_argument('--prompt-file', type=Path)
     ap.add_argument('--wait', action='store_true',
-                    help='espera a sessão no ar, e com --rename o nome, antes de anunciar')
+                    help='espera a sessão no ar, e com --rename o nome só no Claude e no Codex, e nos outros só a sessão, antes de anunciar')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
     AGENTS = {'claude': 'claude', 'codex': 'codex', 'grok': 'grok', 'antigravity': 'antigravity', 'agy': 'antigravity'}
@@ -434,7 +434,6 @@ def main():
         return 1
     prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
     if agent == 'codex' and args.rename and args.title:
-        print(f'CHECK:    {args.name}: o --title foi trocado pelo nome')
         title = args.name
     else:
         title = args.title or args.name
@@ -450,6 +449,8 @@ def main():
         print(f'abriria:  {args.name}  (chat, {checkout}), {", ".join(extras)}')
         return 0
 
+    if agent == 'codex' and args.rename and args.title:
+        print(f'CHECK:    {args.name}: o --title foi trocado pelo nome')
     first = f'/rename {args.name}' if (args.rename and agent == 'claude') else prompt
     try:
         launched = brza('agent', 'launch', '--agent', agent, '--surface', 'chat', '--worktree', f'path:{checkout}',

@@ -667,6 +667,24 @@ class CommandTest(unittest.TestCase):
                 self.assertIn('com rename', out)
                 self.assertNotIn('com /rename', out)
 
+    def test_codex_dry_run_with_title_and_rename_does_not_warn_about_title_swap(self):
+        """P11/A1: o CHECK de troca do --title pelo nome não sai no --dry-run do Codex nem quando já running."""
+        code, out = self.run_main('correcao', '--agent', 'codex', '--title', 'Outro Título', '--rename', '--dry-run')
+        self.assertEqual(code, 0)
+        self.assertNotIn('o --title foi trocado pelo nome', out)
+        self.assertIn('título "correcao"', out)
+        self.assertIn('com rename', out)
+        self.assertEqual(self.launches, [])
+
+        chat = 'codex_1'
+        self.app.tabs = [tab(chat, 'correcao')]
+        self.write_map({'event': 'open', 'name': 'correcao', 'chat': chat, 'agent': 'codex'})
+        code, out = self.run_main('correcao', '--agent', 'codex', '--title', 'Outro Título', '--rename')
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), 'running:  correcao')
+        self.assertNotIn('o --title foi trocado pelo nome', out)
+        self.assertEqual(self.launches, [])
+
     def test_wait_without_the_claude_session_in_time_exits_one(self):
         with patch.dict(GLOBALS, {'WAIT_SECONDS': 0}):
             code, out = self.run_main('pln-009', '--wait')
