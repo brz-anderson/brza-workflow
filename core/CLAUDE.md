@@ -67,6 +67,12 @@ O plugin de um workstream só vai no `.claude/settings.local.json` do worktree d
 - **Conferir:** `claude plugin list`, rodado no worktree, mostra o plugin com `Scope: local` e `enabled`.
 - **O `brza note memory-setup` preserva a chave**, porque grava o `autoMemoryDirectory` com merge.
 
+**O servidor MCP de um workstream só não usa o `--scope local`.** O `claude mcp add --scope local` rodado no worktree
+grava no `~/.claude.json`, na chave da raiz do repositório, e o servidor vale em todos os workstreams; movida para a
+chave do worktree, a entrada some, porque o CLI resolve o worktree para a raiz. Ele entra na sessão, por
+`claude --mcp-config <arquivo>`, com o arquivo fora do git; o token vai por `headersHelper`, que o lê do disco a cada
+conexão, e não fica gravado no arquivo.
+
 ## O hook de medição
 
 O `.claude/hooks/measure.py`, ligado no `settings.json`, grava uma linha JSON por evento em
