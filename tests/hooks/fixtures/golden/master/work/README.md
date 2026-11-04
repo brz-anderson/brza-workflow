@@ -221,9 +221,9 @@ O `brza-studio` é outro repositório, com branch `master` e a norma dele: o pla
 | `status` | `open` existe e ninguém pegou · `in_progress` alguém está fazendo · `in_review` feito, esperando parecer · `done` encerrado **com** desfecho · `dropped` encerrado **sem** desfecho, por escolha. **Omitido** nos gêneros sem ciclo de vida: `guide`, `worklog` e `note` |
 | `scope` | A que a nota se refere. Sempre **lista**: `brza-studio`, `workspace`, ou o que mais vier |
 | `priority` | Em `issues/` e `plans/`: `high` · `medium` · `low`. Opcional e sem default; `brza note commit` avisa sem bloquear quando plano ou issue aberta não traz `priority` |
-| `depends_on` | Lista de IDs canônicos (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`, `decision:<slug>`) de que a nota depende. Só `status: done` satisfaz a dependência; alvo inexistente ou ciclo barra no checador |
+| `depends_on` | Lista de IDs canônicos (`PLN-NNN`, `MIG-NNN`, `issue:<slug>`) de que a nota depende. Só `status: done` satisfaz a dependência; alvo inexistente ou ciclo barra no checador |
 | `estimate_h` | Estimativa numérica em horas (ponto decimal, sem unidade), em `plans/` e opcional em `issues/` |
-| `refs` | Lista de IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`) citados no corpo de um `worklog` (prosa, crases inline, subitens como `PLN-008/D1` e links relativos), mantida automaticamente pelo `brza note commit` |
+| `refs` | Lista de IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`) citados no corpo de um `worklog` (prosa, crases inline, subitens como `PLN-008/D1` e o alvo dos links relativos), mantida automaticamente pelo `brza note commit`. O link conta pelo alvo: o ID que aparece só no texto dele, como o título de outra nota, não entra |
 | `opened` | Quando o assunto foi aberto |
 | `decided` / `decided_by` | Data da decisão e quem decidiu — par indivisível |
 | `completed` | Data da conclusão |
@@ -269,9 +269,10 @@ facultativos.
 > obrigatório ausente em nota nova ou que mudou de estado e o plano aberto fora do molde, como diz o
 > [`plans/README.md`](../plans/README.md); **relata** o campo ausente no acervo anterior à regra, `type` redundante ou
 > inválido, tag fora da lista, `date:` em worklog, menção textual a ID inexistente no worklog, achado de parecer de
-> `reviews/` sem evidência e a nota que linka um plano aberto e falta
-> na seção dele. Os vocabulários estão no script (`.claude/skills/notes-checker/scripts/check_notes.py`) e nesta norma:
-> mudou um, muda o outro no mesmo commit.
+> `reviews/` sem evidência, a nota que linka um plano aberto e falta na seção dele, o parecer de `reviews/` fora de
+> `REV-NNN-<slug>.md`, a nota `MIG-NNN-…` sem `type: migration` e a issue `type: migration` sem o número `MIG-NNN`. Os
+> vocabulários estão no script (`.claude/skills/notes-checker/scripts/check_notes.py`) e nesta norma: mudou um, muda o
+> outro no mesmo commit.
 >
 > **Quem escreve numa nota existente lê o frontmatter primeiro**, antes de qualquer trecho do corpo: nota `done` ou
 > `dropped` recebe só emenda datada e reescrita de link; conteúdo novo vai à nota aberta que a norma ou o plano

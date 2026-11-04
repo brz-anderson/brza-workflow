@@ -180,7 +180,6 @@ CHECKER = Path('.claude') / 'skills' / 'notes-checker' / 'scripts' / 'check_note
 FENCE_RE = re.compile(r'^(```|~~~)')
 INLINE_CODE_RE = re.compile(r'`[^`\n]*`')
 MD_LINK_RE = re.compile(r'!?\[(?:\\.|[^\[\]\n])*\]\(([^()\s]+)(?:\s+"[^"]*")?\)')
-MD_LINK_OUTSIDE_RE = re.compile(r'(!?\[(?:\\.|[^\[\]\n])*)\]\([^()\s]+(?:\s+"[^"]*")?\)')
 URI_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*:')
 TEXT_REF_RE = re.compile(
     r'(?<![A-Za-z0-9_:-])(PLN-\d+|REV-\d+|MIG-\d+|issue:[a-z0-9]+(?:-[a-z0-9]+)*)(?:/[A-Za-z0-9_-]+)?(?![A-Za-z0-9_])'
@@ -533,8 +532,20 @@ def build_target_catalog(root: Path) -> dict:
     return {'root': root, 'all_rels': all_rels, 'valid_refs': valid_refs, 'id_by_rel': id_by_rel}
 
 
+def without_links(line: str) -> str:
+    """D3, R14.3: a linha sem os links Markdown inteiros, texto e alvo; o link conta pelo alvo, e não pelos IDs do texto
+    que ele mostra. A crase inline fora de link fica; a que está no texto de um link sai com ele."""
+    masked = INLINE_CODE_RE.sub(lambda m: '`' + 'x' * (len(m.group(0)) - 2) + '`', line)
+    kept, last = [], 0
+    for m in MD_LINK_RE.finditer(masked):
+        kept += [line[last:m.start()], ' ']
+        last = m.end()
+    return ''.join(kept) + line[last:]
+
+
 def extract_worklog_refs(text: str, worklog_path: Path, root: Path, catalog: dict | None = None) -> tuple[list[str], list[tuple[int, str]]]:
-    """D3: extrai refs do corpo de um worklog fora de blocos cercados, preservando crases inline, subitens e links."""
+    """D3: extrai refs do corpo de um worklog fora de blocos cercados, preservando crases inline, subitens e o alvo dos
+    links; o texto dos links fica de fora (R14.3)."""
     if catalog is None:
         catalog = build_target_catalog(root)
     root = catalog['root']
@@ -583,10 +594,7 @@ def extract_worklog_refs(text: str, worklog_path: Path, root: Path, catalog: dic
             continue
         if fenced:
             continue
-        parts = re.split(r'(`[^`\n]*`)', line)
-        for i in range(0, len(parts), 2):
-            parts[i] = MD_LINK_OUTSIDE_RE.sub(r'\1]', parts[i])
-        scan_line = ''.join(parts)
+        scan_line = without_links(line)
         for m in TEXT_REF_RE.finditer(scan_line):
             ref_id = m.group(1)
             if ref_id in valid_refs:

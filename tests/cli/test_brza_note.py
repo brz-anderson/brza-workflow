@@ -921,6 +921,51 @@ class NoteWorklogRefsTest(NoteFixture):
         self.assertIn('refs:\n  - PLN-001\n', written)
         self.assertNotIn('refs:\n  - PLN-404', written)
 
+    def test_commit_ignores_ids_only_in_link_text(self):
+        """D3, R14.3: o link conta pelo alvo; o ID que aparece só no texto dele não entra no refs nem gera aviso."""
+        self.write('work/reviews/REV-001-parecer.md',
+                   '---\nstatus: done\ndescription: Parecer.\nopened: 2026-11-03\ncompleted: 2026-11-03\n---\n\n'
+                   '# REV-001: Parecer\n')
+        self.write('work/issues/MIG-001-mig.md',
+                   '---\nstatus: open\ntype: migration\ndescription: Mig.\nopened: 2026-11-03\n---\n\n# MIG-001: Mig\n')
+        w_rel = 'work/worklogs/2026-11-03-link.md'
+        self.write(w_rel, (
+            '---\nscope:\n  - workspace\n---\n\n# Link\n\n'
+            'Aplicada a [MIG-001: Renumeração (REV-001..REV-004)](../issues/MIG-001-mig.md).\n'
+            'E [o `REV-001` em crase no título](../issues/MIG-001-mig.md).\n'
+        ))
+        code, out = self.run_note('commit', 'work/reviews/REV-001-parecer.md', 'work/issues/MIG-001-mig.md', w_rel,
+                                  '-m', 'docs: link', '--no-push')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('REV-004', out)
+        written = (self.tree / w_rel).read_text()
+        self.assertIn('refs:\n  - MIG-001\n---', written)
+
+    def test_extractor_matches_the_checker_on_the_d3_table(self):
+        """A5 da REV-006: as duas cópias do extrator do D3, a do brza-note e a do checador, dão o mesmo resultado."""
+        scripts = ROOT / 'core' / '.claude' / 'skills' / 'notes-checker' / 'scripts'
+        checker = runpy.run_path(str(scripts / 'check_notes.py'))
+        self.write('work/reviews/REV-001-parecer.md', '# REV-001: Parecer\n')
+        self.write('work/issues/MIG-001-mig.md', '---\ntype: migration\n---\n# MIG-001: Mig\n')
+        self.write('work/issues/bug-local.md', '# Bug local\n')
+        bodies = {
+            'subitem': 'PLN-001/D1 fora de cerca.\n',
+            'cerca': '```\nPLN-001 e REV-001\n```\n',
+            'crase': 'Em crase, `MIG-001/P1`.\n',
+            'link': 'Veja [Bug local](../issues/bug-local.md) e [Parecer](../reviews/REV-001-parecer.md#a1).\n',
+            'texto-do-link': 'Aplicada a [MIG-001: Renumeração (REV-001..REV-004)](../issues/MIG-001-mig.md).\n'
+                             'E [o `REV-001` em crase](../issues/MIG-001-mig.md) e REV-001 na prosa.\n',
+            'inexistente': 'Menção a PLN-404 e issue:fantasma.\n',
+            'link-quebrado': 'Veja [MIG-001](../issues/nao-existe.md) e [x](https://exemplo.com/PLN-001).\n',
+        }
+        for name, body in bodies.items():
+            path = self.write(f'work/worklogs/2026-11-03-{name}.md', f'---\nscope:\n  - workspace\n---\n\n# {name}\n\n{body}')
+            text = path.read_text()
+            with self.subTest(name), contextlib.chdir(self.tree):
+                ours = GLOBALS['extract_worklog_refs'](text, path, self.tree)
+                theirs = checker['extract_worklog_refs'](text, str(path), str(self.tree))
+                self.assertEqual(ours, theirs)
+
     def test_commit_preserves_issue_identity_in_refs_after_rename(self):
         self.write('work/issues/nome-original.md',
                    '---\nstatus: open\ndescription: A issue.\nopened: 2026-10-28\n---\n\n# A issue\n')

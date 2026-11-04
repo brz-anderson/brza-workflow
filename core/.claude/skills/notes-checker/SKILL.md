@@ -67,9 +67,12 @@ Sai com 0 sem erro, com 1 com erro. O corte é **o que quebra consulta ou pontei
   infere —, `type` redundante ou inválido (`issues/` aceita `unknown` e `migration`), tag fora do vocabulário ou que
   repete campo, `status` em gênero sem estado, `date-on-worklog` (`date:` no frontmatter de worklog),
   `unknown-ref-mention` (menção textual a `PLN-NNN`, `REV-NNN`, `MIG-NNN` ou `issue:<slug>` inexistente no corpo do
-  worklog, com linha), achado `### A<n>` de um parecer de `work/reviews/` sem `**Evidência:**`
-  (`finding-without-evidence`) e nota de `work/worklogs/`, `work/reviews/`, `work/decisions/` ou `work/issues/` que
-  linka um plano aberto e falta na seção de ponteiro dele (`backlink-missing`).
+  worklog, com linha; o ID só no texto de um link não conta, o link conta pelo alvo), achado `### A<n>` de um parecer
+  de `work/reviews/` sem `**Evidência:**` (`finding-without-evidence`), a nota fora de número — parecer de
+  `work/reviews/` fora de `REV-NNN-<slug>.md` (`review-without-number`), `MIG-NNN-…` sem `type: migration`
+  (`migration-without-type`) e issue `type: migration` sem `MIG-NNN` (`migration-type-without-number`) — e nota de
+  `work/worklogs/`, `work/reviews/`, `work/decisions/` ou `work/issues/` que linka um plano aberto e falta na seção de
+  ponteiro dele (`backlink-missing`).
 
 **Link para nota de outro workstream:** o alvo que não está na árvore se procura nas branches `workstream/*`, as locais
 e as de `origin`, pelo `git ls-tree` de cada uma, calculado uma vez; só o que não existe em nenhuma é `unresolved-link`.

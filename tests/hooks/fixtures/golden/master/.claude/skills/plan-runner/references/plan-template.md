@@ -20,7 +20,7 @@
 > | `origin_ref`                                                                | o nome da issue ou da decisão sem `.md`; `PLN-NNN` ou `PLN-NNN/A<n>`                     | sempre, menos com `request`       |
 > | `ready`                                                                     | `sim`, ou `não — o que falta, e o que isso trava`; entre aspas quando o texto tem `: `   | sempre                            |
 > | `estimate_h` · `executed_h` · `remaining_h`                                 | número, ponto decimal, sem unidade                                                       | quando algum passo tem `Estimado` |
-> | `priority` · `depends_on`                                                   | `high` · `medium` · `low`; lista de IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`, `decision:<slug>`) | opcional (`commit` avisa plano aberto sem `priority`) |
+> | `priority` · `depends_on`                                                   | `high` · `medium` · `low`; lista de IDs (`PLN-NNN`, `MIG-NNN`, `issue:<slug>`) | opcional (`commit` avisa plano aberto sem `priority`) |
 > | `scope` · `opened` · `owner` · `tags` · `blocks` · `deadline` · `completed` | como em toda nota                                                                        | como em toda nota                 |
 >
 > | `phase`               | `status`                                          |

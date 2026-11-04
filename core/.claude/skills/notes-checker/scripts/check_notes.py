@@ -75,7 +75,6 @@ ISSUE_NOTE_RE = re.compile(r"^work/issues/(?!README\.md$)(?!MIG-\d+-)([^/]+)\.md
 TEXT_REF_RE = re.compile(
     r"(?<![A-Za-z0-9_:-])(PLN-\d+|REV-\d+|MIG-\d+|issue:[a-z0-9]+(?:-[a-z0-9]+)*)(?:/[A-Za-z0-9_-]+)?(?![A-Za-z0-9_])"
 )
-MD_LINK_OUTSIDE = re.compile(r"(!?\[(?:\\.|[^\[\]\n])*)\]\([^()\s]+(?:\s+\"[^\"]*\")?\)")
 DEFAULT_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4))
 
 GENRES = {
@@ -414,15 +413,20 @@ class TargetCatalog:
         return as_list(self.frontmatter_of(target_id).get("depends_on"))
 
 
-def _strip_link_hrefs_outside_inline_code(line):
-    parts = re.split(r"(`[^`\n]*`)", line)
-    for i in range(0, len(parts), 2):
-        parts[i] = MD_LINK_OUTSIDE.sub(r"\1]", parts[i])
-    return "".join(parts)
+def without_links(line):
+    """D3, R14.3: a linha sem os links Markdown inteiros, texto e alvo; o link conta pelo alvo, e não pelos IDs do texto
+    que ele mostra. A crase inline fora de link fica; a que está no texto de um link sai com ele."""
+    masked = INLINE_CODE.sub(lambda m: "`" + "x" * (len(m.group(0)) - 2) + "`", line)
+    kept, last = [], 0
+    for m in MD_LINK.finditer(masked):
+        kept += [line[last:m.start()], " "]
+        last = m.end()
+    return "".join(kept) + line[last:]
 
 
 def extract_worklog_refs(text, src_full, root, catalog=None):
-    """D3: extrai refs de um worklog (prosa, crases inline, subitens e links relativos resolvidos fora de cercas).
+    """D3: extrai refs de um worklog (prosa, crases inline, subitens e o alvo dos links relativos resolvidos, fora de
+    cercas); o texto dos links fica de fora (R14.3).
     Retorna (refs_ordenados, avisos_id_desconhecido_como_lista_de_(lineno, id))."""
     if catalog is None:
         catalog = TargetCatalog(root)
@@ -451,7 +455,7 @@ def extract_worklog_refs(text, src_full, root, catalog=None):
             continue
         if fenced:
             continue
-        scan_line = _strip_link_hrefs_outside_inline_code(line)
+        scan_line = without_links(line)
         for m in TEXT_REF_RE.finditer(scan_line):
             ref_id = m.group(1)
             if ref_id in catalog.valid_refs:
@@ -684,6 +688,13 @@ def check(root):
             for lineno, ref_id in unknown_mentions:
                 warnings.append(("unknown-ref-mention", rel, f"{ref_id} (linha {lineno})"))
         fm = frontmatter(text)
+        # D7, R14.1: a nota fora de número some do índice e do refs; avisa, sem barrar
+        if genre == "review" and not REV_NOTE_RE.match(rel) and os.path.basename(rel) != "README.md":
+            warnings.append(("review-without-number", rel, "o parecer nasce como work/reviews/REV-NNN-<slug>.md"))
+        if genre == "issue" and MIG_NOTE_RE.match(rel) and fm.get("type") != "migration":
+            warnings.append(("migration-without-type", rel, "a nota MIG-NNN leva type: migration"))
+        if genre == "issue" and fm.get("type") == "migration" and not MIG_NOTE_RE.match(rel):
+            warnings.append(("migration-type-without-number", rel, "a migração nasce como work/issues/MIG-NNN-<slug>.md"))
         if not fm:
             continue
         if genre == "worklog":

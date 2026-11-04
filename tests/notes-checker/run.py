@@ -74,6 +74,7 @@ def main():
         fails += check_manifest_dates()
         fails += check_workstream_links()
         fails += check_pln008_p1()
+        fails += check_pln008_p8()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(1 if fails else 0)
@@ -776,6 +777,73 @@ def check_pln008_p1():
                    (refs_out, unk_out))
         else:
             expect("extract_worklog_refs existe em check_notes.py", False)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return fails
+
+
+def check_pln008_p8():
+    """P8 do PLN-008: o checador avisa, sem barrar, a nota fora de número (D7, R14.1), e o ID só no texto de um link
+    não entra no refs (D3, R14.3)."""
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    fails = 0
+
+    def expect(label, ok, detail=""):
+        nonlocal fails
+        print(("  ok  " if ok else "FALHA ") + label + ("" if ok else f": {detail}"))
+        fails += not ok
+
+    rev_sem_numero = "work/reviews/pln-001-sem-numero.md"
+    mig_sem_type = "work/issues/MIG-002-sem-type.md"
+    migracao_sem_numero = "work/issues/migracao-sem-numero.md"
+    rev_certo, mig_certa = "work/reviews/REV-001-certo.md", "work/issues/MIG-001-certa.md"
+    so_link, link_e_prosa = "work/worklogs/2026-11-03-so-link.md", "work/worklogs/2026-11-03-link-e-prosa.md"
+    notes = {
+        "work/README.md": "# Norma\n",
+        "work/reviews/README.md": "# Norma dos pareceres\n",
+        rev_sem_numero: "---\nstatus: done\nopened: 2026-11-03\ncompleted: 2026-11-03\ndescription: Sem número.\n---\n"
+                        "# Parecer sem número\n",
+        mig_sem_type: "---\nstatus: open\nopened: 2026-11-03\ndescription: Sem type.\n---\n# MIG-002: Sem type\n",
+        migracao_sem_numero: "---\nstatus: open\ntype: migration\nopened: 2026-11-03\ndescription: Sem número.\n---\n"
+                             "# Migração sem número\n",
+        rev_certo: "---\nstatus: done\nopened: 2026-11-03\ncompleted: 2026-11-03\ndescription: Certo.\n---\n"
+                   "# REV-001: Certo\n",
+        mig_certa: "---\nstatus: open\ntype: migration\nopened: 2026-11-03\ndescription: Certa.\n---\n# MIG-001: Certa\n",
+        so_link: "---\nscope:\n  - workspace\n---\n\n# Só o link\n\n"
+                 "Aplicada a [MIG-001: Renumeração (REV-001..REV-004)](../issues/MIG-001-certa.md).\n"
+                 "E [o `REV-001` em crase no título](../issues/MIG-001-certa.md).\n",
+        link_e_prosa: "---\nscope:\n  - workspace\n---\n\n# Link e prosa\n\n"
+                      "Veja [o título REV-004](../issues/MIG-001-certa.md) e REV-001 na prosa.\n",
+    }
+    try:
+        write_notes(tmp, notes)
+        exit_code, stdout = run_checker("--root", tmp, "--json")
+        out = json.loads(stdout)
+        errors = {(r, w) for r, w, _ in out["errors"]}
+        warnings = {(r, w) for r, w, _ in out["warnings"]}
+
+        # D7 / R14.1: os três avisos, no nível de aviso
+        expect("parecer de work/reviews/ fora de REV-NNN-<slug>.md é aviso review-without-number",
+               ("review-without-number", rev_sem_numero) in warnings, sorted(warnings))
+        expect("nota MIG-NNN sem type: migration é aviso migration-without-type",
+               ("migration-without-type", mig_sem_type) in warnings, sorted(warnings))
+        expect("issue type: migration sem número MIG-NNN é aviso migration-type-without-number",
+               ("migration-type-without-number", migracao_sem_numero) in warnings, sorted(warnings))
+        expect("os três avisos não barram: nenhum erro nas três notas e saída 0",
+               exit_code == 0 and not any(w in (rev_sem_numero, mig_sem_type, migracao_sem_numero) for _, w in errors),
+               (exit_code, sorted(errors)))
+        expect("REV-NNN, MIG-NNN com type: migration e o README.md de reviews/ ficam sem aviso",
+               not any(w in (rev_certo, mig_certa, "work/reviews/README.md") for _, w in errors | warnings),
+               sorted(errors | warnings))
+
+        # D3 / R14.3: o ID só no texto do link não entra no refs nem gera aviso; o alvo do link gera
+        for rel, expected in ((so_link, ["MIG-001"]), (link_e_prosa, ["MIG-001", "REV-001"])):
+            full = os.path.join(tmp, rel)
+            refs_out, unk_out = cn.extract_worklog_refs(open(full, encoding="utf-8").read(), full, tmp)
+            expect(f"ID só no texto do link não entra no refs: {os.path.basename(rel)}",
+                   refs_out == expected and unk_out == [], (refs_out, unk_out))
+        expect("ID inexistente só no texto do link não gera unknown-ref-mention",
+               not any(r == "unknown-ref-mention" for r, _ in warnings), sorted(warnings))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return fails
