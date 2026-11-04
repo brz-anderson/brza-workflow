@@ -20,7 +20,6 @@ import threading
 from . import clients as clients_mod
 from . import runtimes
 
-AGENT = 'claude'
 DEFAULT_INTERVAL = 15.0
 TASK_DONE = ('completed',)
 TASK_FAILED = ('failed',)

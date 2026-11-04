@@ -23,7 +23,6 @@ from . import runtimes
 from .telemetry import Telemetry
 
 ROLE_CONSULTANT = 'consultant'
-RUNTIMES = ('claude',)
 
 _STRINGS = ('task', 'role', 'target', 'model', 'effort', 'account', 'ref', 'caller', 'approved')
 _ARGUMENTS = _STRINGS + ('runtime', 'deadline', 'blocks', 'priority')
@@ -138,9 +137,18 @@ class Orchestrator:
         """Os argumentos de cliente das chamadas ao leitor de contas: o do pedido, quando ele o trouxe."""
         return {key: value for key, value in (('client', client), ('user_data', user_data)) if value}
 
-    def normalize_account(self, name, client=None, user_data=None):
+    def normalize_account(self, name, client=None, user_data=None, runtime='claude', expected=None):
         """O id da conta do pedido, lido no cliente do pedido. O worker abre na conta ativa do cliente: o `worker-start`
-        não tem flag de conta (X20), então outra conta é recusada com o motivo. Sem leitor de contas, vale como veio."""
+        não tem flag de conta (X20), então outra conta é recusada com o motivo. Fora do Claude, a conta gravada passa
+        sem leitura da lista; qualquer outra é recusada com o motivo da E2. Sem leitor de contas, vale como veio."""
+        if runtime != 'claude':
+            if expected is None:
+                expected = (self.accounts.active_id(runtime=runtime, **self._for(client, user_data))
+                            if self.accounts and hasattr(self.accounts, 'active_id') else None) or accounts_mod.SYSTEM_DEFAULT
+            if name == expected:
+                return name
+            raise ToolError('account fora do Claude entra na E2 do PLN-013: tire o account, e o worker abre na conta padrão '
+                            'do runtime')
         if self.accounts is None or not hasattr(self.accounts, 'find'):
             return name
         try:
@@ -235,7 +243,11 @@ class Orchestrator:
                 fields['account'] = self.normalize_account(fields['account'], client, user_data)
             fields.setdefault('account', '')  # sem `account`: `''`, e o `Limits` o conta na ativa da hora da admissão
             decided = self.policy.decide_model(fields, self.resolver)
-            fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
+            for k in ('model', 'effort'):
+                if decided.get(k) is not None:
+                    fields[k] = decided[k]
+                else:
+                    fields.pop(k, None)
             reason = self.gate_reason(args, fields, client)
             if reason is None:
                 request = self.queue.enqueue(**fields, caller=caller, index=self._index)
@@ -284,7 +296,9 @@ class Orchestrator:
         if account is not None:
             gate = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (gate_id,))
             stored = (self.queue.get(gate[0]['request_id']) or {}) if gate else {}
-            account = self.normalize_account(account, stored.get('client'), stored.get('user_data'))  # a leitura das contas pode demorar: fora do lock global
+            account = self.normalize_account(account, stored.get('client'), stored.get('user_data'),
+                                             runtime=stored.get('runtime', 'claude'),
+                                             expected=stored.get('account'))  # a leitura das contas pode demorar: fora do lock global
         with self.queue.lock:  # a leitura, a conferência e a gravação são um passo só: duas aprovações não passam juntas
             rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
             if not rows:

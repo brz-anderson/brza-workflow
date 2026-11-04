@@ -232,8 +232,9 @@ class Policy:
         """`{model, effort, reason, role, resolver}` do pedido; `reason` diz por que cada valor ficou.
 
         `policy.enforce = false` devolve o pedido como veio (`passthrough`). Com a imposição, o papel dá o modelo e o
-        esforço, e o que o pedido trouxe vale só onde o papel não define. Papel sem linha vai ao `resolver` (o
-        desempatador do M11) pelo texto da tarefa; sem `resolver`, ou sem resposta dele, fica a linha do `consultant`.
+        esforço, e o que o pedido trouxe vale só onde o papel não define. No Claude, papel sem linha vai ao `resolver`
+        (o desempatador do M11) pelo texto da tarefa; sem `resolver`, ou sem resposta dele, fica a linha do `consultant`.
+        Fora do Claude, papel sem linha não chama o resolver e devolve `model` e `effort` vazios.
         """
         config = self.config()
         role, asked = request.get('role'), {k: request.get(k) for k in ('model', 'effort')}
