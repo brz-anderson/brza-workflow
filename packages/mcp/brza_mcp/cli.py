@@ -20,8 +20,8 @@ def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=c
           limits=None, resolver=None, with_resolver=False):
     """Fila, tetos com o provedor de uso das contas, ferramentas e o `Scheduler` (ainda parado). Devolve
     `(serviço, scheduler)`; nos testes, tudo vem injetado. `with_resolver` liga o desempatador real (o `serve`): o
-    papel ausente ou desconhecido do `dispatch` passa pelo `tev1` e pelo Haiku; sem ele (ou um `resolver` injetado),
-    fica a linha do `consultant`."""
+    papel ausente ou desconhecido só passa pelo `tev1` e pelo Haiku, e só cai na linha do `consultant`, no runtime
+    `claude`; fora dele, não chama o resolver e não herda linha de outro papel."""
     accounts = accounts or accounts_mod.Accounts()
     queue = queue if queue is not None else queue_mod.Queue()
     limits = limits or limits_mod.Limits(usage=accounts.usage, active=getattr(accounts, 'active_id', None))

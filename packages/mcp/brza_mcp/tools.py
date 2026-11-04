@@ -19,17 +19,17 @@ from . import clients as clients_mod
 from . import limits as limits_mod
 from . import policy as policy_mod
 from . import queue as queue_mod
+from . import runtimes
 from .telemetry import Telemetry
 
 ROLE_CONSULTANT = 'consultant'
-RUNTIMES = ('claude',)
 
 _STRINGS = ('task', 'role', 'target', 'model', 'effort', 'account', 'ref', 'caller', 'approved')
 _ARGUMENTS = _STRINGS + ('runtime', 'deadline', 'blocks', 'priority')
 
 DISPATCH_SCHEMA = {'type': 'object', 'required': ['task', 'role'], 'properties': {
     'task': {'type': 'string'}, 'role': {'type': 'string'}, 'target': {'type': 'string'},
-    'runtime': {'enum': list(RUNTIMES)}, 'model': {'type': 'string'}, 'effort': {'type': 'string'},
+    'runtime': {'enum': [*runtimes.RUNTIMES, *runtimes.ALIASES]}, 'model': {'type': 'string'}, 'effort': {'type': 'string'},
     'account': {'type': 'string'}, 'ref': {'type': 'string'}, 'deadline': {'type': 'string', 'format': 'date'},
     'blocks': {'type': 'array', 'items': {'type': 'string'}}, 'priority': {'enum': list(queue_mod.PRIORITIES)},
     'caller': {'type': 'string'}, 'approved': {'type': 'string'}}}
@@ -137,9 +137,18 @@ class Orchestrator:
         """Os argumentos de cliente das chamadas ao leitor de contas: o do pedido, quando ele o trouxe."""
         return {key: value for key, value in (('client', client), ('user_data', user_data)) if value}
 
-    def normalize_account(self, name, client=None, user_data=None):
+    def normalize_account(self, name, client=None, user_data=None, runtime='claude', expected=None):
         """O id da conta do pedido, lido no cliente do pedido. O worker abre na conta ativa do cliente: o `worker-start`
-        não tem flag de conta (X20), então outra conta é recusada com o motivo. Sem leitor de contas, vale como veio."""
+        não tem flag de conta (X20), então outra conta é recusada com o motivo. Fora do Claude, a conta gravada passa
+        sem leitura da lista; qualquer outra é recusada com o motivo da E2. Sem leitor de contas, vale como veio."""
+        if runtime != 'claude':
+            if expected is None:
+                expected = (self.accounts.active_id(runtime=runtime, **self._for(client, user_data))
+                            if self.accounts and hasattr(self.accounts, 'active_id') else None) or accounts_mod.SYSTEM_DEFAULT
+            if name == expected:
+                return name
+            raise ToolError('account fora do Claude entra na E2 do PLN-013: tire o account, e o worker abre na conta padrão '
+                            'do runtime')
         if self.accounts is None or not hasattr(self.accounts, 'find'):
             return name
         try:
@@ -189,8 +198,11 @@ class Orchestrator:
         for name in _STRINGS:
             if name in args and not isinstance(args[name], str):
                 raise ToolError(f'{name} deve ser texto, veio {json.dumps(args[name])}')
-        if 'runtime' in args and args['runtime'] not in RUNTIMES:
-            raise ToolError(f'runtime {args["runtime"]!r} não é aceito: só "claude" (o M4 é fase 3)')
+        if 'runtime' in args:
+            try:
+                args = {**args, 'runtime': runtimes.get(args['runtime']).name}
+            except KeyError:
+                raise ToolError(f'runtime {args["runtime"]!r} não é aceito: claude, codex, grok ou antigravity (agy)') from None
         if 'priority' in args and args['priority'] not in queue_mod.PRIORITIES:
             raise ToolError(f'priority deve ser high, medium ou low, veio {json.dumps(args["priority"])}')
         if 'deadline' in args:
@@ -212,6 +224,9 @@ class Orchestrator:
                 raise ToolError('chamador desconhecido: o header X-Brza-Session não veio e o argumento caller falta')
             if 'approved' in args:
                 return self.approve(args['approved'], caller, args)
+            if args.get('runtime', 'claude') != 'claude' and 'account' in args:
+                raise ToolError('account fora do Claude entra na E2 do PLN-013: tire o account, e o worker abre na conta padrão '
+                                'do runtime')
             fields = {k: args[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref',
                                            'deadline', 'blocks', 'priority') if k in args}
             fields.setdefault('runtime', 'claude')  # o teto de sessões conta por runtime: pedido sem ele escaparia
@@ -221,11 +236,18 @@ class Orchestrator:
                 fields['client'] = client
             if user_data:  # o perfil de outro build (brza-dev): o worker abre no runtime dele
                 fields['user_data'] = user_data
-            if 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
+            if fields['runtime'] != 'claude':
+                fields['account'] = (self.accounts.active_id(runtime=fields['runtime'], **self._for(client, user_data))
+                                     if self.accounts and hasattr(self.accounts, 'active_id') else None) or accounts_mod.SYSTEM_DEFAULT
+            elif 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
                 fields['account'] = self.normalize_account(fields['account'], client, user_data)
             fields.setdefault('account', '')  # sem `account`: `''`, e o `Limits` o conta na ativa da hora da admissão
             decided = self.policy.decide_model(fields, self.resolver)
-            fields.update({k: decided[k] for k in ('model', 'effort') if decided[k] is not None})
+            for k in ('model', 'effort'):
+                if decided.get(k) is not None:
+                    fields[k] = decided[k]
+                else:
+                    fields.pop(k, None)
             reason = self.gate_reason(args, fields, client)
             if reason is None:
                 request = self.queue.enqueue(**fields, caller=caller, index=self._index)
@@ -249,7 +271,7 @@ class Orchestrator:
             self.telemetry.policy(self.queue.get(request), decided)
             self.telemetry.emit('gated', self.queue.get(request), reason=reason, gate=gate_id)
             # a proposta é o que o pedido guardado vai ser, depois da política: o que Anderson aprova é o que roda
-            proposal = {k: fields[k] for k in ('task', 'role', 'target', 'model', 'effort', 'account', 'ref')
+            proposal = {k: fields[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref')
                         if fields.get(k)}
             proposal['reason'] = decided['reason']
             return {'gate': {'id': gate_id, 'reason': reason, 'proposal': proposal}}
@@ -274,7 +296,9 @@ class Orchestrator:
         if account is not None:
             gate = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (gate_id,))
             stored = (self.queue.get(gate[0]['request_id']) or {}) if gate else {}
-            account = self.normalize_account(account, stored.get('client'), stored.get('user_data'))  # a leitura das contas pode demorar: fora do lock global
+            account = self.normalize_account(account, stored.get('client'), stored.get('user_data'),
+                                             runtime=stored.get('runtime', 'claude'),
+                                             expected=stored.get('account'))  # a leitura das contas pode demorar: fora do lock global
         with self.queue.lock:  # a leitura, a conferência e a gravação são um passo só: duas aprovações não passam juntas
             rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
             if not rows:

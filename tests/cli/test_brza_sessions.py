@@ -365,7 +365,8 @@ class CommandTest(unittest.TestCase):
         def forbidden(*args):
             self.fail('contrato Claude aplicado a outro agente')
 
-        for requested, canonical in (('codex', 'codex'), ('agy', 'antigravity'), ('antigravity', 'antigravity')):
+        for requested, canonical in (('codex', 'codex'), ('grok', 'grok'), ('agy', 'antigravity'),
+                                     ('antigravity', 'antigravity')):
             with self.subTest(agent=requested), patch.dict(GLOBALS, {'running': forbidden, 'chat_blocker': forbidden,
                                                                     'wait_for_session': forbidden}):
                 code, out = self.run_main('correcao', '--agent', requested, '--checkout', '/tmp/checkout com espaço',
@@ -402,11 +403,32 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(self.read_map(), [])
 
     def test_non_claude_dry_run_shows_canonical_agent_and_does_not_launch(self):
-        for agent, canonical in (('codex', 'codex'), ('agy', 'antigravity')):
-            code, out = self.run_main('correcao', '--agent', agent, '--dry-run')
-            self.assertEqual(code, 0)
-            self.assertIn(f'agente {canonical}', out)
+        for agent, canonical in (('codex', 'codex'), ('grok', 'grok'), ('agy', 'antigravity')):
+            with self.subTest(agent=agent):
+                code, out = self.run_main('correcao', '--agent', agent, '--dry-run')
+                self.assertEqual(code, 0)
+                self.assertIn(f'agente {canonical}', out)
         self.assertEqual(self.launches, [])
+        self.assertEqual(self.read_map(), [])
+
+    def test_unknown_agent_is_refused_before_any_side_effect(self):
+        def forbidden(*args, **kwargs):
+            self.fail('agente desconhecido deve ser recusado antes de qualquer efeito colateral')
+
+        with patch.dict(GLOBALS, {
+            'running': forbidden,
+            'mapped_and_open': forbidden,
+            'resolve_checkout': forbidden,
+            'brza': forbidden,
+        }):
+            code, out = self.run_main('correcao', '--agent', 'cursor')
+            self.assertEqual(code, 1)
+            self.assertIn(
+                'CHECK:    correcao: --agent cursor não é claude, codex, grok nem antigravity (agy); nada foi aberto',
+                out,
+            )
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.app.calls, [])
         self.assertEqual(self.read_map(), [])
 
     def test_non_claude_mapped_chat_preserves_all_public_json_contracts(self):

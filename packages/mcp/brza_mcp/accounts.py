@@ -73,7 +73,8 @@ def parse(payload) -> dict:
         windows = _windows(item.get('rateLimits'))
         if windows and item.get('accountId'):
             usage[item['accountId']] = {'account': item['accountId'], 'runtime': RUNTIME, 'windows': windows}
-    return {'accounts': accounts, 'usage': usage}
+    codex = data.get('codex') if isinstance(data.get('codex'), dict) else {}
+    return {'accounts': accounts, 'usage': usage, 'codex': codex}
 
 
 class Accounts:
@@ -138,8 +139,17 @@ class Accounts:
             return next((a for a in accounts if a['active']), None)
         return next((a for a in accounts if name in (a['id'], a['email'], a['label'])), None)
 
-    def active_id(self, client=None, user_data=None):
-        """O id da conta ativa do cliente, ou None se não se lê."""
+    def active_id(self, runtime='claude', client=None, user_data=None):
+        """O id da conta ativa do cliente para o runtime, ou None se não se lê."""
+        if runtime in ('grok', 'antigravity'):
+            return SYSTEM_DEFAULT
+        if runtime == 'codex':
+            try:
+                data = self.read(client=client, user_data=user_data)
+            except AccountError:
+                return None
+            codex = data.get('codex') if isinstance(data, dict) else {}
+            return (codex or {}).get('activeAccountId')
         try:
             found = self.find(None, client=client, user_data=user_data)
         except AccountError:

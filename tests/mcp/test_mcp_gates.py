@@ -2,10 +2,17 @@
 
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp -v
 """
+import copy
+import json
+from pathlib import Path
 import threading
 import unittest
 
 from tools_support import ToolsCase
+
+from brza_mcp import accounts as acc
+
+FIXTURE = json.loads((Path(__file__).resolve().parent / 'fixtures' / 'orca-account-list.json').read_text())
 
 
 class GateTest(ToolsCase):
@@ -150,6 +157,30 @@ class GateTest(ToolsCase):
         self.assertFalse(self.call('dispatch', {'task': 'faz isso', 'role': 'executor', 'approved': gate['id']},
                                    session='s1')[0])
 
+    def test_approving_outside_claude_proposal_with_its_account_enqueues_even_with_managed_active_account(self):
+        # A ativa do Claude está numa conta gerenciada (não é systemDefault)
+        payload = copy.deepcopy(FIXTURE)
+        payload['result']['claude']['activeAccountId'] = '8eee0e1b-f5d7-40ba-8337-8cae0df3a062'
+        self.service.accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(payload), ''))
+
+        gate = self.gate({'task': 't', 'role': 'executor', 'runtime': 'grok'})
+        self.assertEqual(gate['proposal']['account'], 'systemDefault')
+        self.assertEqual(gate['proposal']['runtime'], 'grok')
+
+        # Aprovar a proposta reenviando o account da proposta enfileira sem consultar a lista do Claude
+        err, out = self.call('dispatch', {'task': 't', 'role': 'executor', 'runtime': 'grok',
+                                         'account': 'systemDefault', 'approved': gate['id']}, session='s1')
+        self.assertFalse(err, out)
+        self.assertEqual(out['state'], 'queued')
+        self.assertEqual(self.queue.get(out['request'])['account'], 'systemDefault')
+
+        # Qualquer outra conta fora da proposta é recusada com o motivo da E2
+        gate2 = self.gate({'task': 't2', 'role': 'executor', 'runtime': 'grok'})
+        err2, out2 = self.call('dispatch', {'task': 't2', 'role': 'executor', 'runtime': 'grok',
+                                           'account': 'outra-conta', 'approved': gate2['id']}, session='s1')
+        self.assertTrue(err2)
+        self.assertIn('account fora do Claude entra na E2 do PLN-013', out2)
+
     def test_the_gate_survives_the_service(self):
         gate = self.gate({'task': 't', 'role': 'executor'})
         from brza_mcp import tools
@@ -177,7 +208,7 @@ class ConfigTest(ToolsCase):
         self.assertIsNone(self.call('config', {'key': 'quota.hard_cap_percent'})[1]['value'])
 
     def test_an_unknown_key_is_refused(self):
-        for key in ('policy.roles.executor.model', 'mcp.port', 'foo', 'quota'):
+        for key in ('policy.roles.executor.claude.model', 'mcp.port', 'foo', 'quota'):
             err, out = self.call('config', {'key': key, 'value': 1})
             self.assertTrue(err, key)
             self.assertIn(key, out)

@@ -2,9 +2,17 @@
 
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/mcp -v
 """
+import copy
+import json
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from tools_support import ToolsCase
+
+from brza_mcp import accounts as acc
+
+FIXTURE = json.loads((Path(__file__).resolve().parent / 'fixtures' / 'orca-account-list.json').read_text())
 
 
 class SchemaTest(ToolsCase):
@@ -14,7 +22,7 @@ class SchemaTest(ToolsCase):
         self.assertEqual(set(tools), {'dispatch', 'status', 'config'})
         self.assertEqual(tools['dispatch']['required'], ['task', 'role'])
         props = tools['dispatch']['properties']
-        self.assertEqual(props['runtime'], {'enum': ['claude']})
+        self.assertEqual(props['runtime'], {'enum': ['claude', 'codex', 'grok', 'antigravity', 'agy']})
         self.assertEqual(props['priority'], {'enum': ['high', 'medium', 'low']})
         self.assertEqual(props['blocks'], {'type': 'array', 'items': {'type': 'string'}})
         self.assertEqual(set(props), {'task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref',
@@ -81,8 +89,64 @@ class ValidationTest(ToolsCase):
         self.assertIn(fragment, out)
         self.assertEqual(self.queue.pending(), [])
 
-    def test_codex_is_refused(self):
-        self.refused({'task': 't', 'role': 'consultant', 'runtime': 'codex'}, 'runtime')
+    def test_each_runtime_is_accepted_and_agy_is_stored_as_antigravity(self):
+        for r in ('grok', 'codex', 'antigravity', 'agy'):
+            err, out = self.call('dispatch', {'task': f't-{r}', 'role': 'consultant', 'runtime': r}, session='s')
+            self.assertFalse(err, out)
+            row = self.queue.get(out['request'])
+            expected = 'antigravity' if r == 'agy' else r
+            self.assertEqual(row['runtime'], expected)
+
+    def test_account_outside_claude_is_refused_until_e2(self):
+        self.refused({'task': 't', 'role': 'consultant', 'runtime': 'codex', 'account': 'x'},
+                     'account fora do Claude entra na E2 do PLN-013')
+
+    def test_the_account_stored_outside_claude_is_the_runtime_default(self):
+        for r in ('grok', 'antigravity'):
+            _, out = self.call('dispatch', {'task': f't-{r}', 'role': 'consultant', 'runtime': r}, session='s')
+            self.assertEqual(self.queue.get(out['request'])['account'], 'systemDefault')
+
+        # Codex com a fixture real com codex.activeAccountId: null lida por parse e active_id
+        fixture_null = copy.deepcopy(FIXTURE)
+        acc_null = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(fixture_null), ''))
+        self.service.accounts = acc_null
+        _, out = self.call('dispatch', {'task': 't-codex', 'role': 'consultant', 'runtime': 'codex'}, session='s')
+        self.assertEqual(self.queue.get(out['request'])['account'], 'systemDefault')
+
+        # Codex com codex.activeAccountId preenchido na fixture
+        fixture_filled = copy.deepcopy(FIXTURE)
+        fixture_filled['result']['codex']['activeAccountId'] = 'codex-custom'
+        acc_filled = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(fixture_filled), ''))
+        self.service.accounts = acc_filled
+        _, out = self.call('dispatch', {'task': 't-codex-2', 'role': 'consultant', 'runtime': 'codex'}, session='s')
+        self.assertEqual(self.queue.get(out['request'])['account'], 'codex-custom')
+
+    def test_effort_without_model_outside_claude_drops_effort_from_queue_and_proposal(self):
+        # papel sem linha fora do Claude, com effort e sem model: o esforço anulado sai da fila e da proposta
+        _, out = self.call('dispatch', {'task': 't', 'role': 'mistério', 'runtime': 'grok', 'effort': 'low'}, session='s')
+        self.assertIn('gate', out)
+        proposal = out['gate']['proposal']
+        self.assertNotIn('effort', proposal)
+        self.assertNotIn('model', proposal)
+        gate_request = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (out['gate']['id'],))[0]['request_id']
+        row = self.queue.get(gate_request)
+        self.assertIsNone(row['effort'])
+        self.assertIsNone(row['model'])
+
+        err, approved = self.call('dispatch', {'task': 't', 'role': 'mistério', 'runtime': 'grok',
+                                              'approved': out['gate']['id']}, session='s')
+        self.assertFalse(err, approved)
+        self.assertEqual(approved['state'], 'queued')
+        self.assertIsNone(approved['effort'])
+        self.assertIsNone(approved['model'])
+        row_approved = self.queue.get(approved['request'])
+        self.assertIsNone(row_approved['effort'])
+        self.assertIsNone(row_approved['model'])
+
+    def test_gate_proposal_of_executor_grok_carries_runtime_grok(self):
+        _, out = self.call('dispatch', {'task': 't', 'role': 'executor', 'runtime': 'grok'}, session='s')
+        self.assertIn('gate', out)
+        self.assertEqual(out['gate']['proposal']['runtime'], 'grok')
 
     def test_claude_is_accepted(self):
         err, out = self.call('dispatch', {'task': 't', 'role': 'consultant', 'runtime': 'claude'}, session='s')

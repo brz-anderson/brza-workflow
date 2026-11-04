@@ -27,7 +27,7 @@ transcript da sessão do Claude (<config>/projects/*/<id>.jsonl), cujo id vem do
 
 Uso:
   brza sessions <nome>                                  # abre o chat no workspace; o `open` é opcional
-  brza sessions <nome> --agent codex                    # abre Codex; --agent agy abre Antigravity
+  brza sessions <nome> --agent grok                     # abre Grok; codex e agy (antigravity) também aceitos
   brza sessions <nome> --title "PLN-001: Coordenador"   # com o título na aba; sem ele, o <nome>
   brza sessions <nome> --rename                         # e dá o nome à sessão do Claude, para o correio
   brza sessions <nome> --prompt "<tarefa>"              # e manda a tarefa
@@ -348,7 +348,8 @@ def main():
     ap = argparse.ArgumentParser(prog='brza sessions', description=__doc__.split('\n\n')[0],
                                  epilog='Os outros verbos: brza sessions list|send|title|close --help.')
     ap.add_argument('name')
-    ap.add_argument('--agent', default='claude', help='o id do agente; padrão: claude; agy é alias de antigravity')
+    ap.add_argument('--agent', default='claude',
+                    help='o id do agente: claude, codex, grok ou antigravity (agy); padrão: claude')
     ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
     ap.add_argument('--rename', action='store_true', help='só Claude: manda o /rename <nome>, para o correio achar a sessão')
     ap.add_argument('--checkout', type=Path, default=WORKSPACE,
@@ -360,7 +361,12 @@ def main():
                     help='só Claude: espera a sessão no ar, e com --rename o nome, antes de anunciar')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
-    agent = 'antigravity' if args.agent == 'agy' else args.agent
+    AGENTS = {'claude': 'claude', 'codex': 'codex', 'grok': 'grok', 'antigravity': 'antigravity', 'agy': 'antigravity'}
+    agent = AGENTS.get(args.agent)
+    if agent is None:
+        print(f'CHECK:    {args.name}: --agent {args.agent} não é claude, codex, grok nem antigravity (agy); '
+              'nada foi aberto')
+        return 1
     if agent != 'claude' and (args.rename or args.wait):
         flags = ' e '.join(flag for flag, enabled in (('--rename', args.rename), ('--wait', args.wait)) if enabled)
         print(f'CHECK:    {args.name}: {flags} só tem suporte com --agent claude; agente escolhido: {agent}; nada foi aberto')

@@ -27,15 +27,15 @@ max_workers = 6
 enforce = true            # a chave de desligamento (M10)
 suggest_to_main = true
 
-[policy.roles.consultant]
+[policy.roles.consultant.claude]
 model = "sonnet"
 effort = "low"
 
-[policy.roles.executor]
+[policy.roles.executor.claude]
 model = "haiku"
 effort = "medium"
 
-[policy.roles.architect]
+[policy.roles.architect.claude]
 model = "opus"
 effort = "high"
 
@@ -66,7 +66,7 @@ class LoadTest(WorkspaceCase):
     def test_absent_file_gives_the_d4_defaults(self):
         config = pol.Policy(self.workspace()).config()
         self.assertEqual(config, pol.DEFAULTS)
-        self.assertEqual(config['policy.roles.architect.model'], 'opus')
+        self.assertEqual(config['policy.roles.architect.claude.model'], 'opus')
         self.assertEqual(config['quota.hard_cap_percent'], 90)
         self.assertNotIn('resolver.tev1_min_confidence', config)
         self.assertEqual(pol.Policy(None).config(), pol.DEFAULTS)
@@ -76,7 +76,7 @@ class LoadTest(WorkspaceCase):
         by_lib = pol.Policy(ws).config()
         by_parser = pol.Policy(ws, use_parse_toml=True).config()
         self.assertEqual(by_parser, by_lib)
-        self.assertEqual(by_lib['policy.roles.executor.model'], 'haiku')
+        self.assertEqual(by_lib['policy.roles.executor.claude.model'], 'haiku')
         self.assertEqual(by_lib['quota.hard_cap_percent'], 80)
         self.assertEqual(by_lib['resolver.haiku_max_budget_usd'], 0.02)
         self.assertEqual(by_lib['resolver.tev1_keep_alive'], '2m')
@@ -86,7 +86,7 @@ class LoadTest(WorkspaceCase):
         ws = self.workspace(TOML)
         with patch.dict(sys.modules, {'tomllib': None}):
             self.assertEqual(pol.parse_text(TOML)['resolver']['haiku_max_budget_usd'], 0.02)
-            self.assertEqual(pol.Policy(ws).config()['policy.roles.executor.effort'], 'medium')
+            self.assertEqual(pol.Policy(ws).config()['policy.roles.executor.claude.effort'], 'medium')
 
     def test_a_broken_file_is_an_error_that_names_the_file(self):
         ws = self.workspace('[policy\nenforce = true\n')
@@ -112,10 +112,10 @@ class DecideModelTest(WorkspaceCase):
         self.assertEqual((out['model'], out['effort'], out['reason']), ('opus', 'high', 'policy'))
 
     def test_the_request_counts_only_where_the_role_does_not_define_and_the_reason_says_so(self):
-        text = '[policy.roles.executor]\nmodel = "sonnet"\n'
+        text = '[policy.roles.executor.claude]\nmodel = "sonnet"\n'
         policy = self.policy(text)
         config = {**pol.DEFAULTS}
-        del config['policy.roles.executor.effort']
+        del config['policy.roles.executor.claude.effort']
         with patch.object(pol.Policy, 'config', return_value=config):
             out = policy.decide_model({'role': 'executor', 'effort': 'xhigh'})
         self.assertEqual((out['model'], out['effort']), ('sonnet', 'xhigh'))
@@ -154,6 +154,27 @@ class DecideModelTest(WorkspaceCase):
             def classify(self, text):
                 raise AssertionError('não devia chamar')
         self.assertEqual(self.policy().decide_model({'role': 'executor', 'task': 'x'}, Resolver())['model'], 'sonnet')
+
+    def test_codex_executor_defaults_to_gpt_6_1_sol_and_medium(self):
+        out = self.policy().decide_model({'role': 'executor', 'runtime': 'codex'})
+        self.assertEqual((out['model'], out['effort']), ('gpt-6.1-sol', 'medium'))
+
+    def test_antigravity_architect_defaults_to_gemini_4_argon_high_without_effort(self):
+        out = self.policy().decide_model({'role': 'architect', 'runtime': 'antigravity'})
+        self.assertEqual((out['model'], out['effort']), ('gemini-4-argon-high', None))
+
+    def test_mystery_role_outside_claude_does_not_call_resolver_and_gives_runtime_default(self):
+        class FailingResolver:
+            def classify(self, text):
+                raise AssertionError('não devia chamar')
+        out = self.policy().decide_model({'role': 'mistério', 'runtime': 'grok', 'task': 'x'}, FailingResolver())
+        self.assertEqual((out['model'], out['effort']), (None, None))
+        self.assertIn('padrão do runtime', out['reason'])
+
+    def test_effort_without_model_is_dropped_with_reason(self):
+        out = self.policy().decide_model({'role': 'mistério', 'runtime': 'grok', 'effort': 'low'})
+        self.assertEqual((out['model'], out['effort']), (None, None))
+        self.assertIn('o worker-start exige --model com --effort', out['reason'])
 
 
 class SuggestionTest(WorkspaceCase, ToolsCase):
@@ -300,11 +321,23 @@ class TypedTomlTest(ServiceCase):  # P4 final A2: o brza.toml confere chave e ti
 
     def test_an_out_of_range_or_wrongly_typed_port_and_role_row_are_refused(self):
         self.assert_refused('[mcp]\nport = 70000\n', 'mcp.port')
-        self.assert_refused('[policy.roles.executor]\nmodel = 3\n', 'policy.roles.executor.model')
+        self.assert_refused('[policy.roles.executor.claude]\nmodel = 3\n', 'policy.roles.executor.claude.model')
+
+    def test_flat_role_key_is_refused_with_helpful_message(self):
+        self.assert_refused('[policy.roles.executor]\nmodel = "sonnet"\n',
+                            'policy.roles.executor.model virou policy.roles.executor.claude.model')
+
+    def test_effort_outside_model_ladder_is_refused_with_ladder(self):
+        text = '[policy.roles.architect.grok]\nmodel = "grok-4.5"\neffort = "xhigh"\n'
+        self.service(text)
+        is_error, out = self.call('status')
+        self.assertTrue(is_error)
+        self.assertIn('grok-4.5', out)
+        self.assertIn('low, medium, high', out)
 
     def test_the_valid_file_and_the_sections_that_are_not_the_mcp_load(self):
         service = self.service('[workspace]\nname = "x"\nfoo = 1\n[orchestrator]\nmax_workers = 2\n'
-                               '[policy.roles.novo]\nmodel = "opus"\neffort = "high"\n')
+                                '[policy.roles.novo.claude]\nmodel = "opus"\neffort = "high"\n')
         self.assertFalse(self.call('status')[0])
         self.assertEqual(service.limits.get('orchestrator.max_workers'), 2)
 
