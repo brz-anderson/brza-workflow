@@ -187,6 +187,29 @@ class NoteTest(NoteFixture):
         text, _ = self.new_worklog_in_chat({}, None, None)
         self.assertIn('na sessão `<a escrever>`', text)
 
+    def test_new_worklog_in_a_non_claude_chat_does_not_discover_transcript_name(self):
+        """P9/A1: chat de outro runtime não usa o provider_session como transcript Claude."""
+        for agent in ('codex', 'grok', 'antigravity'):
+            with self.subTest(agent=agent):
+                chat = f'{agent}_x'
+                asked, sessions = self.fake_sessions({}, 'uuid-b', 'nome-claude')
+                with patch.dict('os.environ', {'ORCA_AGENT_SESSION_ID': chat}), \
+                        patch.dict(GLOBALS, {'sessions_module': lambda s=sessions: s}):
+                    os.environ.pop('CLAUDE_SESSION_NAME', None)
+                    code, out = self.run_note('new', 'worklog', f'nao-claude-{agent}')
+                self.assertEqual(code, 0, out)
+                text = (self.tree / 'work' / 'worklogs' / f'2026-10-28-nao-claude-{agent}.md').read_text()
+                self.assertIn('na sessão `<a escrever>`', text)
+                self.assertNotIn('nome-claude', text)
+                self.assertEqual(asked, [])
+
+        asked, sessions = self.fake_sessions({'chat_codex': {'agent': 'codex'}}, 'uuid-b', 'nome-claude')
+        with patch.dict('os.environ', {'ORCA_AGENT_SESSION_ID': 'chat_codex'}), \
+                patch.dict(GLOBALS, {'sessions_module': lambda: sessions}):
+            os.environ.pop('CLAUDE_SESSION_NAME', None)
+            self.assertIsNone(GLOBALS['session_name']())
+        self.assertEqual(asked, [])
+
     def test_empty_session_name_falls_back_to_available_source(self):
         """D10: nome vazio em CLAUDE_SESSION_NAME ou no session_map faz fallback para a fonte seguinte; sem fonte, None."""
         asked, sessions = self.fake_sessions({'claude_x': {'name': '   '}}, 'uuid-x', 'pln-fallback')
