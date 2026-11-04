@@ -919,4 +919,69 @@ class Pln008P2IndexAndLsTest(IndexFixture):
         self.assertEqual(code, 1, out)
         self.assertIn('ref-not-found', out)
 
+    def test_pln003_p1_master_index_ordering_properties_for_plans_and_notes(self):
+        # 1. Plano com priority, blocks (como lista inline) e deadline
+        plan_rel = 'plans/PLN-001-fluxo/PLN-001-plan.md'
+        self.write(
+            plan_rel,
+            '---\n'
+            'status: in_progress\n'
+            'phase: execution\n'
+            'description: Plano de fluxo.\n'
+            'opened: 2026-10-30\n'
+            'priority: high\n'
+            'blocks: [PLN-004]\n'
+            'deadline: 2026-11-15\n'
+            '---\n\n'
+            '# PLN-001: Plano de fluxo\n',
+        )
+        git('add', plan_rel, cwd=self.tree)
+        git('commit', '-q', '-m', 'docs: plan com ordering properties', cwd=self.tree)
+        git('push', '-q', cwd=self.tree)
+
+        code, out = self.run_note('index', '--rebuild', workstream=None)
+        self.assertEqual(code, 0, out)
+        state = GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+        plan_item = state['PLN-001']
+        self.assertEqual(plan_item['priority'], 'high')
+        self.assertEqual(plan_item['blocks'], ['PLN-004'])
+        self.assertEqual(plan_item['deadline'], '2026-11-15')
+
+        # 2. Issue com blocks em lista yaml (- id)
+        issue_rel = 'work/issues/bloqueia-fila.md'
+        self.write(
+            issue_rel,
+            '---\n'
+            'status: open\n'
+            'description: Trava a fila.\n'
+            'scope:\n'
+            '  - workspace\n'
+            'opened: 2026-11-02\n'
+            'priority: high\n'
+            'blocks:\n'
+            '  - PLN-002\n'
+            '  - PLN-003\n'
+            'deadline: 2026-11-05\n'
+            'owner: Anderson\n'
+            '---\n\n'
+            '# Bloqueia Fila\n',
+        )
+        code, out = self.commit_note(issue_rel)
+        self.assertEqual(code, 0, out)
+        state = GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+        issue_item = state['issue:bloqueia-fila']
+        self.assertEqual(issue_item['priority'], 'high')
+        self.assertEqual(issue_item['blocks'], ['PLN-002', 'PLN-003'])
+        self.assertEqual(issue_item['deadline'], '2026-11-05')
+
+        # 3. Alteração em blocks ou deadline gera evento changed
+        self.write(
+            issue_rel,
+            (self.tree / issue_rel).read_text().replace('deadline: 2026-11-05', 'deadline: 2026-11-06'),
+        )
+        code, out = self.commit_note(issue_rel)
+        self.assertEqual(code, 0, out)
+        state = GLOBALS['current_state'](git('show', f'master:{INDEX}', cwd=self.origin))
+        self.assertEqual(state['issue:bloqueia-fila']['event'], 'changed')
+        self.assertEqual(state['issue:bloqueia-fila']['deadline'], '2026-11-06')
 

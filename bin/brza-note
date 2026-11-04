@@ -943,13 +943,21 @@ def note_state(kind: str, text: str, key: str = '') -> dict:
         'title': title,
         'description': desc if isinstance(desc, str) and desc else h1,
     }
-    scalar_keys = ('status', 'phase', 'opened', 'priority', 'blocks', 'deadline', 'owner', 'type') if kind == 'plan' else (
-        'status', 'opened', 'priority', 'blocks', 'deadline', 'owner', 'type'
+    scalar_keys = ('status', 'phase', 'opened', 'priority', 'deadline', 'owner', 'type') if kind == 'plan' else (
+        'status', 'opened', 'priority', 'deadline', 'owner', 'type'
     )
     for k in scalar_keys:
         val = fm.get(k)
-        if isinstance(val, str) and val != '':
-            state[k] = val
+        if isinstance(val, str) and val.strip() != '':
+            state[k] = val.strip()
+    if 'blocks' in fm:
+        val = fm['blocks']
+        if isinstance(val, str) and val.strip():
+            state['blocks'] = val.strip()
+        elif isinstance(val, list):
+            items = [str(x).strip() for x in val if str(x).strip()]
+            if items:
+                state['blocks'] = items
     if 'depends_on' in fm:
         deps = as_list(fm['depends_on'])
         if deps:
