@@ -2,10 +2,11 @@
 """Abre, lista, manda mensagem, dá título e fecha as sessões de agentes em modo chat no BrzA Studio, pelo nome.
 
 O open abre o chat e dá à aba o título do --title, ou o <nome> sem ele, pelo `agentSession.rename` do app; o prompt da
-tarefa entra na abertura. O --rename manda antes o `/rename <nome>`, que dá o nome à sessão do Claude, e o prompt entra
-depois pelo `agentSession.send`, com `delivery: 'queue-if-active'`: ele espera na fila até o /rename terminar. Passe o
---rename quando a sessão for mandar ou receber correio: sem ele, ela entra no correio com um nome automático, como
-`<workspace>-5b`, que ninguém sabe antes de abrir.
+tarefa entra na abertura. Com --rename no Claude, manda antes o `/rename <nome>`, que dá o nome à sessão, e o prompt entra
+depois pelo `agentSession.send`, com `delivery: 'queue-if-active'`: ele espera na fila até o /rename terminar; no Codex,
+o nome vem do título da aba; no Grok e no Antigravity, o nome fica na aba e no mapa de sessões. Passe o --rename quando
+a sessão for mandar ou receber correio: sem ele, ela entra no correio com um nome automático, como `<workspace>-5b`,
+que ninguém sabe antes de abrir.
 
 O chat não passa pelo zsh de login, e a função `claude` do ~/.zshrc não roda. No workspace isso não falta: o chat
 lê o `.claude/settings.json` do projeto pelo `--setting-sources`. Num checkout do código, os hooks e a identidade só
@@ -14,17 +15,17 @@ assim mesmo.
 
 O --agent escolhe o agente (padrão: claude); agy vira antigravity antes do launch. As checagens de claude-brza,
 hooks, processos e transcripts só se aplicam a Claude. O --rename dá nome à sessão no Claude (pelo /rename) e no
-Codex (pelo título da aba gravado em session_index.jsonl); no Grok e Antigravity, dá o título da aba e grava no mapa,
-avisando em linha CHECK que o agente não recebe /rename pelo chat. Com --rename, o título da aba é sempre o <nome>,
-mesmo com --title. O --wait espera a sessão nos quatro agentes e, com --rename, a confirmação do nome nos runtimes que suportam.
+Codex (pelo título da aba gravado em session_index.jsonl, trocando o --title pelo nome); no Grok e Antigravity, dá o título
+da aba e grava no mapa, avisando em linha CHECK que o agente não recebe /rename pelo chat. O --wait espera a sessão nos
+quatro agentes e, com --rename, a confirmação do nome nos runtimes que suportam.
 
 O mapa de sessões é o .sessions/sessions.jsonl do workspace do cwd (o `brza_root.find`), fora do git, uma linha por evento: `open`, `session`
-(o id da sessão do Claude, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
+(o id da sessão do runtime, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
 aberto no app, ou que roda com o /rename (<config>/sessions/<pid>.json; o config é o ~/.claude ou o de uma conta do app,
 em <dados do app>/claude-profiles/<id>/home).
 
-O list, o send, o title e o close acham o chat pelo nome: o do mapa e, sem entrada, o último /rename gravado no
-transcript da sessão do Claude (<config>/projects/*/<id>.jsonl), cujo id vem do `agentSession.history`. O título da aba
+O list, o send, o title e o close acham o chat pelo nome: o do mapa e, sem entrada num chat Claude, o último /rename gravado no
+transcript da sessão (<config>/projects/*/<id>.jsonl), cujo id vem do `agentSession.history`. O título da aba
 é outro: é o nome do chat no app. Chat sem nenhum dos dois não tem nome e não é achado.
 
 Uso:
@@ -46,7 +47,7 @@ Uso:
 As linhas de saída do open são `open:     <nome>  (chat, <caminho>, <sessionId>)`, `running:  <nome>` e `CHECK:    …`.
 Saídas: 0 feito; 1 nome ausente ou repetido, chat num turno sem --force, o --wait vencido, ou o app sem resposta. O
 --json do list, do send, do title e do close é o contrato do roteador do PLN-003; o arquivo do mapa não é:
-  list   {"sessions": [{"name", "title", "chat", "claude_session", "worktree", "state", "source", "opened"}]}
+  list   {"sessions": [{"name", "title", "chat", "claude_session", "provider_session", "worktree", "state", "source", "opened"}]}
          source: "map", "transcript" ou null; opened: o horário do open no mapa, ou null
   send   {"sent": true, "name", "chat"}
   title  {"titled": true, "name", "chat", "title"}
@@ -221,18 +222,12 @@ def wait_for_name(name: str, agent: str = 'claude', sid: str | None = None) -> b
     if checker is None:
         return True
     deadline = time.monotonic() + WAIT_SECONDS
-    while time.monotonic() < deadline:
+    while True:
         if checker(name, sid):
             return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(1)
-    return False
-
-
-def _check_name(name: str, agent: str, sid: str | None) -> bool:
-    try:
-        return wait_for_name(name, agent, sid)
-    except TypeError:
-        return wait_for_name(name)
 
 
 def wait_for_session(chat: str) -> str | None:
@@ -276,6 +271,25 @@ def chat_name(claude_session: str) -> str | None:
     return name
 
 
+def chat_agent(chat: str, tab: dict | None = None) -> str | None:
+    """O agente do chat: pela aba, pelo mapa de sessões ou pelo prefixo do id do chat."""
+    if tab:
+        if agent := (tab.get('agent') or tab.get('agentSessionAgent')):
+            return agent
+    entry = session_map().get(chat)
+    if entry and entry.get('agent'):
+        return entry['agent']
+    if tab is None:
+        try:
+            for _, open_tab in open_tabs():
+                if open_tab.get('sessionId') == chat:
+                    return (open_tab.get('agent') or open_tab.get('agentSessionAgent')
+                            or next((a for a in ('claude', 'codex', 'grok', 'antigravity') if chat.startswith(f'{a}_')), None))
+        except (BrzaError, KeyError):
+            pass
+    return next((a for a in ('claude', 'codex', 'grok', 'antigravity') if chat.startswith(f'{a}_')), None)
+
+
 def chats() -> list[dict]:
     """Os chats abertos no app, na ordem das abas, com o nome do mapa ou do /rename; `tab` fica fora do --json."""
     mapped = session_map()
@@ -284,8 +298,7 @@ def chats() -> list[dict]:
         chat = tab['sessionId']
         entry = mapped.get(chat)
         # O agente pela chave real, a legada do app, o mapa e o prefixo do id do chat do app.
-        agent = (tab.get('agent') or tab.get('agentSessionAgent') or (entry or {}).get('agent')
-                 or next((a for a in ('claude', 'codex', 'grok', 'antigravity') if chat.startswith(f'{a}_')), None))
+        agent = chat_agent(chat, tab=tab)
         claude_session = provider_session(chat) if agent == 'claude' else None
         prov_session = claude_session if agent == 'claude' else ((entry or {}).get('provider_session'))
         name = entry['name'] if entry else (chat_name(claude_session) if claude_session else None)
@@ -420,7 +433,7 @@ def main():
         print(f'recusado: {e}')
         return 1
     prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
-    if args.rename and args.title:
+    if agent == 'codex' and args.rename and args.title:
         print(f'CHECK:    {args.name}: o --title foi trocado pelo nome')
         title = args.name
     else:
@@ -431,7 +444,8 @@ def main():
     if agent == 'claude' and (blocker := chat_blocker(checkout)):
         print(f'CHECK:    {args.name}: {blocker}')
     if args.dry_run:
-        extras = [f'agente {agent}', f'título "{title}"', *(['com /rename'] if args.rename else []),
+        extras = [f'agente {agent}', f'título "{title}"',
+                  *(['com /rename'] if (args.rename and agent == 'claude') else (['com rename'] if args.rename else [])),
                   *(['com prompt'] if prompt else [])]
         print(f'abriria:  {args.name}  (chat, {checkout}), {", ".join(extras)}')
         return 0
@@ -470,7 +484,7 @@ def main():
             return 1
         record('session', name=args.name, chat=session_id, provider_session=sid,
                **({'claude_session': sid} if agent == 'claude' else {}))
-        if args.rename and NAMED.get(agent) is not None and not _check_name(args.name, agent, sid):
+        if args.rename and NAMED.get(agent) is not None and not wait_for_name(args.name, agent, sid):
             detail = 'confira o /rename na aba' if agent == 'claude' else 'confira a aba'
             print(f'CHECK:    {args.name} não registrou o nome em {WAIT_SECONDS:g} s; {detail}')
             return 1

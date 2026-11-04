@@ -436,14 +436,23 @@ class CommandTest(unittest.TestCase):
             self.assertTrue(events[0]['renamed'])
             self.assertEqual(events[1]['provider_session'], 'uuid-codex-1')
 
-        # Vencendo o prazo com thread_name diferente ou ausente, sai com erro.
+        # Vencendo o prazo com thread_name diferente ou ausente, sai com erro após consultar o leitor.
         index_file.write_text(json.dumps({'id': 'uuid-codex-1', 'thread_name': 'outro_nome'}) + '\n')
+        read_threads = []
+        real_thread_name = GLOBALS['codex_thread_name']
+
+        def spy_thread_name(sid):
+            read_threads.append(sid)
+            return real_thread_name(sid)
+
         with patch.dict(os.environ, {'CODEX_HOME': str(codex_dir)}), \
                 patch.dict(GLOBALS, {'WAIT_SECONDS': 0,
+                                     'codex_thread_name': spy_thread_name,
                                      'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
             code, out = self.run_main('correcao', '--agent', 'codex', '--rename', '--wait')
             self.assertEqual(code, 1)
             self.assertIn('CHECK:    correcao não registrou o nome em 0 s; confira a aba', out)
+            self.assertEqual(read_threads, ['uuid-codex-1'])
 
     def test_rename_without_a_reader_gives_tab_and_map_and_a_check_line(self):
         for requested, canonical in (('grok', 'grok'), ('antigravity', 'antigravity'), ('agy', 'antigravity')):
@@ -616,9 +625,47 @@ class CommandTest(unittest.TestCase):
     def test_wait_with_rename_also_waits_for_the_name(self):
         self.app.providers['claude_n'] = 'uuid-n'
         waited = []
-        with patch.dict(GLOBALS, {'wait_for_name': lambda name: waited.append(name) or True}):
+        with patch.dict(GLOBALS, {'wait_for_name': lambda name, agent, sid: waited.append((name, agent, sid)) or True}):
             code, _ = self.run_main('pln-009', '--rename', '--wait')
-        self.assertEqual((code, waited), (0, ['pln-009']))
+        self.assertEqual((code, waited), (0, [('pln-009', 'claude', 'uuid-n')]))
+
+    def test_rename_preserves_title_flag_on_claude_and_others(self):
+        """P10/A1: a troca do título da aba pelo nome vale só no Codex; Claude e outros mantêm o --title."""
+        self.app.providers['claude_n'] = 'uuid-claude-1'
+        code, out = self.run_main('pln-010', '--title', 'Título do Claude', '--rename', '--prompt', 'tarefa')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('o --title foi trocado pelo nome', out)
+        rename_calls = [c for c in self.calls('agentSession.rename') if c['sessionId'] == 'claude_n']
+        self.assertEqual(rename_calls[-1]['name'], 'Título do Claude')
+        self.assertEqual(self.read_map()[0]['title'], 'Título do Claude')
+
+        for agent in ('grok', 'antigravity'):
+            with self.subTest(agent=agent):
+                self.app.calls.clear()
+                self.launches.clear()
+                if self.map.exists():
+                    self.map.unlink()
+                chat = f'{agent}_n'
+                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                    code, out = self.run_main('correcao', '--agent', agent, '--title', 'Título Customizado', '--rename')
+                self.assertEqual(code, 0, out)
+                self.assertNotIn('o --title foi trocado pelo nome', out)
+                rename_calls = [c for c in self.calls('agentSession.rename') if c['sessionId'] == chat]
+                self.assertEqual(rename_calls[-1]['name'], 'Título Customizado')
+                self.assertEqual(self.read_map()[0]['title'], 'Título Customizado')
+
+    def test_dry_run_says_with_slash_rename_only_for_claude(self):
+        """P10/A3: dry-run diz 'com /rename' no Claude e 'com rename' nos outros agentes."""
+        code, out = self.run_main('pln-claude', '--rename', '--dry-run')
+        self.assertEqual(code, 0)
+        self.assertIn('com /rename', out)
+
+        for agent in ('codex', 'grok', 'antigravity', 'agy'):
+            with self.subTest(agent=agent):
+                code, out = self.run_main('correcao', '--agent', agent, '--rename', '--dry-run')
+                self.assertEqual(code, 0)
+                self.assertIn('com rename', out)
+                self.assertNotIn('com /rename', out)
 
     def test_wait_without_the_claude_session_in_time_exits_one(self):
         with patch.dict(GLOBALS, {'WAIT_SECONDS': 0}):

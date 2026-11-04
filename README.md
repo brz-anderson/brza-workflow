@@ -114,8 +114,9 @@ brza sessions correcao-cli --agent codex --checkout "$HOME/Projects/brza-workflo
 
 O `--title` define o título da aba (sem ele, usa o nome), e `--prompt` ou `--prompt-file` envia a tarefa na abertura.
 O `--dry-run` mostra o agente canônico e o checkout sem abrir sessão. Só Claude usa as checagens de `claude-brza` e
-hooks; `--rename` e `--wait` também são exclusivos de Claude e são recusados com outros agentes antes do lançamento.
-O `--rename` envia `/rename` ao Claude, enquanto o título da aba usa `agentSession.rename` para todos os agentes.
+hooks. O `--wait` espera a sessão nos quatro agentes e, com `--rename`, a confirmação do nome nos runtimes que suportam.
+O `--rename` envia `/rename` ao Claude e dá o nome ao Codex pelo título da aba; no Grok e no Antigravity, o nome fica
+na aba e no mapa de sessões.
 
 O mapa local de sessões associa o nome ao chat de qualquer agente. `list`, `send`, `title` e `close` mantêm seus
 contratos, inclusive `--json`; `claude_session` fica `null` para outros agentes. A descoberta de nomes fora do mapa
