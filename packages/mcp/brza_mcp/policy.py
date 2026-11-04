@@ -17,6 +17,8 @@ import math
 import re
 from pathlib import Path
 
+from . import runtimes
+
 ROLES = ('consultant', 'executor', 'architect')
 LAYER_ROLE = {'alta': 'architect', 'media': 'executor', 'rapida': 'consultant'}  # a camada do AGENTS.md -> a linha
 
@@ -25,9 +27,18 @@ DEFAULTS = {
     'orchestrator.max_workers': 6,
     'policy.enforce': True,
     'policy.suggest_to_main': False,  # até haver sinal do que a sessão principal faz (R6.4)
-    'policy.roles.consultant.model': 'sonnet', 'policy.roles.consultant.effort': 'low',
-    'policy.roles.executor.model': 'sonnet', 'policy.roles.executor.effort': 'medium',
-    'policy.roles.architect.model': 'opus', 'policy.roles.architect.effort': 'high',
+    'policy.roles.consultant.claude.model': 'sonnet', 'policy.roles.consultant.claude.effort': 'low',
+    'policy.roles.executor.claude.model': 'sonnet', 'policy.roles.executor.claude.effort': 'medium',
+    'policy.roles.architect.claude.model': 'opus', 'policy.roles.architect.claude.effort': 'high',
+    'policy.roles.consultant.codex.model': 'gpt-6.1-sol', 'policy.roles.consultant.codex.effort': 'low',
+    'policy.roles.executor.codex.model': 'gpt-6.1-sol', 'policy.roles.executor.codex.effort': 'medium',
+    'policy.roles.architect.codex.model': 'gpt-6-astra', 'policy.roles.architect.codex.effort': 'high',
+    'policy.roles.consultant.grok.model': 'grok-4.7', 'policy.roles.consultant.grok.effort': 'low',
+    'policy.roles.executor.grok.model': 'grok-4.7', 'policy.roles.executor.grok.effort': 'high',
+    'policy.roles.architect.grok.model': 'grok-4.7', 'policy.roles.architect.grok.effort': 'xhigh',
+    'policy.roles.consultant.antigravity.model': 'gemini-4-argon-low',
+    'policy.roles.executor.antigravity.model': 'gemini-4-argon-medium',
+    'policy.roles.architect.antigravity.model': 'gemini-4-argon-high',
     'quota.soft_cap_percent': 55,
     'quota.hard_cap_percent': 90,
     'quota.max_sessions_per_account': 2,
@@ -81,12 +92,13 @@ def check_value(key, value):
 
 
 NAMESPACES = ('mcp', 'orchestrator', 'policy', 'quota', 'machine', 'resolver')  # o resto do brza.toml não é daqui
-_ROLE_KEY = re.compile(r'^policy\.roles\.[A-Za-z0-9_-]+\.(model|effort)$')
+_ROLE_KEY = re.compile(rf'^policy\.roles\.[A-Za-z0-9_-]+\.({"|".join(runtimes.RUNTIMES)})\.(model|effort)$')
+_FLAT_ROLE_KEY = re.compile(r'^policy\.roles\.([A-Za-z0-9_-]+)\.(model|effort)$')
 
 
 def check_file_key(key, value):
     """Confere uma chave plana do `brza.toml` com a mesma tabela da ferramenta `config`, mais `mcp.port` e as linhas
-    `policy.roles.<papel>.{model,effort}`; chave desconhecida ou tipo errado levanta `ValueError`."""
+    `policy.roles.<papel>.<runtime>.{model,effort}`; chave desconhecida ou tipo errado levanta `ValueError`."""
     if key.split('.')[0] not in NAMESPACES:
         return
     if key in KEYS:
@@ -94,11 +106,37 @@ def check_file_key(key, value):
     elif key == 'mcp.port':
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
             raise ValueError(f'mcp.port é um inteiro de 1 a 65535, veio {json.dumps(value)}')
-    elif _ROLE_KEY.match(key):
+    elif m := _ROLE_KEY.match(key):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f'{key} é texto não vazio, veio {json.dumps(value)}')
+        runtime, field = m.group(1), m.group(2)
+        if field == 'effort':
+            runtime_obj = runtimes.get(runtime)
+            if value not in runtime_obj.efforts:
+                raise ValueError(f'{key}: esforço {value!r} fora do teto do runtime {runtime} '
+                                 f'({", ".join(runtime_obj.efforts)})')
+    elif m := _FLAT_ROLE_KEY.match(key):
+        raise ValueError(f'{key} virou policy.roles.{m[1]}.claude.{m[2]} (PLN-013/R3.1)')
     else:
         raise ValueError(f'chave desconhecida: {key!r} (confira o nome)')
+
+
+def check_role_rows(values):
+    """Depois do flatten: o esforço de cada linha contra a escada do modelo dela, `runtimes.efforts(runtime, model)`
+    (REV-010/A6). Fora da escada levanta ValueError com a linha, o modelo e a escada."""
+    pairs = set()
+    for key in values:
+        m = re.match(rf'^policy\.roles\.([A-Za-z0-9_-]+)\.({"|".join(runtimes.RUNTIMES)})\.', key)
+        if m:
+            pairs.add((m.group(1), m.group(2)))
+    for role, runtime in sorted(pairs):
+        effort = values.get(f'policy.roles.{role}.{runtime}.effort')
+        if effort is not None:
+            model = values.get(f'policy.roles.{role}.{runtime}.model')
+            allowed = runtimes.efforts(runtime, model)
+            if effort not in allowed:
+                raise ValueError(f'policy.roles.{role}.{runtime}: esforço {effort!r} fora da escada do modelo '
+                                 f'{model!r} ({", ".join(allowed)})')
 
 
 _FLOAT_LINE = re.compile(r'^(\s*[A-Za-z0-9_-]+\s*=\s*)(-?\d+\.\d+)(\s*(?:#.*)?)$')
@@ -170,6 +208,8 @@ class Policy:
             found = flatten(parse_text(path.read_text(), self.use_parse_toml))
             for key, value in found.items():  # a chave com erro de digitação some sem erro, e o tipo errado estoura depois
                 check_file_key(key, value)
+            merged = {**DEFAULTS, **found}
+            check_role_rows(merged)
         except (OSError, ValueError) as e:  # tomllib.TOMLDecodeError e brza_root.TomlError são ValueError
             raise PolicyError(f'{path}: {e}') from e
         values.update(found)
@@ -181,10 +221,11 @@ class Policy:
 
     # ---- o modelo ----
 
-    def role_row(self, role, config=None) -> dict | None:
+    def role_row(self, role, runtime='claude', config=None) -> dict | None:
+        """A linha do papel NO runtime; nunca a de outro runtime."""
         config = self.config() if config is None else config
-        row = {f: config[f'policy.roles.{role}.{f}'] for f in ('model', 'effort')
-               if config.get(f'policy.roles.{role}.{f}') is not None}
+        row = {f: config[f'policy.roles.{role}.{runtime}.{f}'] for f in ('model', 'effort')
+               if config.get(f'policy.roles.{role}.{runtime}.{f}') is not None}
         return row or None
 
     def decide_model(self, request, resolver=None) -> dict:
@@ -198,15 +239,22 @@ class Policy:
         role, asked = request.get('role'), {k: request.get(k) for k in ('model', 'effort')}
         if not config.get('policy.enforce', True):
             return {**asked, 'reason': 'passthrough', 'role': role, 'resolver': None}
-        row, resolved, reason = self.role_row(role, config), None, 'policy'
-        if row is None:
-            row = self.role_row('consultant', config) or {}
+        runtime = runtimes.get(request.get('runtime')).name
+        row = self.role_row(role, runtime, config)
+        resolved, reason = None, 'policy'
+        if row is None and runtime == 'claude':
+            row = self.role_row('consultant', 'claude', config) or {}
             reason = 'default_role'
             if resolver is not None and request.get('task'):
                 resolved = resolver.classify(request['task'])
-                layer_row = self.role_row(LAYER_ROLE.get(resolved.get('layer')), config)
+                layer_row = self.role_row(LAYER_ROLE.get(resolved.get('layer')), 'claude', config)
                 if layer_row:
                     row, reason = layer_row, f'resolver:{resolved["path"]}'
+        elif row is None:
+            # fora do Claude (REV-010/A7): sem resolver, sem a linha de outro papel; o pedido vale onde trouxe
+            # model/effort, e o resto fica None, com reason 'default_role; padrão do runtime'
+            row = {}
+            reason = 'default_role; padrão do runtime'
         out, notes = {}, []
         for field in ('model', 'effort'):
             if row.get(field) is not None:
@@ -218,6 +266,9 @@ class Policy:
                 out[field] = None
         if notes:
             reason = f'{reason}; ' + '; '.join(notes)
+        if out.get('effort') is not None and out.get('model') is None:
+            out['effort'] = None
+            reason = f'{reason}; o worker-start exige --model com --effort'
         return {**out, 'reason': reason, 'role': role, 'resolver': resolved}
 
     def suggestion(self) -> dict | None:
@@ -225,7 +276,7 @@ class Policy:
         config = self.config()
         if not config.get('policy.enforce', True) or not config.get('policy.suggest_to_main', False):
             return None
-        row = self.role_row('architect', config)
+        row = self.role_row('architect', 'claude', config)
         if row is None:
             return None
         return {**row, 'role': 'architect',

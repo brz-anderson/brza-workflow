@@ -177,7 +177,7 @@ class ConfigTest(ToolsCase):
         self.assertIsNone(self.call('config', {'key': 'quota.hard_cap_percent'})[1]['value'])
 
     def test_an_unknown_key_is_refused(self):
-        for key in ('policy.roles.executor.model', 'mcp.port', 'foo', 'quota'):
+        for key in ('policy.roles.executor.claude.model', 'mcp.port', 'foo', 'quota'):
             err, out = self.call('config', {'key': key, 'value': 1})
             self.assertTrue(err, key)
             self.assertIn(key, out)

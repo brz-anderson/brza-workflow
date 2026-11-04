@@ -18,6 +18,7 @@ import subprocess
 import threading
 
 from . import clients as clients_mod
+from . import runtimes
 
 AGENT = 'claude'
 DEFAULT_INTERVAL = 15.0
@@ -149,7 +150,7 @@ class Scheduler:
         state = {'client': client, 'run': run, 'task': task, 'dispatch': None}
         if save:
             save(dict(state))
-        args = ['worker-start', '--task', task, '--run', run, '--agent', AGENT]
+        args = ['worker-start', '--task', task, '--run', run, '--agent', runtimes.get(request.get('runtime')).agent]
         if request.get('model'):
             args += ['--model', request['model']]
             if request.get('effort'):  # o CLI exige --model com --effort

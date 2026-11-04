@@ -165,7 +165,7 @@ class Limits:
 
     def _account_matches(self, request, measures):
         account = request.get('account')
-        if not account or not self.has_active:
+        if not account or not self.has_active or (request.get('runtime') or 'claude') != 'claude':
             return None
         active = self._active(request)
         if account != active:

@@ -206,6 +206,15 @@ class QuotaTest(unittest.TestCase):
         self.assertEqual(queue.get(waiting)['held_by'], 'account_sessions')
         self.assertEqual(limits.last_measures['account']['account'], 'ADM')
 
+    def test_a_grok_request_with_system_default_and_claude_active_on_another_account_is_admitted(self):
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.max_sessions_per_account': 1}, usage=Usage(None), machine=machine(),
+                            clock=Clock(), active=lambda: 'ADM')
+        rid = queue.enqueue(task='t', role='consultant', account='systemDefault', runtime='grok')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertTrue(decision.admit)
+        self.assertNotEqual(decision.ceiling, 'account_active')
+
     def test_a_vanished_window_is_pruned_on_the_next_record(self):  # P2 O-A12
         queue = q.Queue(':memory:')
         queue.record_usage(snap(5, resets=1_000_000), 900_000)

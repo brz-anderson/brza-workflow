@@ -82,6 +82,25 @@ class OpenTest(unittest.TestCase):
         state = json.loads(queue._all('SELECT session FROM workers')[0]['session'])
         self.assertEqual(state, {'client': 'studio', 'run': 'run_1', 'task': 'task_1', 'dispatch': 'disp_1'})
 
+    def test_worker_start_uses_the_agent_of_the_runtime(self):
+        queue, scheduler, cli_ = make()
+        add(queue, runtime='grok', client='studio')
+        scheduler.tick()
+        self.assertEqual(cli_.calls[2][0][3:9], ['--task', 'task_1', '--run', 'run_1', '--agent', 'grok'])
+
+    def test_codex_executor_and_antigravity_architect_launch_args(self):
+        queue, scheduler, cli_ = make()
+        add(queue, runtime='codex', model='gpt-6.1-sol', effort='medium', client='studio')
+        scheduler.tick()
+        self.assertEqual(cli_.calls[2][0][3:], ['--task', 'task_1', '--run', 'run_1', '--agent', 'codex',
+                                                '--model', 'gpt-6.1-sol', '--effort', 'medium', '--json'])
+
+        queue2, scheduler2, cli2_ = make()
+        add(queue2, runtime='antigravity', model='gemini-4-argon-high', client='studio')
+        scheduler2.tick()
+        self.assertEqual(cli2_.calls[2][0][3:], ['--task', 'task_1', '--run', 'run_1', '--agent', 'antigravity',
+                                                 '--model', 'gemini-4-argon-high', '--json'])
+
     def test_orca_header_picks_the_orca_cli_and_data_dir(self):
         queue, scheduler, cli_ = make()
         add(queue, client='orca')

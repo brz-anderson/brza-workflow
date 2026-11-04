@@ -19,6 +19,7 @@ from . import clients as clients_mod
 from . import limits as limits_mod
 from . import policy as policy_mod
 from . import queue as queue_mod
+from . import runtimes
 from .telemetry import Telemetry
 
 ROLE_CONSULTANT = 'consultant'
@@ -29,7 +30,7 @@ _ARGUMENTS = _STRINGS + ('runtime', 'deadline', 'blocks', 'priority')
 
 DISPATCH_SCHEMA = {'type': 'object', 'required': ['task', 'role'], 'properties': {
     'task': {'type': 'string'}, 'role': {'type': 'string'}, 'target': {'type': 'string'},
-    'runtime': {'enum': list(RUNTIMES)}, 'model': {'type': 'string'}, 'effort': {'type': 'string'},
+    'runtime': {'enum': [*runtimes.RUNTIMES, *runtimes.ALIASES]}, 'model': {'type': 'string'}, 'effort': {'type': 'string'},
     'account': {'type': 'string'}, 'ref': {'type': 'string'}, 'deadline': {'type': 'string', 'format': 'date'},
     'blocks': {'type': 'array', 'items': {'type': 'string'}}, 'priority': {'enum': list(queue_mod.PRIORITIES)},
     'caller': {'type': 'string'}, 'approved': {'type': 'string'}}}
@@ -189,8 +190,11 @@ class Orchestrator:
         for name in _STRINGS:
             if name in args and not isinstance(args[name], str):
                 raise ToolError(f'{name} deve ser texto, veio {json.dumps(args[name])}')
-        if 'runtime' in args and args['runtime'] not in RUNTIMES:
-            raise ToolError(f'runtime {args["runtime"]!r} não é aceito: só "claude" (o M4 é fase 3)')
+        if 'runtime' in args:
+            try:
+                args = {**args, 'runtime': runtimes.get(args['runtime']).name}
+            except KeyError:
+                raise ToolError(f'runtime {args["runtime"]!r} não é aceito: claude, codex, grok ou antigravity (agy)') from None
         if 'priority' in args and args['priority'] not in queue_mod.PRIORITIES:
             raise ToolError(f'priority deve ser high, medium ou low, veio {json.dumps(args["priority"])}')
         if 'deadline' in args:
@@ -212,6 +216,9 @@ class Orchestrator:
                 raise ToolError('chamador desconhecido: o header X-Brza-Session não veio e o argumento caller falta')
             if 'approved' in args:
                 return self.approve(args['approved'], caller, args)
+            if args.get('runtime', 'claude') != 'claude' and 'account' in args:
+                raise ToolError('account fora do Claude entra na E2 do PLN-013: tire o account, e o worker abre na conta padrão '
+                                'do runtime')
             fields = {k: args[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref',
                                            'deadline', 'blocks', 'priority') if k in args}
             fields.setdefault('runtime', 'claude')  # o teto de sessões conta por runtime: pedido sem ele escaparia
@@ -221,7 +228,10 @@ class Orchestrator:
                 fields['client'] = client
             if user_data:  # o perfil de outro build (brza-dev): o worker abre no runtime dele
                 fields['user_data'] = user_data
-            if 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
+            if fields['runtime'] != 'claude':
+                fields['account'] = (self.accounts.active_id(runtime=fields['runtime'], **self._for(client, user_data))
+                                     if self.accounts and hasattr(self.accounts, 'active_id') else None) or accounts_mod.SYSTEM_DEFAULT
+            elif 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
                 fields['account'] = self.normalize_account(fields['account'], client, user_data)
             fields.setdefault('account', '')  # sem `account`: `''`, e o `Limits` o conta na ativa da hora da admissão
             decided = self.policy.decide_model(fields, self.resolver)
@@ -249,7 +259,7 @@ class Orchestrator:
             self.telemetry.policy(self.queue.get(request), decided)
             self.telemetry.emit('gated', self.queue.get(request), reason=reason, gate=gate_id)
             # a proposta é o que o pedido guardado vai ser, depois da política: o que Anderson aprova é o que roda
-            proposal = {k: fields[k] for k in ('task', 'role', 'target', 'model', 'effort', 'account', 'ref')
+            proposal = {k: fields[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref')
                         if fields.get(k)}
             proposal['reason'] = decided['reason']
             return {'gate': {'id': gate_id, 'reason': reason, 'proposal': proposal}}
