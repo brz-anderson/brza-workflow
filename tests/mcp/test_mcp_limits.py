@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mcp_support import paths  # noqa: F401
 
+from brza_mcp import accounts as acc  # noqa: E402
 from brza_mcp import limits as lim  # noqa: E402
 from brza_mcp import queue as q  # noqa: E402
 
@@ -214,6 +215,41 @@ class QuotaTest(unittest.TestCase):
         decision = limits.decide(queue.get(rid), queue)
         self.assertTrue(decision.admit)
         self.assertNotEqual(decision.ceiling, 'account_active')
+
+    def test_codex_request_at_95_percent_holds_in_account_quota(self):
+        codex_snap = {'account': 'systemDefault', 'runtime': 'codex',
+                      'windows': [{'name': 'session', 'usedPercent': 95, 'resetsAt': RESETS}]}
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.hard_cap_percent': 90},
+                            usage=lambda account, runtime, **kw: codex_snap if runtime == 'codex' else None)
+        rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='systemDefault')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_quota')
+        self.assertIn('session', decision.reason)
+        queue.close()
+
+    def test_antigravity_request_with_weekly_at_99_percent_holds_in_account_quota(self):
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, FIXTURE.read_text(), ''))
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.hard_cap_percent': 90}, usage=accounts.usage, active=accounts.active_id)
+        rid = queue.enqueue(task='t-agy', role='consultant', runtime='antigravity', account='systemDefault')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_quota')
+        self.assertIn('weekly', decision.reason)
+        queue.close()
+
+    def test_codex_request_with_account_different_from_active_holds_in_account_active(self):
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, FIXTURE.read_text(), ''))
+        queue = q.Queue(':memory:')
+        limits = lim.Limits(active=accounts.active_id, usage=accounts.usage)
+        rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='outra-conta')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_active')
+        self.assertIn('outra-conta', decision.reason)
+        queue.close()
 
     def test_a_vanished_window_is_pruned_on_the_next_record(self):  # P2 O-A12
         queue = q.Queue(':memory:')

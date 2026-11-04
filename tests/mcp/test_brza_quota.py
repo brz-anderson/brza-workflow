@@ -58,11 +58,29 @@ class QuotaTest(HomeCase):
         self.assertEqual(code, 0)
         report = json.loads(out)['accounts']
         default = next(a for a in report if a['account'] == 'systemDefault')
+        self.assertEqual(default.get('runtime'), 'claude')
         self.assertEqual([(w['name'], w['used'], w['resets_at'], w['projected']) for w in default['windows']],
                          [('session', 10, 1793701800586, 10.0), ('weekly', 29, 1794114000586, 29.0),
                           ('fableWeekly', 0, 1794114000000, 0.0)])
         self.assertEqual(default['cap'], 90.0)
-        self.assertEqual(sum(1 for a in report if not a['windows']), 2)
+        self.assertEqual(sum(1 for a in report if a.get('runtime') == 'claude' and not a['windows']), 2)
+
+    def test_the_report_includes_codex_and_antigravity_with_their_runtime(self):
+        code, out, _ = self.run_quota('--json')
+        self.assertEqual(code, 0)
+        report = json.loads(out)['accounts']
+        codex_rows = [a for a in report if a.get('runtime') == 'codex']
+        agy_rows = [a for a in report if a.get('runtime') == 'antigravity']
+        self.assertTrue(codex_rows)
+        self.assertTrue(agy_rows)
+        codex_active = next(a for a in codex_rows if a['active'])
+        self.assertEqual(codex_active['runtime'], 'codex')
+        self.assertEqual([(w['name'], w['used']) for w in codex_active['windows']],
+                         [('session', 77), ('weekly', 29)])
+        agy_active = next(a for a in agy_rows if a['active'])
+        self.assertEqual(agy_active['runtime'], 'antigravity')
+        self.assertEqual([(w['name'], w['used']) for w in agy_active['windows']],
+                         [('session', 12), ('weekly', 99)])
 
     def test_the_cap_comes_from_the_brza_toml_and_the_overrides_like_in_the_server(self):  # P5 F-A3 = O-A9
         ws = self.tmp / 'ws'

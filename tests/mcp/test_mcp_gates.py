@@ -179,7 +179,7 @@ class GateTest(ToolsCase):
         err2, out2 = self.call('dispatch', {'task': 't2', 'role': 'executor', 'runtime': 'grok',
                                            'account': 'outra-conta', 'approved': gate2['id']}, session='s1')
         self.assertTrue(err2)
-        self.assertIn('account fora do Claude entra na E2 do PLN-013', out2)
+        self.assertIn('o grok tem uma conta só no app (PLN-013/R2.1)', out2)
 
     def test_the_gate_survives_the_service(self):
         gate = self.gate({'task': 't', 'role': 'executor'})

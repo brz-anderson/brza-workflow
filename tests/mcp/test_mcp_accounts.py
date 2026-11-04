@@ -38,29 +38,58 @@ def full():
 class ParseTest(unittest.TestCase):
     def test_the_fixture_becomes_accounts_and_the_active_usage_snapshot(self):
         data = acc.parse(FIXTURE)
-        self.assertEqual([a['id'] for a in data['accounts']], ['systemDefault', '8eee0e1b-f5d7-40ba-8337-8cae0df3a062',
-                                                              'c2e4f85c-388a-4603-8edc-a0844496c902'])
-        snap = data['usage']['systemDefault']
+        claude = data['claude']
+        self.assertEqual([a['id'] for a in claude['accounts']], ['systemDefault', '8eee0e1b-f5d7-40ba-8337-8cae0df3a062',
+                                                                 'c2e4f85c-388a-4603-8edc-a0844496c902'])
+        snap = claude['usage']['systemDefault']
         self.assertEqual((snap['account'], snap['runtime']), ('systemDefault', 'claude'))
         self.assertEqual([(w['name'], w['usedPercent'], w['resetsAt']) for w in snap['windows']],
                          [('session', 10, 1793701800586), ('weekly', 29, 1794114000586),
                           ('fableWeekly', 0, 1794114000000)])  # `monthly: null` fica de fora
-        self.assertNotIn(ADM, data['usage'])  # a conta sem uso fica sem instantâneo
+        self.assertNotIn(ADM, claude['usage'])  # a conta sem uso fica sem instantâneo
+
+        # Codex e Antigravity têm uso com seu runtime; Grok sem uso e com o erro dele
+        codex_snap = data['codex']['usage']['systemDefault']
+        self.assertEqual((codex_snap['account'], codex_snap['runtime']), ('systemDefault', 'codex'))
+        self.assertEqual([(w['name'], w['usedPercent']) for w in codex_snap['windows']],
+                         [('session', 77), ('weekly', 29)])
+
+        agy_snap = data['antigravity']['usage']['systemDefault']
+        self.assertEqual((agy_snap['account'], agy_snap['runtime']), ('systemDefault', 'antigravity'))
+        self.assertEqual([(w['name'], w['usedPercent']) for w in agy_snap['windows']],
+                         [('session', 12), ('weekly', 99)])
+
+        self.assertEqual(data['grok']['usage'], {})
+        self.assertEqual(data['grok']['error'], 'Grok did not report a usage percentage for this account')
 
     def test_only_the_real_shape_is_read_and_the_accounts_outside_claude_are_ignored(self):  # P2 final A2
         old = copy.deepcopy(FIXTURE)
         old['result']['accounts'] = {'claude': old['result']['claude']['accounts']}  # a forma inventada da fixture antiga
         del old['result']['claude']['accounts']
-        self.assertEqual([a['id'] for a in acc.parse(old)['accounts']], ['systemDefault'])
+        self.assertEqual([a['id'] for a in acc.parse(old)['claude']['accounts']], ['systemDefault'])
+
+    def test_system_default_of_codex_and_claude_do_not_mix_in_queue_samples(self):
+        data = acc.parse(FIXTURE)
+        queue = q.Queue(':memory:')
+        limits = lim.Limits()
+        acc.quota_report(data, queue, limits, now_ms=1_000_000)
+        claude_samples = queue.samples('systemDefault', 'claude', 'session', 1793701800586)
+        codex_samples = queue.samples('systemDefault', 'codex', 'session', 1793697776000)
+        self.assertEqual(len(claude_samples), 1)
+        self.assertEqual(claude_samples[0][1], 10)  # Claude a 10%
+        self.assertEqual(len(codex_samples), 1)
+        self.assertEqual(codex_samples[0][1], 77)  # Codex a 77%
+        self.assertNotEqual(claude_samples[0][1], codex_samples[0][1])
+        queue.close()
 
     def test_the_full_shape_gives_homes_labels_and_the_inactive_usage(self):
         data = acc.parse(full())
-        default, managed = data['accounts']
+        default, managed = data['claude']['accounts']
         self.assertTrue(default['system_default'] and default['active'])
         self.assertEqual((managed['label'], managed['home'], managed['system_default']),
                          ('admin@outro-workspace.example', HOME, False))
-        self.assertEqual(data['usage'][ADM]['windows'], [{'name': 'session', 'usedPercent': 55,
-                                                          'resetsAt': 1793701800586, 'windowMinutes': 300}])
+        self.assertEqual(data['claude']['usage'][ADM]['windows'], [{'name': 'session', 'usedPercent': 55,
+                                                                    'resetsAt': 1793701800586, 'windowMinutes': 300}])
 
     def test_the_provider_feeds_the_limits_and_the_account_without_usage_gets_r2_5(self):
         accounts = acc.Accounts(client='studio', run=lambda argv, env, t: (0, json.dumps(FIXTURE), ''))
@@ -95,7 +124,7 @@ class ParseTest(unittest.TestCase):
 class ClaudeEnvTest(unittest.TestCase):
     def test_the_managed_account_gets_the_config_dir_and_the_system_default_does_not(self):
         data = acc.parse(full())
-        default, managed = data['accounts']
+        default, managed = data['claude']['accounts']
         base = {'PATH': '/usr/bin', 'CLAUDE_CONFIG_DIR': '/herdado'}
         self.assertEqual(acc.claude_env(managed, base), {'PATH': '/usr/bin', 'CLAUDE_CONFIG_DIR': HOME})
         self.assertEqual(acc.claude_env(default, base), {'PATH': '/usr/bin'})  # nem o herdado

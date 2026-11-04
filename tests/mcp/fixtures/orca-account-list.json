@@ -123,7 +123,7 @@
      "resetDescription": null
     },
     "weekly": {
-     "usedPercent": 67,
+     "usedPercent": 99,
      "windowMinutes": 10080,
      "resetsAt": 1794280193000,
      "resetDescription": null
@@ -204,7 +204,7 @@
     "session": null,
     "weekly": null,
     "updatedAt": 1793686921355,
-    "error": "Not signed in to Grok — run grok login",
+    "error": "Grok did not report a usage percentage for this account",
     "status": "unavailable"
    },
    "cursor": {

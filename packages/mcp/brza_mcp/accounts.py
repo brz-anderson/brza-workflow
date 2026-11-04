@@ -21,7 +21,6 @@ from pathlib import Path
 from . import clients
 
 SYSTEM_DEFAULT = 'systemDefault'
-RUNTIME = 'claude'
 _WINDOW_KEYS = ('session', 'weekly', 'fableWeekly', 'monthly')
 
 
@@ -48,33 +47,89 @@ def _windows(block):
 
 
 def parse(payload) -> dict:
-    """O JSON do `account list` (com ou sem o envelope `{ok, result}`) -> `{accounts, usage}`.
+    """O JSON do `account list` (com ou sem o envelope `{ok, result}`) ->
+    `{runtime: {'accounts': [...], 'usage': {...}, 'error': ...}}`.
 
     `accounts`: `[{id, label, email, home, system_default, active}]`, a `systemDefault` primeiro; `usage`:
     `{id: {account, runtime, windows}}`, só das contas com uso."""
     data = payload.get('result', payload) if isinstance(payload, dict) else {}
+    rate = data.get('rateLimits') or {}
+
+    # claude: como hoje (claude, rateLimits.claude, rateLimits.inactiveClaudeAccounts)
     claude = data.get('claude')
     managed = claude.get('accounts') if isinstance(claude, dict) else None
     claude = claude if isinstance(claude, dict) else {}
     active = claude.get('activeAccountId')
     default_home = claude.get('systemDefaultHome')
-    accounts = [{'id': SYSTEM_DEFAULT, 'label': claude.get('systemDefaultEmail') or SYSTEM_DEFAULT,
-                 'email': claude.get('systemDefaultEmail'), 'home': default_home, 'system_default': True,
-                 'active': active is None}]
+    claude_accounts = [{'id': SYSTEM_DEFAULT, 'label': claude.get('systemDefaultEmail') or SYSTEM_DEFAULT,
+                        'email': claude.get('systemDefaultEmail'), 'home': default_home, 'system_default': True,
+                        'active': active is None}]
     for a in managed or []:
-        accounts.append({'id': a['id'], 'label': a.get('email') or a['id'], 'email': a.get('email'),
-                         'home': a.get('home'), 'system_default': False, 'active': a['id'] == active})
-    rate = data.get('rateLimits') or {}
-    usage = {}
-    windows = _windows(rate.get('claude'))
+        claude_accounts.append({'id': a['id'], 'label': a.get('email') or a['id'], 'email': a.get('email'),
+                                'home': a.get('home'), 'system_default': False, 'active': a['id'] == active})
+    rate_claude = rate.get('claude') or {}
+    claude_usage = {}
+    windows = _windows(rate_claude)
     if windows:
-        usage[active or SYSTEM_DEFAULT] = {'account': active or SYSTEM_DEFAULT, 'runtime': RUNTIME, 'windows': windows}
+        claude_usage[active or SYSTEM_DEFAULT] = {'account': active or SYSTEM_DEFAULT, 'runtime': 'claude', 'windows': windows}
     for item in rate.get('inactiveClaudeAccounts') or []:
         windows = _windows(item.get('rateLimits'))
         if windows and item.get('accountId'):
-            usage[item['accountId']] = {'account': item['accountId'], 'runtime': RUNTIME, 'windows': windows}
-    codex = data.get('codex') if isinstance(data.get('codex'), dict) else {}
-    return {'accounts': accounts, 'usage': usage, 'codex': codex}
+            claude_usage[item['accountId']] = {'account': item['accountId'], 'runtime': 'claude', 'windows': windows}
+    claude_error = rate_claude.get('error')
+
+    # codex: codex.systemDefault.email e codex.accounts (sem home); ativa = codex.activeAccountId;
+    #        o uso da ativa em rateLimits.codex, o das outras em rateLimits.inactiveCodexAccounts
+    codex_data = data.get('codex') if isinstance(data.get('codex'), dict) else {}
+    codex_active = codex_data.get('activeAccountId')
+    sys_default = codex_data.get('systemDefault')
+    sys_email = sys_default.get('email') if isinstance(sys_default, dict) else (codex_data.get('systemDefaultEmail') or None)
+    codex_accounts = [{'id': SYSTEM_DEFAULT, 'label': sys_email or SYSTEM_DEFAULT,
+                       'email': sys_email, 'home': None, 'system_default': True,
+                       'active': codex_active is None}]
+    for a in codex_data.get('accounts') or []:
+        codex_accounts.append({'id': a['id'], 'label': a.get('email') or a['id'], 'email': a.get('email'),
+                               'home': None, 'system_default': False, 'active': a['id'] == codex_active})
+    if codex_active and not any(a['id'] == codex_active for a in codex_accounts):
+        codex_accounts.append({'id': codex_active, 'label': codex_active, 'email': None,
+                               'home': None, 'system_default': False, 'active': True})
+    rate_codex = rate.get('codex') or {}
+    codex_usage = {}
+    windows = _windows(rate_codex)
+    if windows:
+        codex_usage[codex_active or SYSTEM_DEFAULT] = {'account': codex_active or SYSTEM_DEFAULT, 'runtime': 'codex', 'windows': windows}
+    for item in rate.get('inactiveCodexAccounts') or []:
+        windows = _windows(item.get('rateLimits'))
+        if windows and item.get('accountId'):
+            codex_usage[item['accountId']] = {'account': item['accountId'], 'runtime': 'codex', 'windows': windows}
+    codex_error = rate_codex.get('error')
+
+    # grok, antigravity: uma conta, {'id': 'systemDefault', 'label': <runtime>, 'system_default': True, 'active': True},
+    #        com o uso das janelas de topo de rateLimits.<runtime> (R3.2); os buckets do Antigravity ficam de fora
+    grok_accounts = [{'id': SYSTEM_DEFAULT, 'label': 'grok', 'email': None, 'home': None,
+                      'system_default': True, 'active': True}]
+    rate_grok = rate.get('grok') or {}
+    grok_usage = {}
+    windows = _windows(rate_grok)
+    if windows:
+        grok_usage[SYSTEM_DEFAULT] = {'account': SYSTEM_DEFAULT, 'runtime': 'grok', 'windows': windows}
+    grok_error = rate_grok.get('error')
+
+    antigravity_accounts = [{'id': SYSTEM_DEFAULT, 'label': 'antigravity', 'email': None, 'home': None,
+                             'system_default': True, 'active': True}]
+    rate_antigravity = rate.get('antigravity') or {}
+    antigravity_usage = {}
+    windows = _windows(rate_antigravity)
+    if windows:
+        antigravity_usage[SYSTEM_DEFAULT] = {'account': SYSTEM_DEFAULT, 'runtime': 'antigravity', 'windows': windows}
+    antigravity_error = rate_antigravity.get('error')
+
+    return {
+        'claude': {'accounts': claude_accounts, 'usage': claude_usage, 'error': claude_error},
+        'codex': {'accounts': codex_accounts, 'usage': codex_usage, 'error': codex_error},
+        'grok': {'accounts': grok_accounts, 'usage': grok_usage, 'error': grok_error},
+        'antigravity': {'accounts': antigravity_accounts, 'usage': antigravity_usage, 'error': antigravity_error},
+    }
 
 
 class Accounts:
@@ -129,43 +184,50 @@ class Accounts:
         except AccountError:
             pass
 
-    def accounts(self, client=None, user_data=None):
-        return self.read(client=client, user_data=user_data)['accounts']
+    def accounts(self, runtime='claude', client=None, user_data=None):
+        runtime = runtime or 'claude'
+        return self.read(client=client, user_data=user_data).get(runtime, {}).get('accounts', [])
 
-    def find(self, name, data=None, client=None, user_data=None):
+    def find(self, name, runtime='claude', data=None, client=None, user_data=None):
         """A conta pelo id, e-mail ou rótulo; sem nome, a ativa. None se não existe."""
-        accounts = (data or self.read(client=client, user_data=user_data))['accounts']
+        if isinstance(runtime, dict) and data is None:
+            data, runtime = runtime, 'claude'
+        runtime = runtime or 'claude'
+        read_data = data or self.read(client=client, user_data=user_data)
+        runtime_data = read_data.get(runtime, {})
+        accounts = runtime_data.get('accounts', [])
         if not name:
             return next((a for a in accounts if a['active']), None)
         return next((a for a in accounts if name in (a['id'], a['email'], a['label'])), None)
 
     def active_id(self, runtime='claude', client=None, user_data=None):
         """O id da conta ativa do cliente para o runtime, ou None se não se lê."""
-        if runtime in ('grok', 'antigravity'):
-            return SYSTEM_DEFAULT
-        if runtime == 'codex':
-            try:
-                data = self.read(client=client, user_data=user_data)
-            except AccountError:
-                return None
-            codex = data.get('codex') if isinstance(data, dict) else {}
-            return (codex or {}).get('activeAccountId')
+        runtime = runtime or 'claude'
         try:
-            found = self.find(None, client=client, user_data=user_data)
+            found = self.find(None, runtime=runtime, client=client, user_data=user_data)
         except AccountError:
             return None
         return found['id'] if found else None
 
-    def usage(self, account, runtime, client=None, user_data=None):
+    def usage(self, account, runtime='claude', client=None, user_data=None):
         """O provedor do `Limits`: o instantâneo da conta, ou None (sem uso, sem conta ou sem cliente)."""
-        if runtime not in ('', None, RUNTIME):
-            return None
+        runtime = runtime or 'claude'
         try:
             data = self.read(client=client, user_data=user_data)
         except AccountError:
             return None
-        found = self.find(account, data)
-        return data['usage'].get(found['id']) if found else None
+        runtime_data = data.get(runtime, {})
+        found = self.find(account, runtime=runtime, data=data)
+        return runtime_data.get('usage', {}).get(found['id']) if found else None
+
+    def usage_error(self, runtime='claude', client=None, user_data=None):
+        """O erro do bloco de rateLimits do runtime, ou None."""
+        runtime = runtime or 'claude'
+        try:
+            data = self.read(client=client, user_data=user_data)
+        except AccountError:
+            return None
+        return data.get(runtime, {}).get('error')
 
 
 def claude_env(account, base=None) -> dict:
@@ -237,21 +299,28 @@ def switch_chat_account(session_id, account_id, client='studio', rpc=None):
 # ---- o relatório do `brza quota` ----
 
 def quota_report(data, queue, limits, now_ms=None) -> list:
-    """Por conta, as janelas com `used`, `resets_at` e a projeção (a do `Limits._project`). Grava as amostras na fila,
-    como o `Limits` faz a cada decisão, para a inclinação ter história."""
+    """Por conta e runtime, as janelas com `used`, `resets_at` e a projeção (a do `Limits._project`). Grava as amostras
+    na fila, como o `Limits` faz a cada decisão, para a inclinação ter história."""
     from .limits import Limits
     now = int(time.time() * 1000) if now_ms is None else now_ms
     cap = limits.hard_cap()
     report = []
-    for a in data['accounts']:
-        snap = data['usage'].get(a['id'])
-        windows = []
-        if snap:
-            queue.record_usage({'account': a['id'], 'runtime': RUNTIME, 'windows': snap['windows']}, now)
-            for w in snap['windows']:
-                samples = queue.samples(a['id'], RUNTIME, w['name'], w.get('resetsAt'))
-                windows.append({'name': w['name'], 'used': w['usedPercent'], 'resets_at': w.get('resetsAt'),
-                                'projected': Limits._project(samples, w, now)})
-        report.append({'account': a['id'], 'label': a['label'], 'system_default': a['system_default'],
-                       'active': a['active'], 'cap': cap, 'windows': windows})
+    runtimes_to_process = [r for r in ('claude', 'codex', 'grok', 'antigravity') if r in data]
+    if not runtimes_to_process and 'accounts' in data:
+        runtimes_to_process = ['claude']
+        data = {'claude': data}
+    for rt in runtimes_to_process:
+        rt_data = data[rt]
+        for a in rt_data.get('accounts', []):
+            snap = rt_data.get('usage', {}).get(a['id'])
+            windows = []
+            if snap:
+                queue.record_usage({'account': a['id'], 'runtime': rt, 'windows': snap['windows']}, now)
+                for w in snap['windows']:
+                    samples = queue.samples(a['id'], rt, w['name'], w.get('resetsAt'))
+                    windows.append({'name': w['name'], 'used': w['usedPercent'], 'resets_at': w.get('resetsAt'),
+                                    'projected': Limits._project(samples, w, now)})
+            report.append({'runtime': rt, 'account': a['id'], 'label': a['label'],
+                           'system_default': a['system_default'], 'active': a['active'],
+                           'cap': cap, 'windows': windows})
     return report

@@ -137,23 +137,28 @@ class Orchestrator:
         """Os argumentos de cliente das chamadas ao leitor de contas: o do pedido, quando ele o trouxe."""
         return {key: value for key, value in (('client', client), ('user_data', user_data)) if value}
 
-    def normalize_account(self, name, client=None, user_data=None, runtime='claude', expected=None):
+    def normalize_account(self, name, runtime='claude', client=None, user_data=None, expected=None):
         """O id da conta do pedido, lido no cliente do pedido. O worker abre na conta ativa do cliente: o `worker-start`
-        não tem flag de conta (X20), então outra conta é recusada com o motivo. Fora do Claude, a conta gravada passa
-        sem leitura da lista; qualquer outra é recusada com o motivo da E2. Sem leitor de contas, vale como veio."""
-        if runtime != 'claude':
-            if expected is None:
-                expected = (self.accounts.active_id(runtime=runtime, **self._for(client, user_data))
-                            if self.accounts and hasattr(self.accounts, 'active_id') else None) or accounts_mod.SYSTEM_DEFAULT
-            if name == expected:
-                return name
-            raise ToolError('account fora do Claude entra na E2 do PLN-013: tire o account, e o worker abre na conta padrão '
-                            'do runtime')
+        não tem flag de conta (X20), então outra conta é recusada com o motivo. Grok e Antigravity só aceitam a conta única
+        systemDefault (ou o nome do runtime). Sem leitor de contas, vale como veio."""
+        if runtime not in runtimes.RUNTIMES and runtime not in runtimes.ALIASES and runtime is not None:
+            client, runtime = runtime, 'claude'
+        runtime = runtimes.get(runtime).name
+
+        if runtime in ('grok', 'antigravity'):
+            if name in (accounts_mod.SYSTEM_DEFAULT, runtime):
+                return accounts_mod.SYSTEM_DEFAULT
+            raise ToolError(f'o {runtime} tem uma conta só no app (PLN-013/R2.1)')
+
         if self.accounts is None or not hasattr(self.accounts, 'find'):
             return name
         try:
-            found = self.accounts.find(name, **self._for(client, user_data))
-            active = self.accounts.find(None, **self._for(client, user_data))
+            try:
+                found = self.accounts.find(name, runtime=runtime, **self._for(client, user_data))
+                active = self.accounts.find(None, runtime=runtime, **self._for(client, user_data))
+            except TypeError:
+                found = self.accounts.find(name, **self._for(client, user_data))
+                active = self.accounts.find(None, **self._for(client, user_data))
         except accounts_mod.AccountError as e:
             raise ToolError(f'não consegui ler as contas do cliente para conferir {name!r}: {e}') from None
         if found is None:
@@ -164,8 +169,15 @@ class Orchestrator:
                             'tire o account do pedido')
         return found['id']
 
-    def active_account(self, client=None, user_data=None):
-        return self.accounts.active_id(**self._for(client, user_data)) if hasattr(self.accounts, 'active_id') else None
+    def active_account(self, client=None, user_data=None, runtime='claude'):
+        if runtime in ('grok', 'antigravity'):
+            return accounts_mod.SYSTEM_DEFAULT
+        if not self.accounts or not hasattr(self.accounts, 'active_id'):
+            return None
+        try:
+            return self.accounts.active_id(runtime=runtime, **self._for(client, user_data))
+        except TypeError:
+            return self.accounts.active_id(**self._for(client, user_data))
 
     def warm_accounts(self):
         """Aquece a leitura das contas, de cada cliente da fila, antes de qualquer lock: o `account list` leva até 30 s
@@ -224,9 +236,6 @@ class Orchestrator:
                 raise ToolError('chamador desconhecido: o header X-Brza-Session não veio e o argumento caller falta')
             if 'approved' in args:
                 return self.approve(args['approved'], caller, args)
-            if args.get('runtime', 'claude') != 'claude' and 'account' in args:
-                raise ToolError('account fora do Claude entra na E2 do PLN-013: tire o account, e o worker abre na conta padrão '
-                                'do runtime')
             fields = {k: args[k] for k in ('task', 'role', 'target', 'runtime', 'model', 'effort', 'account', 'ref',
                                            'deadline', 'blocks', 'priority') if k in args}
             fields.setdefault('runtime', 'claude')  # o teto de sessões conta por runtime: pedido sem ele escaparia
@@ -236,11 +245,11 @@ class Orchestrator:
                 fields['client'] = client
             if user_data:  # o perfil de outro build (brza-dev): o worker abre no runtime dele
                 fields['user_data'] = user_data
-            if fields['runtime'] != 'claude':
-                fields['account'] = (self.accounts.active_id(runtime=fields['runtime'], **self._for(client, user_data))
-                                     if self.accounts and hasattr(self.accounts, 'active_id') else None) or accounts_mod.SYSTEM_DEFAULT
-            elif 'account' in fields:  # a mesma conta sob id, e-mail ou rótulo é uma conta só, lida no cliente do pedido
-                fields['account'] = self.normalize_account(fields['account'], client, user_data)
+            if 'account' in fields:
+                fields['account'] = self.normalize_account(fields['account'], runtime=fields['runtime'],
+                                                           client=client, user_data=user_data)
+            elif fields['runtime'] != 'claude':
+                fields['account'] = self.active_account(client, user_data, runtime=fields['runtime']) or accounts_mod.SYSTEM_DEFAULT
             fields.setdefault('account', '')  # sem `account`: `''`, e o `Limits` o conta na ativa da hora da admissão
             decided = self.policy.decide_model(fields, self.resolver)
             for k in ('model', 'effort'):
@@ -283,9 +292,10 @@ class Orchestrator:
             return (f'o papel {args["role"]!r} não é consultant: abrir executor ou outro papel exige a '
                     'confirmação de quem pediu (R5.2)')
         if args.get('account') is not None:
-            # com o leitor de contas, `fields['account']` já é a conta normalizada, e a que não é a ativa foi recusada
-            # (X38): só a troca de verdade, ou a que não se confere (sem leitor, ou sem ativa), pede a confirmação
-            active = self.active_account(client, fields.get('user_data'))
+            runtime = fields.get('runtime', 'claude')
+            if runtime in ('grok', 'antigravity'):
+                return None
+            active = self.active_account(client, fields.get('user_data'), runtime=runtime)
             if active is None or fields.get('account') != active:
                 return f'troca de conta ({args["account"]!r}) exige a confirmação de quem pediu (R5.2)'
         return None
@@ -296,8 +306,8 @@ class Orchestrator:
         if account is not None:
             gate = self.queue._all('SELECT request_id FROM gates WHERE id = ?', (gate_id,))
             stored = (self.queue.get(gate[0]['request_id']) or {}) if gate else {}
-            account = self.normalize_account(account, stored.get('client'), stored.get('user_data'),
-                                             runtime=stored.get('runtime', 'claude'),
+            account = self.normalize_account(account, runtime=stored.get('runtime', 'claude'),
+                                             client=stored.get('client'), user_data=stored.get('user_data'),
                                              expected=stored.get('account'))  # a leitura das contas pode demorar: fora do lock global
         with self.queue.lock:  # a leitura, a conferência e a gravação são um passo só: duas aprovações não passam juntas
             rows = self.queue._all('SELECT * FROM gates WHERE id = ?', (gate_id,))
@@ -380,6 +390,20 @@ class Orchestrator:
             return out
         ceilings = {key: self.limits.get(key) for key in _CEILING_KEYS}
         ceilings['quota.hard_cap_percent'] = self.limits.hard_cap()
+        quota_unknown = {}
+        client, user_data = clients_mod.resolve_header(
+            next((v for k, v in (ctx.headers or {}).items() if k.lower() == 'x-brza-client'), None))
+        usage_error_fn = getattr(self.accounts, 'usage_error', None) or getattr(self.limits, 'usage_error', None)
+        if usage_error_fn:
+            for rt in runtimes.RUNTIMES:
+                try:
+                    err = usage_error_fn(rt, **self._for(client, user_data))
+                except TypeError:
+                    err = usage_error_fn(rt)
+                if err:
+                    quota_unknown[rt] = err
+        if quota_unknown:
+            ceilings['quota_unknown'] = quota_unknown
         return {'queued': [brief(r, i) for i, r in enumerate(pending, 1)], 'gated': [brief(r) for r in gated],
                 'running': [brief(r) for r in running], 'finished': [dict(brief(r), state=r['state']) for r in finished],
                 'ceilings': ceilings, 'suggestion': self.policy.suggestion()}
