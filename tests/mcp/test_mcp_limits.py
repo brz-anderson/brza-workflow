@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mcp_support import paths  # noqa: F401
 
+from brza_mcp import accounts as acc  # noqa: E402
 from brza_mcp import limits as lim  # noqa: E402
 from brza_mcp import queue as q  # noqa: E402
 
@@ -214,6 +215,61 @@ class QuotaTest(unittest.TestCase):
         decision = limits.decide(queue.get(rid), queue)
         self.assertTrue(decision.admit)
         self.assertNotEqual(decision.ceiling, 'account_active')
+
+    def test_codex_request_at_95_percent_holds_in_account_quota(self):
+        payload = json.loads(FIXTURE.read_text())
+        payload['result']['rateLimits']['codex']['session']['usedPercent'] = 95
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(payload), ''))
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.hard_cap_percent': 90}, usage=accounts.usage, active=accounts.active_id)
+        rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='systemDefault')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_quota')
+        self.assertIn('session', decision.reason)
+        self.assertIn('a troca de conta do Codex só é proposta num dispatch novo (PLN-013/R3.3)', decision.reason)
+        queue.close()
+
+    def test_codex_projection_over_cap_does_not_mention_new_dispatch_in_held_reason(self):
+        # A frase 'a troca de conta do Codex só é proposta num dispatch novo' sai só no caso 'já em'
+        queue = q.Queue(':memory:')
+        resets = 2_000_000_000_000
+        now = resets - 10 * 3_600_000
+        clock = Clock(now)
+        queue.record_usage(snap(10, resets=resets, account='systemDefault', runtime='codex'), now - 3_600_000)
+        snap_now = snap(60, resets=resets, account='systemDefault', runtime='codex')
+        limits = lim.Limits({'quota.hard_cap_percent': 90},
+                            usage=lambda account, runtime, **kw: snap_now if runtime == 'codex' else None,
+                            clock=clock)
+        rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='systemDefault')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_quota')
+        self.assertIn('projeta', decision.reason)
+        self.assertNotIn('a troca de conta do Codex só é proposta num dispatch novo', decision.reason)
+        queue.close()
+
+    def test_antigravity_request_with_weekly_at_99_percent_holds_in_account_quota(self):
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, FIXTURE.read_text(), ''))
+        queue = q.Queue(':memory:')
+        limits = lim.Limits({'quota.hard_cap_percent': 90}, usage=accounts.usage, active=accounts.active_id)
+        rid = queue.enqueue(task='t-agy', role='consultant', runtime='antigravity', account='systemDefault')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_quota')
+        self.assertIn('weekly', decision.reason)
+        queue.close()
+
+    def test_codex_request_with_account_different_from_active_holds_in_account_active(self):
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, FIXTURE.read_text(), ''))
+        queue = q.Queue(':memory:')
+        limits = lim.Limits(active=accounts.active_id, usage=accounts.usage)
+        rid = queue.enqueue(task='t-codex', role='consultant', runtime='codex', account='outra-conta')
+        decision = limits.decide(queue.get(rid), queue)
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.ceiling, 'account_active')
+        self.assertIn('outra-conta', decision.reason)
+        queue.close()
 
     def test_a_vanished_window_is_pruned_on_the_next_record(self):  # P2 O-A12
         queue = q.Queue(':memory:')

@@ -24,7 +24,8 @@ def build(registry, queue=None, accounts=None, run=cycle.default_run, interval=c
     `claude`; fora dele, não chama o resolver e não herda linha de outro papel."""
     accounts = accounts or accounts_mod.Accounts()
     queue = queue if queue is not None else queue_mod.Queue()
-    limits = limits or limits_mod.Limits(usage=accounts.usage, active=getattr(accounts, 'active_id', None))
+    limits = limits or limits_mod.Limits(usage=accounts.usage, active=getattr(accounts, 'active_id', None),
+                                         usage_error=getattr(accounts, 'usage_error', None))
     service = tools.install(registry, queue=queue, limits=limits, resolver=resolver, accounts=accounts)
     if with_resolver and resolver is None:
         service.resolver = resolver_mod.Resolver(config=service.policy.config)

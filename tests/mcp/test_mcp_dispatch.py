@@ -11,6 +11,7 @@ from unittest.mock import patch
 from tools_support import ToolsCase
 
 from brza_mcp import accounts as acc
+from brza_mcp import limits as lim
 
 FIXTURE = json.loads((Path(__file__).resolve().parent / 'fixtures' / 'orca-account-list.json').read_text())
 
@@ -97,9 +98,12 @@ class ValidationTest(ToolsCase):
             expected = 'antigravity' if r == 'agy' else r
             self.assertEqual(row['runtime'], expected)
 
-    def test_account_outside_claude_is_refused_until_e2(self):
-        self.refused({'task': 't', 'role': 'consultant', 'runtime': 'codex', 'account': 'x'},
-                     'account fora do Claude entra na E2 do PLN-013')
+    def test_account_outside_claude_respects_single_account_or_system_default(self):
+        self.refused({'task': 't', 'role': 'consultant', 'runtime': 'grok', 'account': 'x'},
+                     'o grok tem uma conta só no app (PLN-013/R2.1)')
+        err, out = self.call('dispatch', {'task': 't', 'role': 'consultant', 'runtime': 'grok', 'account': 'systemDefault'}, session='s')
+        self.assertFalse(err, out)
+        self.assertEqual(self.queue.get(out['request'])['account'], 'systemDefault')
 
     def test_the_account_stored_outside_claude_is_the_runtime_default(self):
         for r in ('grok', 'antigravity'):
@@ -226,6 +230,17 @@ class OrderAndStatusTest(ToolsCase):
         self.assertEqual([r['task'] for r in st['gated']], ['g'])
         self.assertEqual([r['task'] for r in st['running']], ['ocupa'])
         self.assertEqual(st['ceilings']['orchestrator.max_workers'], 1)
+
+    def test_status_returns_quota_unknown_with_grok_error(self):
+        accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(FIXTURE), ''))
+        self.service.accounts = accounts
+        self.service.limits = lim.Limits(active=accounts.active_id, usage=accounts.usage,
+                                         usage_error=accounts.usage_error)
+        err, out = self.call('status', session='s')
+        self.assertFalse(err, out)
+        self.assertIn('quota_unknown', out['ceilings'])
+        self.assertEqual(out['ceilings']['quota_unknown'].get('grok'),
+                         'Grok did not report a usage percentage for this account')
 
     def test_status_gives_the_gate_id_only_to_the_caller_that_opened_it(self):  # P3 F-A3, final A1
         _, gate = self.call('dispatch', {'task': 'g', 'role': 'executor'}, session='s')

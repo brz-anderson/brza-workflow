@@ -20,9 +20,15 @@ def render(report):
     lines = []
     for a in report:
         tag = ' (systemDefault)' if a['system_default'] else ''
-        lines.append(f'{a["label"]}{tag}{"  [ativa]" if a["active"] else ""}  id={a["account"]}')
+        rt = f'[{a["runtime"]}] ' if a.get('runtime') else ''
+        lines.append(f'{rt}{a["label"]}{tag}{"  [ativa]" if a["active"] else ""}  id={a["account"]}')
         if not a['windows']:
-            lines.append('  sem uso (conta inativa sem leitura): só o teto de sessões vale')
+            if a.get('error'):
+                lines.append(f'  sem uso ({a["error"]}): só o teto de sessões vale')
+            elif a['active']:
+                lines.append('  sem uso (conta ativa sem leitura): só o teto de sessões vale')
+            else:
+                lines.append('  sem uso (conta inativa sem leitura): só o teto de sessões vale')
         for w in a['windows']:
             reset = (datetime.fromtimestamp(w['resets_at'] / 1000).strftime('%Y-%m-%d %H:%M')
                      if w.get('resets_at') else '-')

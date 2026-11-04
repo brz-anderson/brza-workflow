@@ -14,6 +14,8 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from . import accounts as accounts_mod
+
 DEFAULT_HARD_CAP = 90.0
 MIN_SLOPE_SPAN_MS = 10 * 60_000  # sem `windowMinutes`, a inclinação só vale com 10 min de amostras
 MIN_SLOPE_WINDOW_FRACTION = 20   # com ele, com 1/20 da janela: o `usedPercent` é inteiro e dá degraus
@@ -94,13 +96,14 @@ def _now_ms():
 
 
 class Limits:
-    def __init__(self, config=None, usage=None, machine=read_machine, clock=_now_ms, active=None):
+    def __init__(self, config=None, usage=None, machine=read_machine, clock=_now_ms, active=None, usage_error=None):
         self.config = config or {}
         self.usage = usage or (lambda account, runtime, client=None, user_data=None: None)
+        self.usage_error = usage_error or (lambda runtime, client=None, user_data=None: None)
         self.machine = machine
         self.clock = clock
         self.has_active = active is not None
-        self.active = active or (lambda client=None, user_data=None: None)  # o id da conta ativa do cliente: a do pedido sem `account`
+        self.active = active or (lambda runtime='claude', client=None, user_data=None: None)  # o id da conta ativa do cliente: a do pedido sem `account`
         self.last_decision = None
         self.last_measures = {}
         self._cache = None
@@ -153,11 +156,40 @@ class Limits:
         if cap is not None and running >= cap:
             return Decision(False, 'workspace', f'{running} workers abertos, orchestrator.max_workers = {cap}')
 
+    def _call_active(self, runtime, options):
+        if runtime in ('grok', 'antigravity'):
+            return accounts_mod.SYSTEM_DEFAULT
+        try:
+            return self.active(runtime, **options)
+        except TypeError:
+            try:
+                return self.active(runtime=runtime, **options)
+            except TypeError:
+                if runtime != 'claude':
+                    return None
+                try:
+                    return self.active(**options)
+                except TypeError:
+                    return self.active()
+
+    def _call_usage_error(self, runtime, options):
+        try:
+            return self.usage_error(runtime, **options)
+        except TypeError:
+            try:
+                return self.usage_error(runtime=runtime, **options)
+            except TypeError:
+                try:
+                    return self.usage_error(**options)
+                except TypeError:
+                    return self.usage_error()
+
     def _active(self, request):
         """O id da conta ativa do cliente do pedido (o do `X-Brza-Client`; sem ele, o do processo vivo)."""
         options = self._profile(request)
-        return self._once(('active', request.get('client'), request.get('user_data')),
-                          lambda: self.active(**options))
+        runtime = request.get('runtime') or 'claude'
+        return self._once(('active', runtime, request.get('client'), request.get('user_data')),
+                          lambda: self._call_active(runtime, options))
 
     @staticmethod
     def _profile(request):
@@ -165,7 +197,7 @@ class Limits:
 
     def _account_matches(self, request, measures):
         account = request.get('account')
-        if not account or not self.has_active or (request.get('runtime') or 'claude') != 'claude':
+        if not account or not self.has_active:
             return None
         active = self._active(request)
         if account != active:
@@ -190,19 +222,25 @@ class Limits:
                             f'quota.max_sessions_per_account = {cap}')
 
     def _quota(self, request, queue, measures):
-        account, runtime = self._account(request), request.get('runtime') or ''
+        account, runtime = self._account(request), request.get('runtime') or 'claude'
         cap = self.hard_cap()
         options = self._profile(request)
         snapshot = self._once(('usage', account, runtime, request.get('client'), request.get('user_data')),
                               lambda: self.usage(account, runtime, **options))
         windows = [w for w in (snapshot or {}).get('windows') or [] if w.get('usedPercent') is not None]
         if not windows:
-            measures['quota'] = {'known': False, 'cap': cap, 'windows': []}  # R2.5: só o teto de sessões vale
+            err = self._once(('usage_error', runtime, request.get('client'), request.get('user_data')),
+                             lambda: self._call_usage_error(runtime, options))
+            measures['quota'] = {'known': False, 'cap': cap, 'windows': [], 'error': err}
             return None
         report, over = self._report(account, runtime, windows, queue, self.clock()), None
         for w in report:
             if over is None and w['used'] >= cap:
-                over = f'janela {w["name"]} já em {w["used"]:g}%, quota.hard_cap_percent = {cap:g}'
+                if runtime == 'codex':
+                    over = (f'janela {w["name"]} já em {w["used"]:g}%, quota.hard_cap_percent = {cap:g}; '
+                            'a troca de conta do Codex só é proposta num dispatch novo (PLN-013/R3.3)')
+                else:
+                    over = f'janela {w["name"]} já em {w["used"]:g}%, quota.hard_cap_percent = {cap:g}'
             elif over is None and w['projected'] >= cap:
                 over = f'janela {w["name"]} projeta {w["projected"]:.0f}% no reset, quota.hard_cap_percent = {cap:g}'
         measures['quota'] = {'known': True, 'cap': cap, 'windows': report}
