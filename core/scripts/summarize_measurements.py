@@ -597,7 +597,10 @@ def task_mark(task):
         match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", str(until).strip())
         if match:
             hour, minute, second = (int(g or 0) for g in match.groups())
-            return stamp.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            try:
+                return stamp.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            except ValueError:  # "25:00": linha ruim não derruba a leitura, o marco volta ao timestamp
+                return stamp
         return parse_time(until) or stamp
     return stamp
 
@@ -765,6 +768,17 @@ def session_label(sid, tasks):
     return names[-1] if names else str(sid)[:8]
 
 
+def session_workstream(segments):
+    """O workstream da sessão: o último `workstream` das linhas dos segmentos dela e, só sem linha nenhuma com ele,
+    o último dos `task`."""
+    for key in (lambda seg: [r.get("workstream") for r in seg["rows"]],
+                lambda seg: [seg["task"].get("workstream")] if seg["task"] else []):
+        found = [w for seg in segments for w in key(seg) if w]
+        if found:
+            return found[-1]
+    return None
+
+
 def aggregate_by_task(rows, since="", workstream=""):
     """{"tasks", "unmeasured", "sessions"} do --by-task (D4). A tarefa é o worklog, somado em todos os segmentos e
     sessões que o fecharam. Não medido é o `task` sem sessão ou de sessão sem turno no log. A sessão traz a ociosa — do
@@ -819,9 +833,8 @@ def aggregate_by_task(rows, since="", workstream=""):
             last_end = parse_time(measure["end"])
         open_ = task_measure(own[-1]["rows"]) if own and own[-1]["task"] is None else new_measure()
         ends = [row_end(r) for seg in own for r in seg["rows"]]
-        workstreams = [r.get("workstream") for seg in own for r in seg["rows"] if r.get("workstream")]
         sessions.append({"session_id": sid, "name": session_label(sid, task_rows),
-                         "workstream": workstreams[-1] if workstreams else NO_WORKSTREAM, "idle_s": idle,
+                         "workstream": session_workstream(own) or NO_WORKSTREAM, "idle_s": idle,
                          "no_task_turns": open_["turns"], "no_task_subagents": open_["subagents"],
                          "no_task_cost_turns": open_["cost_turns"], "no_task_cost_subagents": open_["cost_subagents"],
                          "no_task_no_cost": open_["no_cost_turns"] + open_["no_cost_subagents"],
@@ -895,13 +908,6 @@ def print_by_task(result):
                   money({"cost": s["no_task_cost_turns"] + s["no_task_cost_subagents"], "no_cost": s["no_task_no_cost"]})
                   if s["no_task_turns"] or s["no_task_subagents"] else "",
                   str(s["no_task_since"] or "")[:16].replace("T", " ")) for s in result["sessions"]])
-
-
-def session_workstream(segments):
-    """O workstream da sessão: o último `workstream` das linhas dos segmentos dela e, sem linha, o dos `task`."""
-    workstreams = [r.get("workstream") for seg in segments for r in seg["rows"] if r.get("workstream")]
-    workstreams += [seg["task"].get("workstream") for seg in segments if seg["task"] and seg["task"].get("workstream")]
-    return workstreams[-1] if workstreams else None
 
 
 def pending(rows, session_id, now):

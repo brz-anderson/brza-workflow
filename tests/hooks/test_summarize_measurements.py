@@ -740,6 +740,26 @@ class ByTaskTest(unittest.TestCase):
         text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T04:00:00-03:00"))
         self.assertIn("sem tarefa no workstream tools-kit: 1 turno em 1 sessão parada há mais de 2 h (US$ 2,00)", text)
 
+    def test_the_workstream_of_a_session_is_the_last_row_and_only_without_rows_the_last_task(self):
+        rows = [tturn("10:00:00", 60, 1.0, session="s9", workstream="ws_antigo"),
+                task("10:01:00", [OPENING], "n1", session="s9", workstream="ws_antigo"),
+                tturn("10:30:00", 60, 1.0, session="s9", workstream="ws_novo")]
+        segments = [seg for seg in self.summarize.task_segments(rows) if seg["session_id"] == "s9"]
+        self.assertEqual(self.summarize.session_workstream(segments), "ws_novo")
+        self.assertEqual(self.summarize.session_workstream(segments[:1]), "ws_antigo")
+
+    def test_the_sessions_table_takes_the_workstream_from_the_task_when_the_rows_have_none(self):
+        rows = [tturn("10:00:00", 60, 1.0, session="s8", workstream=None),
+                task("10:01:00", [OPENING], "n2", session="s8", workstream="tools-kit")]
+        result = self.measure(rows, workstream="tools-kit")
+        self.assertEqual([(s["session_id"], s["workstream"]) for s in result["sessions"]], [("s8", "tools-kit")])
+
+    def test_a_task_with_an_impossible_until_marks_at_its_timestamp(self):
+        for until in ("25:00", "10:99"):
+            row = task("10:01:00", [OPENING], "n3", until=until)
+            self.assertEqual(self.summarize.task_mark(row), self.summarize.parse_time(at("10:01:00")))
+            self.measure([tturn("10:00:00", 60, 1.0), row])
+
     def test_pending_with_nothing_open_says_so(self):
         rows = [tturn("10:00:00", 100, 1.0), task("10:01:00", [OPENING], "a1")]
         self.assertEqual(self.summarize.pending_text(rows, SID, now=self.summarize.parse_time(at("11:00:00"))),
