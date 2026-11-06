@@ -470,7 +470,7 @@ class Orchestrator:
             finished = self.queue.recent_finished(caller) if caller else []
 
         def brief(r, position=None):
-            out = {k: r[k] for k in ('id', 'task', 'role', 'account', 'ref', 'caller')}
+            out = {k: r[k] for k in ('id', 'task', 'role', 'runtime', 'model', 'effort', 'account', 'ref', 'caller')}
             if position is not None:
                 out.update({'position': position, 'held_by': r['held_by'], 'held_reason': r['held_reason']})
             if r.get('error'):

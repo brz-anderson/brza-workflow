@@ -231,6 +231,24 @@ class OrderAndStatusTest(ToolsCase):
         self.assertEqual([r['task'] for r in st['running']], ['ocupa'])
         self.assertEqual(st['ceilings']['orchestrator.max_workers'], 1)
 
+    def test_status_lines_carry_runtime_model_and_effort(self):
+        running_id = self.queue.enqueue(task='ocupa', role='consultant', runtime='codex',
+                                        model='gpt-6.1-sol', effort='low', caller='s')
+        self.queue.mark_running(running_id)
+        self.call('dispatch', {'task': 'espera', 'role': 'consultant', 'runtime': 'grok',
+                               'model': 'grok-4.7', 'effort': 'low'}, session='s')
+        err, st = self.call('status', session='s')
+        self.assertFalse(err, st)
+        self.assertEqual((st['running'][0]['runtime'], st['running'][0]['model'], st['running'][0]['effort']),
+                         ('codex', 'gpt-6.1-sol', 'low'))
+        queued = next(r for r in st['queued'] if r['task'] == 'espera')
+        self.assertEqual((queued['runtime'], queued['model'], queued['effort']), ('grok', 'grok-4.7', 'low'))
+        self.queue.mark_done(running_id)
+        _, after = self.call('status', session='s')
+        finished = next(r for r in after['finished'] if r['task'] == 'ocupa')
+        self.assertEqual((finished['runtime'], finished['model'], finished['effort'], finished['state']),
+                         ('codex', 'gpt-6.1-sol', 'low', 'done'))
+
     def test_status_returns_quota_unknown_with_grok_error(self):
         accounts = acc.Accounts(client='orca', run=lambda argv, env, t: (0, json.dumps(FIXTURE), ''))
         self.service.accounts = accounts
