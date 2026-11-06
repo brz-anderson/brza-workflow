@@ -724,7 +724,7 @@ class ByTaskTest(unittest.TestCase):
         text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T02:00:00-03:00"))
         lines = text.splitlines()
         self.assertEqual(lines[0], "este commit fecha 3 turnos desde 22:32 (corrido 10 min, US$ 0,65 dos turnos e "
-                                   "4,05 de 2 subagentes):")
+                                   "US$ 4,05 de 2 subagentes):")
         self.assertEqual(lines[1:4], ["  22:32 > Grok CLI da xAI  esse",
                                       "  22:34 precisamos urgentemente adicionar o `grok` no fluxo do `brza sessions` e "
                                       "do `MCP",
@@ -732,6 +732,13 @@ class ByTaskTest(unittest.TestCase):
         self.assertEqual(lines[4], "sem tarefa no workstream tools-kit: 2 turnos em 1 sessão parada há mais de 2 h "
                                    "(US$ 1,50)")
         self.assertEqual(len(lines), 5)
+
+    def test_pending_resolves_the_workstream_of_a_stale_session_from_any_of_its_rows(self):
+        """O último turno da outra sessão sem `workstream` não a tira do aviso: vale o último workstream que ela teve."""
+        rows = SESSION + [task("2026-11-04T00:10:00-03:00", [GROK], "o1", session="dddddddd-4"),
+                          tturn("2026-11-04T00:20:00-03:00", 60, 2.0, session="dddddddd-4", workstream=None)]
+        text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T04:00:00-03:00"))
+        self.assertIn("sem tarefa no workstream tools-kit: 1 turno em 1 sessão parada há mais de 2 h (US$ 2,00)", text)
 
     def test_pending_with_nothing_open_says_so(self):
         rows = [tturn("10:00:00", 100, 1.0), task("10:01:00", [OPENING], "a1")]
@@ -785,6 +792,9 @@ class ByTaskTest(unittest.TestCase):
         self.assertEqual(self.summarize.to_json(self.summarize.aggregate(ROWS + extra)), base)
         self.assertEqual(self.summarize.to_json_by_workstream(self.summarize.aggregate_by_workstream(ROWS + extra)),
                          self.summarize.to_json_by_workstream(self.summarize.aggregate_by_workstream(ROWS)))
+        facts = [fact("2026-10-28", "reviewer", "f1", "claim", "high"), check("a1", "f1", "holds")]
+        self.assertEqual(self.summarize.to_json_facts(self.summarize.aggregate_facts(ROWS + facts + extra)),
+                         self.summarize.to_json_facts(self.summarize.aggregate_facts(ROWS + facts)))
 
 
 class RootTest(unittest.TestCase):

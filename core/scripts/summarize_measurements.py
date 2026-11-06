@@ -897,6 +897,13 @@ def print_by_task(result):
                   str(s["no_task_since"] or "")[:16].replace("T", " ")) for s in result["sessions"]])
 
 
+def session_workstream(segments):
+    """O workstream da sessão: o último `workstream` das linhas dos segmentos dela e, sem linha, o dos `task`."""
+    workstreams = [r.get("workstream") for seg in segments for r in seg["rows"] if r.get("workstream")]
+    workstreams += [seg["task"].get("workstream") for seg in segments if seg["task"] and seg["task"].get("workstream")]
+    return workstreams[-1] if workstreams else None
+
+
 def pending(rows, session_id, now):
     """O que o commit da sessão vai fechar (D6): os turnos depois do último marco dela, e os sem tarefa das outras
     sessões do mesmo workstream cujo último turno tem mais de STALE_S."""
@@ -904,9 +911,7 @@ def pending(rows, session_id, now):
     own = [seg for seg in segments if seg["session_id"] == session_id]
     open_ = own[-1] if own and own[-1]["task"] is None else {"rows": []}
     turns = sorted((r for r in open_["rows"] if r.get("event") == "turn"), key=row_start)
-    workstreams = [r.get("workstream") for seg in own for r in seg["rows"] if r.get("workstream")]
-    workstreams += [seg["task"].get("workstream") for seg in own if seg["task"] and seg["task"].get("workstream")]
-    workstream = workstreams[-1] if workstreams else None
+    workstream = session_workstream(own)
     others = {"turns": 0, "sessions": 0, "cost": 0.0}
     if workstream:
         for sid in dict.fromkeys(seg["session_id"] for seg in segments):
@@ -915,7 +920,7 @@ def pending(rows, session_id, now):
             theirs = [seg for seg in segments if seg["session_id"] == sid]
             last = max((row_end(r) for seg in theirs for r in seg["rows"] if r.get("event") == "turn"), default=None)
             tail = task_measure(theirs[-1]["rows"]) if theirs[-1]["task"] is None else new_measure()
-            if (theirs[-1]["workstream"] != workstream or not tail["turns"] or last is None
+            if (session_workstream(theirs) != workstream or not tail["turns"] or last is None
                     or (now - last).total_seconds() <= STALE_S):
                 continue
             others["turns"] += tail["turns"]
@@ -935,7 +940,7 @@ def pending_text(rows, session_id, now):
         n = len(data["turns"])
         cost = f"US$ {brl(measure['cost_turns'])}"
         if measure["subagents"]:
-            cost += (f" dos turnos e {brl(measure['cost_subagents'])} de {measure['subagents']} "
+            cost += (f" dos turnos e US$ {brl(measure['cost_subagents'])} de {measure['subagents']} "
                      + ("subagente" if measure["subagents"] == 1 else "subagentes"))
         since = parse_time(data["turns"][0]["start"]).strftime("%H:%M")
         lines.append(f"este commit fecha {n} {'turno' if n == 1 else 'turnos'} desde {since} "
