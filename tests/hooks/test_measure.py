@@ -265,6 +265,11 @@ class WaitsAndHeadTest(HookTest):
         _, seen = self.measure.measure([json.dumps(e) for e in (skill, says(9, "r1"))])
         self.assertEqual(seen["prompt_head"], "/plan-runner abra o plano")
 
+    def test_a_command_tag_quoted_in_a_normal_prompt_is_not_a_command(self):
+        quoted = "Como a tag <command-name>/help</command-name> é gravada?"
+        _, seen = self.measure.measure([json.dumps(e) for e in (prompt(0, quoted), says(9, "r1"))])
+        self.assertEqual(seen["prompt_head"], quoted[:80])
+
     def test_a_system_reminder_is_not_a_prompt(self):
         reminder = '<system-reminder>\nThe user named this session "tools-kit".</system-reminder>'
         lines = [prompt(0, "primeiro"), says(10, "r1"), prompt(50, reminder), prompt(80, "segundo"), says(90, "r2")]

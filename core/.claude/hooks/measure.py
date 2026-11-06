@@ -331,6 +331,7 @@ def seconds_between(earlier, later):
 NOT_A_REQUEST = ("<local-command-stdout>", "<local-command-stderr>", "[Request interrupted by user",
                  "<task-notification>", "<system-reminder>")
 COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.S)
+COMMAND_LINE = re.compile(r"\s*(?:<command-message>.*?</command-message>\s*)?<command-name>", re.S)
 COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 HEAD_CHARS = 80
 
@@ -350,7 +351,7 @@ def request_text(e, kind, msg):
 def head_of(text):
     """Os primeiros 80 caracteres do pedido, numa linha só. O comando digitado (`/rename x`) sai pelo nome e os
     argumentos, e não pelas marcas `<command-name>` que o transcript grava."""
-    name = COMMAND_NAME.search(text)
+    name = COMMAND_NAME.search(text) if COMMAND_LINE.match(text) else None
     if name:
         args = COMMAND_ARGS.search(text)
         text = f"{name.group(1).strip()} {args.group(1).strip() if args else ''}"
@@ -396,7 +397,7 @@ def measure(lines):
             requests += 1
             if requests > 1 and last_talk and ts:
                 waits.append(seconds_between(last_talk, ts))
-            if COMMAND_NAME.search(text):
+            if COMMAND_LINE.match(text):
                 command_head = command_head or head_of(text)
             elif head is None and text:
                 head = head_of(text)
