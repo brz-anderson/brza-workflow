@@ -22,6 +22,11 @@ A mensagem entra no chat pelo `agentSession.send` do runtime do app, pelo `rpc` 
 `delivery: 'queue-if-active'`: com o agente no meio de um turno, ela espera na fila. A saída inteira fica em
 <ORCA_CHAT_SCRATCH_DIR ou o temp>/brza-run/<hora>-<id>/output.log.
 
+Os dois modos medem o comando — a duração, a CPU (usuário e sistema) e o pico de memória da árvore que ele roda, pelo
+`getrusage(RUSAGE_CHILDREN)` de quem o espera — e gravam uma linha `run` no `.measurements/measurements.jsonl` do
+workspace, com a sessão que chamou: o `CLAUDE_CODE_SESSION_ID` no `brza run -- <comando>`, o `session_id` do chat no ▶.
+Sem workspace, a linha não sai e o stderr avisa; nada disso muda os blocos, o código de saída nem a aba.
+
 O ▶ abre a aba no zsh de login, que acha o brza-run pelo link em ~/.local/bin/brza-run, que o `brza install --run`
 cria. A regra do AGENTS.md — comando para quem pediu em cerca bash, sem o brza-run — não muda: ele é opção explícita.
 """
@@ -30,12 +35,15 @@ import json
 import os
 import pty
 import re
+import resource
+import runpy
 import shlex
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 SELF = Path(__file__).resolve()
@@ -45,6 +53,7 @@ import brza_runtime as runtime  # noqa: E402
 from brza_runtime import canonicalize, send_mutation, send_to_chat  # noqa: E402,F401
 
 TAIL_LINES = 200
+COMMAND_CHARS = 200  # o `command` da linha `run`
 TAIL_BYTES = 16 * 1024
 # CSI (cor, cursor), OSC (título, hiperlink) e os escapes curtos, como o ESC > que o less deixa
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[ -/]*[0-~]')
@@ -88,8 +97,15 @@ def report(command: str, code: int, output: str, log: Path) -> str:
     return f'{fenced(command, "bash")}\n{fenced(shown or "(sem saída)")}\n{note}'
 
 
-def run_here(command: str, run: Path) -> tuple[int, str]:
-    """Roda o comando num pseudo-terminal, mostrando a saída na aba, e grava a saída limpa em output.log."""
+def cpu_of(usage) -> float:
+    return usage.ru_utime + usage.ru_stime
+
+
+def run_here(command: str, run: Path) -> tuple[int, str, dict]:
+    """Roda o comando num pseudo-terminal, mostrando a saída na aba, e grava a saída limpa em output.log. Devolve o
+    código, a saída e as métricas: a duração, a CPU e o pico de RSS da árvore do comando, pelo RUSAGE_CHILDREN — os
+    filhos e netos colhidos; o processo em segundo plano que não terminou fica de fora. A CPU é a diferença em volta
+    do comando; o pico é o do maior processo, e não a soma."""
     captured = bytearray()
 
     def read(fd):
@@ -100,30 +116,81 @@ def run_here(command: str, run: Path) -> tuple[int, str]:
     # sem pager: o less quebraria as linhas na largura da aba e, com saída longa, esperaria um q que ninguém digita
     # M23: desativa sessão do shell que polui a saída
     os.environ.update(PAGER='cat', GIT_PAGER='cat', SHELL_SESSIONS_DISABLE='1')
+    before, start = resource.getrusage(resource.RUSAGE_CHILDREN), time.monotonic()
     status = pty.spawn([os.environ.get('SHELL') or '/bin/zsh', '-ic', command], read)
+    duration, after = time.monotonic() - start, resource.getrusage(resource.RUSAGE_CHILDREN)
+    peak = after.ru_maxrss if sys.platform == 'darwin' else after.ru_maxrss * 1024  # bytes no macOS, KB no Linux
+    metrics = {'duration_s': round(duration, 2), 'cpu_s': round(cpu_of(after) - cpu_of(before), 2),
+               'max_rss_mb': round(peak / 2**20)}
     code = os.waitstatus_to_exitcode(status)
     code = 128 - code if code < 0 else code
     output = clean(bytes(captured))
     (run / 'output.log').write_text(output)
-    return code, output
+    return code, output, metrics
+
+
+def workstream_of(cwd: Path) -> str | None:
+    """O workstream do cwd, pelo `workstream_of` do hook de medição, para a linha `run` casar com as do `turn`."""
+    try:
+        return runpy.run_path(str(Path(runtime.brza_root.__file__).with_name('measure.py')))['workstream_of'](str(cwd))
+    except Exception:
+        return None
+
+
+def record_run(mode: str, command: str, code: int, metrics: dict, cwd: Path, session_id: str | None,
+               chat_id: str | None = None):
+    """Grava a linha `run` no .measurements/measurements.jsonl do workspace do cwd — a BRZA_WORKSPACE, ou o que o
+    `brza_root.find` acha. Sem workspace, ou se a gravação falha, só avisa no stderr: a medida nunca muda o resultado
+    do comando."""
+    try:
+        found = runtime.brza_root.find(str(cwd))
+    except Exception:
+        found = None
+    if not found:
+        print(f'brza-run: sem workspace para {cwd} (nem BRZA_WORKSPACE); não gravei a medida do comando',
+              file=sys.stderr)
+        return
+    line = {'event': 'run', 'timestamp': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'session_id': session_id or None, 'chat_id': chat_id, 'mode': mode, 'cwd': str(cwd),
+            'workstream': workstream_of(cwd), 'command': command[:COMMAND_CHARS], 'code': code,
+            **{k: metrics.get(k) for k in ('duration_s', 'cpu_s', 'max_rss_mb')}}
+    try:
+        folder = Path(found.root) / '.measurements'
+        folder.mkdir(exist_ok=True)
+        with (folder / 'measurements.jsonl').open('a', encoding='utf-8') as f:
+            f.write(json.dumps(line, ensure_ascii=False) + '\n')
+    except OSError as e:
+        print(f'brza-run: não gravei a medida do comando ({e})', file=sys.stderr)
+
+
+def provider_session(chat: str) -> str | None:
+    """O id da sessão do runtime por trás do chat, ou None quando o app não o dá — o `provider_session` do
+    brza-sessions."""
+    try:
+        found = runtime.rpc('agentSession.history', {'sessionId': chat, 'direction': 'tail', 'limit': 1})
+    except runtime.BrzaError:
+        return None
+    return (found.get('providerSession') or {}).get('id')
 
 
 def run_in_chat(command: str, session_id: str) -> int:
-    code, output = run_here(command, run := new_run())
+    code, output, metrics = run_here(command, run := new_run())
     message = f'Rodei pelo ▶:\n\n{report(command, code, output, run / "output.log")}'
     try:
         send_to_chat(session_id, message)
         print(f'\nbrza-run: saiu com {code}; mandei a entrada e a saída ao chat')
     except (OSError, ValueError, KeyError, runtime.BrzaError) as e:
         print(f'\nbrza-run: saiu com {code}, mas não mandei ao chat ({e})', file=sys.stderr)
+    record_run('chat', command, code, metrics, Path.cwd(), provider_session(session_id), session_id)
     return code
 
 
 def run_for_result(command: str, result: Path) -> int:
-    """O modo interno do `brza run -- <comando>`: roda na aba e grava o código em result.json, que o de fora espera."""
-    code, _ = run_here(command, result.parent)
+    """O modo interno do `brza run -- <comando>`: roda na aba e grava o código e as métricas em result.json, que o de
+    fora espera."""
+    code, _, metrics = run_here(command, result.parent)
     partial = result.with_suffix('.tmp')
-    partial.write_text(json.dumps({'code': code}))
+    partial.write_text(json.dumps({'code': code, **metrics}))
     partial.replace(result)
     return code
 
@@ -152,8 +219,10 @@ def run_in_tab(args: list[str], cwd: Path, poll: float = 0.5) -> int:
             if not terminal_alive(handle):
                 sys.exit(f'brza-run: a aba fechou antes do fim de {command}')
         time.sleep(poll)
-    code = json.loads(result.read_text())['code']
+    done = json.loads(result.read_text())
+    code = done['code']
     print(report(command, code, (run / 'output.log').read_text(), run / 'output.log'))
+    record_run('tab', command, code, done, cwd, os.environ.get('CLAUDE_CODE_SESSION_ID'))
     if code == 0 and handle:
         runtime.brza('terminal', 'close', '--terminal', handle)
     return code
