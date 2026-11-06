@@ -443,9 +443,13 @@ class BrzaRunTest(unittest.TestCase):
             ws = fake_workspace(Path(temp).resolve() / 'ws')
             git('-C', str(ws), 'init', '-q', '-b', 'workstream/demo')
             git('-C', str(ws), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x')
-            self.tab_run(['true'], env={'BRZA_WORKSPACE': str(ws)}, result={'code': 0}, cwd=ws)
+            self.tab_run(['true'], env={'BRZA_WORKSPACE': str(ws)}, cwd=ws)
             lines = measured(ws)
-        self.assertEqual([(l['workstream'], l['cwd'], l['duration_s']) for l in lines], [('demo', str(ws), None)])
+        self.assertEqual([(l['workstream'], l['cwd']) for l in lines], [('demo', str(ws))])
+        self.assertGreater(lines[0]['duration_s'], 0)
+        for key in ('cpu_s', 'max_rss_mb'):
+            self.assertIsInstance(lines[0][key], (int, float))
+            self.assertGreaterEqual(lines[0][key], 0)
 
     def test_without_a_workspace_there_is_no_line_and_a_warning_on_stderr(self):
         code, calls, out = self.tab_run(['echo', 'oi'], env={'CLAUDE_CODE_SESSION_ID': 'sess-1'})
@@ -469,6 +473,8 @@ class BrzaRunTest(unittest.TestCase):
         def rpc(method, params):
             calls.append((method, params))
             if method == 'agentSession.history':
+                if provider is None and any(c[0] == 'agentSession.send' for c in calls):
+                    return None
                 if provider is OSError:
                     raise RUN['runtime'].BrzaError('o runtime não respondeu')
                 return {'page': {'fence': 7}, 'providerSession': provider}
@@ -491,6 +497,11 @@ class BrzaRunTest(unittest.TestCase):
 
     def test_chat_mode_without_the_app_writes_a_null_session(self):
         code, lines = self.chat_run(OSError)
+        self.assertEqual(code, 2)
+        self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
+
+    def test_chat_mode_with_a_null_rpc_result_still_writes_the_line_and_returns_the_code(self):
+        code, lines = self.chat_run(None)
         self.assertEqual(code, 2)
         self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
 

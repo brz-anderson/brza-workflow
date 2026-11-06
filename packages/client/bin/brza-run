@@ -170,7 +170,7 @@ def provider_session(chat: str) -> str | None:
         found = runtime.rpc('agentSession.history', {'sessionId': chat, 'direction': 'tail', 'limit': 1})
     except runtime.BrzaError:
         return None
-    return (found.get('providerSession') or {}).get('id')
+    return ((found or {}).get('providerSession') or {}).get('id')
 
 
 def run_in_chat(command: str, session_id: str) -> int:
