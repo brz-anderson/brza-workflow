@@ -17,12 +17,21 @@ decisões das travas de retomada e do /compact. As negações de hook saem com o
   python3 scripts/summarize_measurements.py --facts              o acerto dos fatos do desenho (PLN-005), por papel, classe,
                                                                  faixa de confiança e tipo (com --json, em JSON); --since
                                                                  filtra pela data do fato
+  python3 scripts/summarize_measurements.py --by-task            por tarefa (o worklog): o corrido, o agente, Anderson e a
+                                                                 pausa, o custo, a CPU e o `brza run`; as tarefas não
+                                                                 medidas; e a ociosa e os turnos sem tarefa por sessão
+                                                                 (com --since, --workstream <nome> e --json)
+  python3 scripts/summarize_measurements.py --by-task --pending --session <id>
+                                                                 o que o commit da sessão vai fechar, e os turnos sem
+                                                                 tarefa das outras sessões do workstream paradas há 2 h
 
 Log que não existe é pulado; linha que não é JSON é contada e ignorada. Só biblioteca padrão, Python 3.9.
 """
 
 import argparse
+import bisect
 import collections
+import datetime
 import json
 import os
 import re
@@ -540,6 +549,407 @@ def to_json_facts(facts):
             "captures": [{"agent": a, **c} for a, c in facts["captures"].items()],
             "audits": facts["audits"], "pending": facts["pending"]}
 
+# --- A medida por tarefa (PLN-012, D4) --------------------------------------------------------------------------------
+#
+# A tarefa é o worklog: o `brza note commit` grava um evento `task` por commit com worklog (D1), e cada um é um marco da
+# sessão. O segmento k de uma sessão são os turnos dela cujo começo (`timestamp − duration_s`) cai em
+# (marco k−1, marco k]; depois do último marco, os turnos ficam "sem tarefa". O `brza-note` usa `task_segments` e
+# `task_measure` por `runpy`, para a `## Medida` do worklog e esta tabela darem o mesmo número.
+
+PAUSE_S = 1800  # a espera acima disto é pausa, e não tempo de Anderson (PLN-012/R2.3)
+STALE_S = 2 * 3600  # a outra sessão do workstream parada há mais disto entra no aviso do --pending (R3.3)
+NO_SESSION = "(sem sessão)"
+ADDITIVE = ("agent_s", "anderson_s", "pause_s", "elapsed_s", "cost_turns", "cost_subagents", "cpu_self_s",
+            "cpu_children_s", "run_cpu_s", "run_duration_s")
+COUNTS = ("turns", "subagents", "runs", "machine_turns", "no_cost_turns", "no_cost_subagents")
+PEAKS = ("rss_max_mb", "run_max_rss_mb")
+
+
+def parse_time(value):
+    """O `datetime` com fuso de um carimbo ISO 8601, ou None. Sem fuso, vale o local."""
+    if not value:
+        return None
+    try:
+        stamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.astimezone()
+
+
+def row_end(row):
+    return parse_time(row.get("timestamp"))
+
+
+def row_start(row):
+    """O começo da linha: o `timestamp` é o fim, e o `duration_s` volta até o primeiro pedido do trecho (D1)."""
+    end = row_end(row)
+    try:
+        duration = max(float(row.get("duration_s") or 0), 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return end - datetime.timedelta(seconds=duration) if end else None
+
+
+def task_mark(task):
+    """O marco do evento `task`: o `until` (`HH:MM`, do dia e no fuso do commit, ou ISO), ou o `timestamp`."""
+    stamp, until = row_end(task), task.get("until")
+    if until and stamp:
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", str(until).strip())
+        if match:
+            hour, minute, second = (int(g or 0) for g in match.groups())
+            return stamp.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        return parse_time(until) or stamp
+    return stamp
+
+
+def counts_for_task(row):
+    """O turno, o subagente e o `run` entram na tarefa; o turno da auditoria fica de fora, como no --by-workstream."""
+    event = row.get("event")
+    return event in ("subagent", "run") or (event == "turn" and not row.get("fact_audit"))
+
+
+def task_segments(rows):
+    """Os segmentos de cada sessão, na ordem dos marcos: `{"session_id", "workstream", "task", "worklogs", "start",
+    "end", "rows"}`, com `start` e `end` os marcos que o cercam (ISO, ou None) e `rows` os turnos, subagentes e `run`
+    dele. O segmento de depois do último marco, com `task` None, é o "sem tarefa"; o `task` sem sessão vira um segmento
+    sem linhas. Só contam as linhas que terminam a partir do primeiro evento `task` do log (R4.1)."""
+    tasks = [r for r in rows if r.get("event") == "task" and row_end(r)]
+    first = min((row_end(t) for t in tasks), default=None)
+    items = [r for r in rows if counts_for_task(r) and row_end(r) and (first is None or row_end(r) >= first)]
+
+    order, marks = [], collections.defaultdict(list)  # sessão → [(marco, task)], em ordem
+    loose = []
+    for t in sorted(tasks, key=task_mark):
+        sid = t.get("session_id") or None
+        if sid is None:
+            loose.append(t)
+            continue
+        if sid not in marks:
+            order.append(sid)
+        marks[sid].append((task_mark(t), t))
+    for r in items:
+        sid = r.get("session_id") or None
+        if sid not in marks:
+            order.append(sid)
+            marks[sid] = []
+
+    by_session = {}
+    for sid in order:
+        segments, previous = [], None
+        for mark, t in marks[sid]:
+            segments.append({"session_id": sid, "workstream": t.get("workstream"), "task": t,
+                             "worklogs": list(t.get("worklogs") or []), "start": previous and previous.isoformat(),
+                             "end": mark.isoformat(), "rows": []})
+            previous = mark
+        segments.append({"session_id": sid, "workstream": None, "task": None, "worklogs": [],
+                         "start": previous and previous.isoformat(), "end": None, "rows": []})
+        by_session[sid] = segments
+
+    def by_marks(sid, start):
+        stamps = [m for m, _ in marks[sid]]
+        return by_session[sid][bisect.bisect_left(stamps, start)]  # o turno do marco fica com a tarefa que ele fecha
+
+    turns_of = collections.defaultdict(list)  # sessão → [(começo, fim, segmento)]
+    for r in sorted((r for r in items if r.get("event") == "turn"), key=row_start):
+        sid = r.get("session_id") or None
+        segment = by_marks(sid, row_start(r))
+        segment["rows"].append(r)
+        turns_of[sid].append((row_start(r), row_end(r), segment))
+    for r in sorted((r for r in items if r.get("event") != "turn"), key=row_start):
+        sid, start = r.get("session_id") or None, row_start(r)
+        # o subagente e o `run` vão ao turno da sessão que contém o começo deles; fora de turno, pelos marcos (D4)
+        inside = next((seg for s, e, seg in turns_of[sid] if s <= start <= e), None)
+        (inside or by_marks(sid, start))["rows"].append(r)
+
+    segments = [seg for sid in order for seg in by_session[sid]]
+    for seg in segments:
+        if seg["workstream"] is None:
+            seg["workstream"] = next((r.get("workstream") for r in reversed(seg["rows"]) if r.get("workstream")), None)
+    for t in loose:
+        segments.append({"session_id": None, "workstream": t.get("workstream"), "task": t,
+                         "worklogs": list(t.get("worklogs") or []), "start": None, "end": task_mark(t).isoformat(),
+                         "rows": []})
+    return segments
+
+
+def new_measure():
+    measure = {key: 0.0 for key in ADDITIVE}
+    measure.update({key: 0 for key in COUNTS})
+    measure.update({key: None for key in PEAKS})
+    measure.update({"start": None, "end": None})
+    return measure
+
+
+def peak(current, value):
+    if not isinstance(value, (int, float)):
+        return current
+    return value if current is None else max(current, value)
+
+
+def split_wait(measure, wait):
+    measure["anderson_s"] += min(wait, PAUSE_S)
+    measure["pause_s"] += max(wait - PAUSE_S, 0)
+
+
+def task_measure(rows):
+    """Os três tempos, o custo e a máquina das linhas de um segmento (D2): agente = Σ (duration_s − Σ waits_s);
+    Anderson e pausa dividem, no PAUSE_S, cada `waits_s` e cada intervalo entre dois turnos; o corrido é a soma. A
+    linha sem `waits_s` não teve espera; sem `machine`, não tem CPU (`machine_turns` conta as que têm)."""
+    measure = new_measure()
+    turns = sorted((r for r in rows if r.get("event") == "turn" and row_end(r)), key=row_start)
+    last_end = None
+    for r in turns:
+        start, end = row_start(r), row_end(r)
+        waits = [max(float(w), 0.0) for w in (r.get("waits_s") or []) if isinstance(w, (int, float))]
+        measure["agent_s"] += max((end - start).total_seconds() - sum(waits), 0.0)
+        if last_end is not None:
+            waits.append(max((start - last_end).total_seconds(), 0.0))
+        for wait in waits:
+            split_wait(measure, wait)
+        last_end = end if last_end is None else max(last_end, end)
+        measure["turns"] += 1
+        if r.get("estimated_cost_usd") is None:
+            measure["no_cost_turns"] += 1
+        else:
+            measure["cost_turns"] += float(r["estimated_cost_usd"])
+        machine = r.get("machine")
+        if isinstance(machine, dict):
+            measure["machine_turns"] += 1
+            measure["cpu_self_s"] += float(machine.get("cpu_self_s") or 0)
+            measure["cpu_children_s"] += float(machine.get("cpu_children_s") or 0)
+            measure["rss_max_mb"] = peak(measure["rss_max_mb"], machine.get("rss_mb"))
+    measure["elapsed_s"] = measure["agent_s"] + measure["anderson_s"] + measure["pause_s"]
+    if turns:
+        measure["start"], measure["end"] = row_start(turns[0]).isoformat(), last_end.isoformat()
+    for r in rows:
+        if r.get("event") == "subagent":
+            measure["subagents"] += 1
+            if r.get("estimated_cost_usd") is None:
+                measure["no_cost_subagents"] += 1
+            else:
+                measure["cost_subagents"] += float(r["estimated_cost_usd"])
+        elif r.get("event") == "run":
+            measure["runs"] += 1
+            measure["run_cpu_s"] += float(r.get("cpu_s") or 0)
+            measure["run_duration_s"] += float(r.get("duration_s") or 0)
+            measure["run_max_rss_mb"] = peak(measure["run_max_rss_mb"], r.get("max_rss_mb"))
+    return measure
+
+
+def add_measure(total, measure, share=1.0):
+    """Soma a medida de um segmento à da tarefa. O segmento de um commit com n worklogs entra com share = 1/n nos tempos,
+    no custo e na CPU; as contagens e os picos entram inteiros."""
+    for key in ADDITIVE:
+        total[key] += measure[key] * share
+    for key in COUNTS:
+        total[key] += measure[key]
+    for key in PEAKS:
+        total[key] = peak(total[key], measure[key])
+    for key, pick in (("start", min), ("end", max)):
+        values = [v for v in (total[key], measure[key]) if v]
+        total[key] = pick(values, key=parse_time) if values else None
+    return total
+
+
+def worklog_day_and_name(path):
+    name = os.path.basename(str(path))
+    name = name[:-3] if name.endswith(".md") else name
+    match = re.match(r"(\d{4}-\d{2}-\d{2})-(.*)", name)
+    return (match.group(1), match.group(2)) if match else (None, name)
+
+
+def session_label(sid, tasks):
+    if sid is None:
+        return NO_SESSION
+    names = [t.get("session_name") for t in tasks if t.get("session_id") == sid and t.get("session_name")]
+    return names[-1] if names else str(sid)[:8]
+
+
+def aggregate_by_task(rows, since="", workstream=""):
+    """{"tasks", "unmeasured", "sessions"} do --by-task (D4). A tarefa é o worklog, somado em todos os segmentos e
+    sessões que o fecharam. Não medido é o `task` sem sessão ou de sessão sem turno no log. A sessão traz a ociosa — do
+    fim do último turno de um segmento ao começo do primeiro do seguinte — e os turnos sem tarefa. O `--since` e o
+    `--workstream` filtram a saída: a tarefa pelo último marco, e a sessão pelo último turno."""
+    segments = task_segments(rows)
+    task_rows = [r for r in rows if r.get("event") == "task"]
+    with_turns = {seg["session_id"] for seg in segments
+                  if seg["session_id"] and any(r.get("event") == "turn" for r in seg["rows"])}
+
+    tasks, unmeasured = {}, []
+    for seg in segments:
+        t = seg["task"]
+        if not t:
+            continue
+        if not seg["session_id"] or seg["session_id"] not in with_turns:
+            for path in seg["worklogs"]:
+                unmeasured.append({"worklog": path, "commit": t.get("commit"), "timestamp": seg["end"],
+                                   "workstream": t.get("workstream"),
+                                   "reason": "sem sessão" if not seg["session_id"] else "sessão sem turno"})
+            continue
+        measure = task_measure(seg["rows"])
+        share = 1.0 / max(len(seg["worklogs"]), 1)
+        for path in seg["worklogs"]:
+            acc = tasks.get(path)
+            if acc is None:
+                day, name = worklog_day_and_name(path)
+                acc = tasks[path] = {"worklog": path, "workstream": t.get("workstream") or NO_WORKSTREAM,
+                                     "day": day or seg["end"][:10], "task": name, "session_ids": [], "commit_ids": [],
+                                     "shared_with": 0, "last_mark": seg["end"], "segments": [], **new_measure()}
+            add_measure(acc, measure, share)
+            if seg["session_id"] not in acc["session_ids"]:
+                acc["session_ids"].append(seg["session_id"])
+            if t.get("commit") not in acc["commit_ids"]:
+                acc["commit_ids"].append(t.get("commit"))
+            acc["shared_with"] = max(acc["shared_with"], len(seg["worklogs"]) - 1)
+            acc["last_mark"] = max(acc["last_mark"], seg["end"], key=parse_time)
+            acc["workstream"] = t.get("workstream") or acc["workstream"]
+            acc["segments"].append({"session_id": seg["session_id"], "commit": t.get("commit"), "start": measure["start"],
+                                    "end": measure["end"], "mark": seg["end"], "turns": measure["turns"]})
+
+    sessions = []
+    for sid in dict.fromkeys(seg["session_id"] for seg in segments if seg["rows"]):  # a sessão só de `task` fica fora
+        own = [seg for seg in segments if seg["session_id"] == sid and (seg["rows"] or seg["task"] is None)]
+        idle, last_end = 0.0, None
+        for seg in own:
+            measure = task_measure(seg["rows"])
+            if measure["start"] is None:
+                continue
+            if last_end is not None:
+                idle += max((parse_time(measure["start"]) - last_end).total_seconds(), 0.0)
+            last_end = parse_time(measure["end"])
+        open_ = task_measure(own[-1]["rows"]) if own and own[-1]["task"] is None else new_measure()
+        ends = [row_end(r) for seg in own for r in seg["rows"]]
+        workstreams = [r.get("workstream") for seg in own for r in seg["rows"] if r.get("workstream")]
+        sessions.append({"session_id": sid, "name": session_label(sid, task_rows),
+                         "workstream": workstreams[-1] if workstreams else NO_WORKSTREAM, "idle_s": idle,
+                         "no_task_turns": open_["turns"], "no_task_subagents": open_["subagents"],
+                         "no_task_cost_turns": open_["cost_turns"], "no_task_cost_subagents": open_["cost_subagents"],
+                         "no_task_no_cost": open_["no_cost_turns"] + open_["no_cost_subagents"],
+                         "no_task_since": open_["start"], "last": max(ends).isoformat() if ends else None})
+
+    def keep(stamp, ws):
+        return (not since or str(stamp or "")[:10] >= since) and (not workstream or ws == workstream)
+
+    out = []
+    for acc in sorted(tasks.values(), key=lambda a: (a["workstream"], a["day"], parse_time(a["last_mark"]))):
+        if not keep(acc["last_mark"], acc["workstream"]):
+            continue
+        acc["sessions"], acc["commits"] = len(acc.pop("session_ids")), len(acc.pop("commit_ids"))
+        if not acc["machine_turns"]:
+            acc["cpu_self_s"] = acc["cpu_children_s"] = None
+        out.append(acc)
+    return {"tasks": out,
+            "unmeasured": [u for u in sorted(unmeasured, key=lambda u: parse_time(u["timestamp"]))
+                           if keep(u["timestamp"], u["workstream"])],
+            "sessions": [s for s in sessions if keep(s["last"], s["workstream"])]}
+
+
+def hm(seconds):
+    minutes = int(round(float(seconds or 0) / 60))
+    return f"{minutes // 60}:{minutes % 60:02d}"
+
+
+def human_duration(seconds):
+    """Segundos abaixo de 1 min, minutos inteiros até 60 min, "1 h 12 min" acima (a forma da `## Medida`, D3)."""
+    seconds = float(seconds or 0)
+    if seconds < 59.5:
+        return f"{round(seconds)} s"
+    minutes = int(round(seconds / 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h" + (f" {minutes} min" if minutes else "")
+
+
+def brl(value):
+    """O valor em US$ com vírgula decimal, como no aviso do close-task."""
+    return f"{value:.2f}".replace(".", ",")
+
+
+def cpu_min(value):
+    return UNKNOWN if value is None else f"{value / 60:.1f}"
+
+
+def print_by_task(result):
+    print_table("Tarefas, por workstream e dia — tempos em h:mm, CPU em minutos",
+                ("workstream", "dia", "tarefa", "sessões", "turnos", "corrido", "agente", "Anderson", "pausa",
+                 "US$ turnos", "US$ subag.", "US$ total", "CPU claude", "CPU comandos", "runs", "CPU runs",
+                 "pico runs MB", "RSS máx MB"),
+                ("<", "<", "<", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">"),
+                [(t["workstream"], t["day"], t["task"] + (f" ÷{t['shared_with'] + 1}" if t["shared_with"] else ""),
+                  t["sessions"], t["turns"], hm(t["elapsed_s"]), hm(t["agent_s"]), hm(t["anderson_s"]),
+                  hm(t["pause_s"]), money({"cost": t["cost_turns"], "no_cost": t["no_cost_turns"]}),
+                  money({"cost": t["cost_subagents"], "no_cost": t["no_cost_subagents"]}),
+                  money({"cost": t["cost_turns"] + t["cost_subagents"],
+                         "no_cost": t["no_cost_turns"] + t["no_cost_subagents"]}),
+                  cpu_min(t["cpu_self_s"]), cpu_min(t["cpu_children_s"]), t["runs"] or "",
+                  cpu_min(t["run_cpu_s"]) if t["runs"] else "", label(t["run_max_rss_mb"]) if t["runs"] else "",
+                  label(t["rss_max_mb"])) for t in result["tasks"]])
+    print_table("Tarefas não medidas", ("worklog", "commit", "hora", "motivo"), ("<", "<", "<", "<"),
+                [(u["worklog"], label(u["commit"]), str(u["timestamp"])[:16].replace("T", " "), u["reason"])
+                 for u in result["unmeasured"]])
+    print_table("Sessões: ociosa e sem tarefa — sem tarefa é o turno depois do último marco da sessão",
+                ("sessão", "workstream", "ociosa", "turnos sem tarefa", "US$ sem tarefa", "desde"),
+                ("<", "<", ">", ">", ">", "<"),
+                [(s["name"], s["workstream"], hm(s["idle_s"]), s["no_task_turns"],
+                  money({"cost": s["no_task_cost_turns"] + s["no_task_cost_subagents"], "no_cost": s["no_task_no_cost"]})
+                  if s["no_task_turns"] or s["no_task_subagents"] else "",
+                  str(s["no_task_since"] or "")[:16].replace("T", " ")) for s in result["sessions"]])
+
+
+def pending(rows, session_id, now):
+    """O que o commit da sessão vai fechar (D6): os turnos depois do último marco dela, e os sem tarefa das outras
+    sessões do mesmo workstream cujo último turno tem mais de STALE_S."""
+    segments = task_segments(rows)
+    own = [seg for seg in segments if seg["session_id"] == session_id]
+    open_ = own[-1] if own and own[-1]["task"] is None else {"rows": []}
+    turns = sorted((r for r in open_["rows"] if r.get("event") == "turn"), key=row_start)
+    workstreams = [r.get("workstream") for seg in own for r in seg["rows"] if r.get("workstream")]
+    workstreams += [seg["task"].get("workstream") for seg in own if seg["task"] and seg["task"].get("workstream")]
+    workstream = workstreams[-1] if workstreams else None
+    others = {"turns": 0, "sessions": 0, "cost": 0.0}
+    if workstream:
+        for sid in dict.fromkeys(seg["session_id"] for seg in segments):
+            if sid in (None, session_id):
+                continue
+            theirs = [seg for seg in segments if seg["session_id"] == sid]
+            last = max((row_end(r) for seg in theirs for r in seg["rows"] if r.get("event") == "turn"), default=None)
+            tail = task_measure(theirs[-1]["rows"]) if theirs[-1]["task"] is None else new_measure()
+            if (theirs[-1]["workstream"] != workstream or not tail["turns"] or last is None
+                    or (now - last).total_seconds() <= STALE_S):
+                continue
+            others["turns"] += tail["turns"]
+            others["sessions"] += 1
+            others["cost"] += tail["cost_turns"] + tail["cost_subagents"]
+    return {"session_id": session_id, "workstream": workstream, "measure": task_measure(open_["rows"]),
+            "turns": [{"start": row_start(r).isoformat(), "prompt_head": r.get("prompt_head") or ""} for r in turns],
+            "others": others}
+
+
+def pending_text(rows, session_id, now):
+    data = pending(rows, session_id, now)
+    measure, lines = data["measure"], []
+    if not data["turns"]:
+        lines.append("nada a fechar")
+    else:
+        n = len(data["turns"])
+        cost = f"US$ {brl(measure['cost_turns'])}"
+        if measure["subagents"]:
+            cost += (f" dos turnos e {brl(measure['cost_subagents'])} de {measure['subagents']} "
+                     + ("subagente" if measure["subagents"] == 1 else "subagentes"))
+        since = parse_time(data["turns"][0]["start"]).strftime("%H:%M")
+        lines.append(f"este commit fecha {n} {'turno' if n == 1 else 'turnos'} desde {since} "
+                     f"(corrido {human_duration(measure['elapsed_s'])}, {cost}):")
+        for t in data["turns"]:
+            lines.append(f"  {parse_time(t['start']).strftime('%H:%M')} {t['prompt_head']}".rstrip())
+    others = data["others"]
+    if others["turns"]:
+        k = others["sessions"]
+        lines.append(f"sem tarefa no workstream {data['workstream']}: {others['turns']} "
+                     f"{'turno' if others['turns'] == 1 else 'turnos'} em {k} "
+                     f"{'sessão parada' if k == 1 else 'sessões paradas'} há mais de 2 h (US$ {brl(others['cost'])})")
+    return "\n".join(lines)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -551,15 +961,53 @@ def main():
                         help="só o resumo por workstream e por dia: turnos, custo, subagentes, memórias e rodadas")
     parser.add_argument("--facts", action="store_true",
                         help="só o acerto dos fatos do desenho, por papel, classe, faixa de confiança e tipo")
+    parser.add_argument("--by-task", action="store_true",
+                        help="só a medida por tarefa: as tarefas por workstream e dia, as não medidas e as sessões")
+    parser.add_argument("--workstream", default="", help="com --by-task, só as tarefas e as sessões do workstream")
+    parser.add_argument("--pending", action="store_true",
+                        help="com --by-task e --session, o que o commit da sessão vai fechar (o aviso do close-task)")
+    parser.add_argument("--session", default="", help="o id da sessão do --pending")
     args = parser.parse_args()
     if args.facts and (args.by_workstream or args.denials):
         parser.error("--facts não se combina com --by-workstream nem com --denials")
+    if args.by_task and (args.facts or args.by_workstream or args.denials):
+        parser.error("--by-task não se combina com --facts, --by-workstream nem --denials")
+    if (args.pending or args.workstream) and not args.by_task:
+        parser.error("--pending e --workstream vão com --by-task")
+    if args.pending != bool(args.session):
+        parser.error("--pending e --session vão juntos")
 
-    # No --facts a data filtra o `fact`, e não o log: o desfecho que chega depois dela vale para o fato de dentro.
-    rows, bad, exists = read_log(os.path.join(args.dir, LOG), "" if args.facts else args.since)
+    # No --facts a data filtra o `fact`, e não o log: o desfecho que chega depois dela vale para o fato de dentro. No
+    # --by-task, filtra a saída, porque os marcos de antes da data cortam os segmentos de depois.
+    rows, bad, exists = read_log(os.path.join(args.dir, LOG), "" if args.facts or args.by_task else args.since)
     if not exists:
+        if args.pending:
+            print("nada a fechar")  # o aviso do close-task sai 0 sempre
+            return 0
         print(f"nenhum log em {args.dir}: {LOG}", file=sys.stderr)
         return 2
+
+    if args.pending:
+        print(pending_text(rows, args.session, datetime.datetime.now().astimezone()))
+        return 0
+
+    if args.by_task:
+        result = aggregate_by_task(rows, args.since, args.workstream)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        first = min((str(r.get("timestamp")) for r in rows if r.get("event") == "task" and row_end(r)),
+                    key=parse_time, default=None)
+        print(f"{args.dir}: {LOG} {len(rows)}" + (f" (+{bad} ilegível)" if bad else "")
+              + (f", medida por tarefa desde {first[:16].replace('T', ' ')}" if first else "")
+              + (f", saída desde {args.since}" if args.since else "")
+              + (f", workstream {args.workstream}" if args.workstream else ""))
+        print()
+        if not first:
+            print("nenhum evento task no log ainda: a medida por tarefa começa no primeiro `brza note commit` de worklog")
+            return 0
+        print_by_task(result)
+        return 0
 
     if args.facts:
         facts = aggregate_facts(rows, args.since)

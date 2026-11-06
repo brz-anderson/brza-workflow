@@ -1,4 +1,4 @@
-"""Testes do `scripts/summarize_measurements.py` (`--by-workstream` e `--facts`), sobre um log montado pelo teste em
+"""Testes do `scripts/summarize_measurements.py` (`--by-workstream`, `--facts` e `--by-task`), sobre um log montado pelo teste em
 diretório temporário.
 
     python3 -m unittest discover -s .claude/hooks/tests
@@ -517,6 +517,274 @@ class FactsTest(unittest.TestCase):
             with mock.patch.object(sys, "argv", ["summarize", "--dir", tmp, "--facts"]), \
                     contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(self.summarize.main(), 2)
+
+
+# --- --by-task e --pending (PLN-012/P2, D4) --------------------------------------------------------------------------
+#
+# O caso da sessão 08e6c812 de 2026-11-03, no workstream tools-kit: os 5 turnos e os 2 subagentes como o hook gravou
+# (`.measurements/measurements.jsonl` do brza-workspace), com os campos novos do D2 onde o P1 os grava; e os 3 eventos
+# `task` que o P3 vai gravar, montados à mão na forma do D1, um por commit de worklog da sessão em workstream/tools-kit:
+# 74fbe0f (22:07:39) e 539b744 (22:16:03), da abertura do PLN-012, e afaf8c0 (22:32:31), da instalação do grok.
+
+SID = "08e6c812-8bb3-42fc-a47f-403fdb472ccd"
+OPENING = "work/worklogs/2026-11-03-pln-012-abertura-da-produtividade-por-tarefa.md"
+GROK = "work/worklogs/2026-11-03-instalacao-do-grok-build.md"
+MACHINE = {"pid": 44452, "from": "env", "cpu_self_s": 0.84, "cpu_children_s": 6.13, "rss_mb": 357, "footprint_mb": 209}
+
+
+def at(hhmmss, day="2026-11-03"):
+    return f"{day}T{hhmmss}-03:00"
+
+
+def tturn(end, duration, cost, session=SID, workstream="tools-kit", **extra):
+    return {"event": "turn", "timestamp": end if "T" in end else at(end), "session_id": session, "duration_s": duration,
+            "estimated_cost_usd": cost, "workstream": workstream, "model": "claude-opus-5-5", **extra}
+
+
+def tsub(end, duration, cost, session=SID, workstream="tools-kit"):
+    return {"event": "subagent", "timestamp": end if "T" in end else at(end), "session_id": session,
+            "duration_s": duration, "estimated_cost_usd": cost, "workstream": workstream, "agent_type": "designer"}
+
+
+def task(stamp, worklogs, commit, session=SID, workstream="tools-kit", until=None, **extra):
+    return {"event": "task", "timestamp": stamp if "T" in stamp else at(stamp), "session_id": session,
+            "bridge_session_id": None, "chat_id": "claude_2ead5f2f_c37e_41a1_8ef4_a299af008379",
+            "session_name": "tools-kit-produtividade" if session == SID else None, "pid": 44452,
+            "cwd": "/Users/andepb/Projects/brza-workspace/.worktrees/tools-kit", "workstream": workstream,
+            "worklogs": list(worklogs), "commit": commit, "until": until, **extra}
+
+
+def run(end, duration, cpu, rss, session=SID, workstream="tools-kit"):
+    return {"event": "run", "timestamp": end if "T" in end else at(end), "session_id": session, "chat_id": None,
+            "mode": "tab", "cwd": "/x", "workstream": workstream, "command": "pnpm test", "code": 0,
+            "duration_s": duration, "cpu_s": cpu, "max_rss_mb": rss}
+
+
+SESSION = [
+    {"event": "command", "timestamp": at("21:59:33"), "session_id": SID, "command": "plan-runner"},
+    # T1, 21:59:33–22:17:30: as duas rodadas esperaram 459 s e 166 s [PLN-012-design F7]
+    tturn("22:17:30", 1077, 2.35, waits_s=[459, 166], machine=MACHINE,
+          prompt_head="<command-message>plan-runner</command-message> <command-name>/plan-runner</command-name> "),
+    task("22:07:39", [OPENING], "74fbe0f"),
+    task("22:16:03", [OPENING], "539b744"),
+    tturn("22:32:45", 87, 0.43),  # T2, 22:31:18–22:32:45, a linha antiga: sem waits_s, prompt_head nem machine
+    task("22:32:31", [GROK], "afaf8c0"),
+    tturn("22:32:51", 5, 0.07, waits_s=[], prompt_head="> Grok CLI da xAI  esse"),  # T3, de 22:32:46
+    tturn("22:35:19", 59, 0.38, waits_s=[],  # T4, de 22:34:20
+          prompt_head="precisamos urgentemente adicionar o `grok` no fluxo do `brza sessions` e do `MCP"),
+    tturn("22:42:21", 39, 0.2, waits_s=[], prompt_head="siga com o `PLN-012`"),  # T5, de 22:41:42
+    tsub("22:53:35", 678, 2.87),  # começa às 22:42:17, dentro do T5
+    tsub("23:01:45", 257, 1.18),  # começa às 22:57:28, fora dos 5 turnos e depois do último marco
+]
+
+
+def by_worklog(result):
+    return {t["worklog"]: t for t in result["tasks"]}
+
+
+class ByTaskTest(unittest.TestCase):
+    def setUp(self):
+        self.summarize = load()
+
+    def measure(self, rows, **kwargs):
+        """O resumo com um `task` de outra sessão à meia-noite à frente, o deploy: as linhas que terminam antes do
+        primeiro `task` ficam de fora (R4.1), e o caso sintético não depende do turno que contém o commit."""
+        deploy = task("2026-11-03T00:00:00-03:00", ["work/worklogs/2026-11-02-deploy.md"], "d0", session="deploy")
+        result = self.summarize.aggregate_by_task([deploy] + rows, **kwargs)
+        result["unmeasured"] = [u for u in result["unmeasured"] if u["commit"] != "d0"]
+        return result
+
+    def test_the_session_of_2026_11_03_in_three_tasks(self):
+        result = self.measure(SESSION)
+        tasks = by_worklog(result)
+        self.assertEqual(set(tasks), {OPENING, GROK})
+        opening = tasks[OPENING]
+        self.assertEqual((opening["agent_s"], opening["anderson_s"], opening["pause_s"], opening["elapsed_s"]),
+                         (452, 625, 0, 1077))
+        self.assertEqual((opening["turns"], opening["sessions"], opening["commits"]), (1, 1, 2))
+        self.assertAlmostEqual(opening["cost_turns"], 2.35)
+        self.assertEqual(opening["cost_subagents"], 0)
+        self.assertEqual((opening["cpu_self_s"], opening["cpu_children_s"], opening["rss_max_mb"]), (0.84, 6.13, 357))
+        self.assertEqual((opening["workstream"], opening["day"], opening["task"]),
+                         ("tools-kit", "2026-11-03", "pln-012-abertura-da-produtividade-por-tarefa"))
+        grok = tasks[GROK]
+        self.assertEqual((grok["turns"], grok["agent_s"], grok["anderson_s"], grok["elapsed_s"]), (1, 87, 0, 87))
+        self.assertAlmostEqual(grok["cost_turns"], 0.43)
+        self.assertEqual(grok["machine_turns"], 0)  # a linha antiga, sem machine, fica sem CPU
+        self.assertIsNone(grok["cpu_self_s"])
+        self.assertEqual(result["unmeasured"], [])
+
+    def test_the_idle_time_and_the_turns_without_task_of_the_session(self):
+        (session,) = self.measure(SESSION)["sessions"]
+        self.assertEqual((session["session_id"], session["name"], session["workstream"]),
+                         (SID, "tools-kit-produtividade", "tools-kit"))
+        # do fim do T1 (22:17:30) ao começo do T2 (22:31:18), 13,8 min; e 1 s do fim do T2 ao começo do T3
+        self.assertEqual(session["idle_s"], 828 + 1)
+        self.assertEqual(round(828 / 60, 1), 13.8)
+        self.assertEqual(session["no_task_turns"], 3)  # T3 a T5
+        self.assertAlmostEqual(session["no_task_cost_turns"], 0.07 + 0.38 + 0.2)
+        self.assertAlmostEqual(session["no_task_cost_subagents"], 2.87 + 1.18)  # um no T5, outro depois do marco
+        self.assertEqual(session["no_task_since"], "2026-11-03T22:32:46-03:00")
+
+    def test_segments_and_measure_are_module_functions_for_brza_note(self):
+        segments = self.summarize.task_segments(SESSION)
+        closed = [s for s in segments if s["task"]]
+        self.assertEqual([s["task"]["commit"] for s in closed], ["74fbe0f", "539b744", "afaf8c0"])
+        self.assertEqual([len([r for r in s["rows"] if r["event"] == "turn"]) for s in closed], [1, 0, 1])
+        (open_,) = [s for s in segments if not s["task"]]
+        self.assertEqual([r["timestamp"] for r in open_["rows"] if r["event"] == "turn"],
+                         [at("22:32:51"), at("22:35:19"), at("22:42:21")])
+        measure = self.summarize.task_measure(closed[0]["rows"])
+        self.assertEqual((measure["agent_s"], measure["anderson_s"], measure["pause_s"]), (452, 625, 0))
+
+    def test_a_wait_of_fifty_minutes_is_thirty_of_anderson_and_twenty_of_pause(self):
+        rows = [tturn("10:00:00", 3600, 1.0, waits_s=[3000]), task("10:01:00", [OPENING], "a1")]
+        t = by_worklog(self.measure(rows))[OPENING]
+        self.assertEqual((t["agent_s"], t["anderson_s"], t["pause_s"], t["elapsed_s"]), (600, 1800, 1200, 3600))
+        # o mesmo para o intervalo entre dois turnos do segmento
+        rows = [tturn("09:00:00", 60, 0.1), tturn("09:51:00", 60, 0.1), task("09:52:00", [OPENING], "a1")]
+        t = by_worklog(self.measure(rows))[OPENING]
+        self.assertEqual((t["agent_s"], t["anderson_s"], t["pause_s"], t["elapsed_s"]), (120, 1800, 1200, 3120))
+
+    def test_two_worklogs_in_one_commit_split_the_segment_in_halves(self):
+        rows = [tturn("10:00:00", 100, 1.0, machine=MACHINE), task("10:01:00", [OPENING, GROK], "a1")]
+        tasks = by_worklog(self.measure(rows))
+        for path in (OPENING, GROK):
+            self.assertAlmostEqual(tasks[path]["cost_turns"], 0.5)
+            self.assertEqual((tasks[path]["elapsed_s"], tasks[path]["shared_with"]), (50, 1))
+            self.assertAlmostEqual(tasks[path]["cpu_children_s"], 6.13 / 2)
+
+    def test_a_task_without_session_or_without_turns_is_unmeasured(self):
+        rows = [tturn("10:00:00", 100, 1.0), task("10:01:00", [OPENING], "a1"),
+                task("10:05:00", [GROK], "b2", session=None),
+                task("10:06:00", ["work/worklogs/2026-11-03-outra.md"], "c3", session="sem-turno")]
+        result = self.measure(rows)
+        self.assertEqual(set(by_worklog(result)), {OPENING})
+        self.assertEqual([(u["worklog"], u["commit"], u["reason"]) for u in result["unmeasured"]],
+                         [(GROK, "b2", "sem sessão"), ("work/worklogs/2026-11-03-outra.md", "c3", "sessão sem turno")])
+
+    def test_until_moves_the_mark(self):
+        rows = [tturn("10:05:00", 300, 1.0), tturn("10:25:00", 300, 2.0),
+                task("10:30:00", [OPENING], "a1", until=at("10:10:00"))]
+        result = self.measure(rows)
+        self.assertEqual(by_worklog(result)[OPENING]["turns"], 1)
+        self.assertAlmostEqual(by_worklog(result)[OPENING]["cost_turns"], 1.0)
+        self.assertEqual(result["sessions"][0]["no_task_turns"], 1)
+        rows[-1]["until"] = "10:10"  # HH:MM, do dia do commit
+        self.assertEqual(by_worklog(self.measure(rows))[OPENING]["turns"], 1)
+
+    def test_a_turn_before_the_first_task_stays_out(self):
+        rows = [tturn("08:00:00", 60, 5.0), tturn("08:30:00", 60, 7.0, session="outra"),
+                tturn("10:05:00", 600, 1.0), task("10:00:00", [OPENING], "a1")]
+        result = self.summarize.aggregate_by_task(rows)
+        t = by_worklog(result)[OPENING]
+        self.assertEqual((t["turns"], t["cost_turns"]), (1, 1.0))  # o turno que termina depois do 1º task entra
+        self.assertEqual([s["session_id"] for s in result["sessions"]], [SID])
+
+    def test_the_audit_turn_stays_out(self):
+        rows = [tturn("10:00:00", 60, 1.0), tturn("10:00:30", 20, 0.01, fact_audit=True), task("10:01:00", [OPENING], "a1")]
+        t = by_worklog(self.measure(rows))[OPENING]
+        self.assertEqual((t["turns"], t["cost_turns"]), (1, 1.0))
+
+    def test_subagent_and_run_go_to_the_turn_that_contains_their_start_or_to_the_segment_of_the_marks(self):
+        rows = [tturn("10:10:00", 600, 1.0), task("10:11:00", [OPENING], "a1"),
+                tsub("10:20:00", 900, 0.5),  # começa 10:05, dentro do turno → abertura
+                run("10:30:00", 60, 120.0, 900),  # começa 10:29, fora de turno, entre os marcos 10:11 e 10:41 → grok
+                run("10:09:00", 60, 30.0, 1800),  # começa 10:08, dentro do turno → abertura
+                tturn("10:40:00", 60, 0.2), task("10:41:00", [GROK], "b2"),
+                tsub("10:45:00", 600, 0.3)]  # começa 10:35, fora de turno, entre os marcos 10:11 e 10:41 → grok
+        result = self.measure(rows)
+        tasks = by_worklog(result)
+        self.assertAlmostEqual(tasks[OPENING]["cost_subagents"], 0.5)
+        self.assertEqual((tasks[OPENING]["runs"], tasks[OPENING]["run_cpu_s"], tasks[OPENING]["run_max_rss_mb"]),
+                         (1, 30.0, 1800))
+        self.assertEqual((tasks[GROK]["runs"], tasks[GROK]["run_cpu_s"]), (1, 120.0))
+        self.assertAlmostEqual(tasks[GROK]["cost_subagents"], 0.3)
+        self.assertEqual(result["sessions"][0]["no_task_turns"], 0)
+
+    def test_a_worklog_committed_in_two_sessions_sums_both(self):
+        rows = [tturn("10:00:00", 100, 1.0), tturn("10:00:00", 200, 2.0, session="s2"),
+                task("10:01:00", [OPENING], "a1"), task("10:02:00", [OPENING], "b2", session="s2")]
+        t = by_worklog(self.measure(rows))[OPENING]
+        self.assertEqual((t["sessions"], t["turns"], t["elapsed_s"]), (2, 2, 300))
+        self.assertEqual([s["session_id"] for s in t["segments"]], [SID, "s2"])
+
+    def test_workstream_and_since_filter_the_tasks(self):
+        rows = [tturn("10:00:00", 100, 1.0), task("10:01:00", [OPENING], "a1"),
+                tturn("2026-11-05T10:00:00-03:00", 100, 1.0, session="s2", workstream="studio"),
+                task("2026-11-05T10:01:00-03:00", ["work/worklogs/2026-11-05-x.md"], "b2", session="s2",
+                     workstream="studio")]
+        self.assertEqual(set(by_worklog(self.measure(rows, workstream="studio"))), {"work/worklogs/2026-11-05-x.md"})
+        self.assertEqual(set(by_worklog(self.measure(rows, since="2026-11-04"))), {"work/worklogs/2026-11-05-x.md"})
+
+    def test_pending_lists_the_turns_after_the_last_mark_and_the_stale_sessions(self):
+        rows = SESSION + [tturn("22:20:00", 60, 1.0, session="aaaaaaaa-1"), tturn("22:25:00", 60, 0.5, session="aaaaaaaa-1"),
+                          tturn("2026-11-04T01:30:00-03:00", 60, 9.0, session="bbbbbbbb-2"),  # parada há 30 min
+                          tturn("22:25:00", 60, 9.0, session="cccccccc-3", workstream="studio")]  # outro workstream
+        text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T02:00:00-03:00"))
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "este commit fecha 3 turnos desde 22:32 (corrido 10 min, US$ 0,65 dos turnos e "
+                                   "4,05 de 2 subagentes):")
+        self.assertEqual(lines[1:4], ["  22:32 > Grok CLI da xAI  esse",
+                                      "  22:34 precisamos urgentemente adicionar o `grok` no fluxo do `brza sessions` e "
+                                      "do `MCP",
+                                      "  22:41 siga com o `PLN-012`"])
+        self.assertEqual(lines[4], "sem tarefa no workstream tools-kit: 2 turnos em 1 sessão parada há mais de 2 h "
+                                   "(US$ 1,50)")
+        self.assertEqual(len(lines), 5)
+
+    def test_pending_with_nothing_open_says_so(self):
+        rows = [tturn("10:00:00", 100, 1.0), task("10:01:00", [OPENING], "a1")]
+        self.assertEqual(self.summarize.pending_text(rows, SID, now=self.summarize.parse_time(at("11:00:00"))),
+                         "nada a fechar")
+
+    def test_human_duration(self):
+        human = self.summarize.human_duration
+        self.assertEqual([human(s) for s in (42, 575, 3600, 4320)], ["42 s", "10 min", "1 h", "1 h 12 min"])
+
+    def run_main(self, rows, *flags):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "measurements.jsonl"), "w", encoding="utf-8") as f:
+                f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["summarize", "--dir", tmp, *flags]), contextlib.redirect_stdout(out):
+                code = self.summarize.main()
+            return code, out.getvalue()
+
+    def test_command_line_prints_the_three_tables_and_the_json(self):
+        rows = SESSION + [task("23:10:00", [GROK], "z9", session=None)]
+        code, text = self.run_main(rows, "--by-task")
+        self.assertEqual(code, 0)
+        for expected in ("Tarefas, por workstream e dia", "pln-012-abertura-da-produtividade-por-tarefa",
+                         "instalacao-do-grok-build", "Tarefas não medidas", "sem sessão",
+                         "Sessões: ociosa e sem tarefa", "tools-kit-produtividade", "0:14", "0:18"):
+            self.assertIn(expected, text)
+        self.assertNotIn("Subagentes, por agente", text)
+        code, text = self.run_main(rows, "--by-task", "--json")
+        data = json.loads(text)
+        self.assertEqual((code, set(data)), (0, {"tasks", "unmeasured", "sessions"}))
+        opening = next(t for t in data["tasks"] if t["worklog"] == OPENING)
+        self.assertEqual([(s["session_id"], s["turns"]) for s in opening["segments"]], [(SID, 1), (SID, 0)])
+
+    def test_command_line_pending_exits_zero(self):
+        code, text = self.run_main(SESSION, "--by-task", "--pending", "--session", "nenhuma")
+        self.assertEqual((code, text.strip()), (0, "nada a fechar"))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.run_main(SESSION, "--by-task", "--pending")  # sem --session
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.run_main(SESSION, "--by-task", "--facts")
+
+    def test_log_without_task_events_says_so(self):
+        code, text = self.run_main([tturn("10:00:00", 100, 1.0)], "--by-task")
+        self.assertEqual(code, 0)
+        self.assertIn("nenhum evento task", text)
+
+    def test_the_other_views_ignore_task_and_run(self):
+        extra = [task("22:16:03", [OPENING], "539b744"), run("22:30:00", 10, 1.0, 100)]
+        base = self.summarize.to_json(self.summarize.aggregate(ROWS))
+        self.assertEqual(self.summarize.to_json(self.summarize.aggregate(ROWS + extra)), base)
+        self.assertEqual(self.summarize.to_json_by_workstream(self.summarize.aggregate_by_workstream(ROWS + extra)),
+                         self.summarize.to_json_by_workstream(self.summarize.aggregate_by_workstream(ROWS)))
 
 
 class RootTest(unittest.TestCase):
