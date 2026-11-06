@@ -168,12 +168,13 @@ def provider_session(chat: str) -> str | None:
     brza-sessions."""
     try:
         found = runtime.rpc('agentSession.history', {'sessionId': chat, 'direction': 'tail', 'limit': 1})
-    except runtime.BrzaError:
+    except (OSError, ValueError, KeyError, AttributeError, runtime.BrzaError):
         return None
     return ((found or {}).get('providerSession') or {}).get('id')
 
 
 def run_in_chat(command: str, session_id: str) -> int:
+    cwd = Path.cwd()  # antes do comando: ele pode apagar o próprio cwd
     code, output, metrics = run_here(command, run := new_run())
     message = f'Rodei pelo ▶:\n\n{report(command, code, output, run / "output.log")}'
     try:
@@ -181,7 +182,7 @@ def run_in_chat(command: str, session_id: str) -> int:
         print(f'\nbrza-run: saiu com {code}; mandei a entrada e a saída ao chat')
     except (OSError, ValueError, KeyError, runtime.BrzaError) as e:
         print(f'\nbrza-run: saiu com {code}, mas não mandei ao chat ({e})', file=sys.stderr)
-    record_run('chat', command, code, metrics, Path.cwd(), provider_session(session_id), session_id)
+    record_run('chat', command, code, metrics, cwd, provider_session(session_id), session_id)
     return code
 
 

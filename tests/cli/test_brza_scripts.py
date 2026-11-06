@@ -522,6 +522,44 @@ class BrzaRunTest(unittest.TestCase):
             self.assertIn('brza-run: sem workspace', err.getvalue())
             self.assertEqual(list(Path(temp).rglob('.measurements')), [])
 
+    def test_chat_mode_keeps_the_line_when_the_command_removes_its_own_cwd(self):
+        before = os.getcwd()
+        self.addCleanup(os.chdir, before)
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp).resolve() / 'ws')
+            gone = Path(temp).resolve() / 'gone'
+            gone.mkdir()
+            os.chdir(gone)
+            with patch.dict(os.environ, {'BRZA_WORKSPACE': str(ws)}), quiet_terminal(temp), \
+                    patch.object(RUN['runtime'], 'rpc', lambda method, params: {'page': {'fence': 7}}), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = RUN['run_in_chat'](f'rmdir {shlex.quote(str(gone))}; exit 3', 'claude_x')
+            os.chdir(before)
+            lines = measured(ws)
+        self.assertEqual(code, 3)
+        self.assertEqual([l['code'] for l in lines], [3])
+
+    def test_chat_mode_survives_an_rpc_that_raises_key_error(self):
+        def rpc(method, params):
+            raise KeyError('authToken')
+
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp) / 'ws')
+            with patch.dict(os.environ, {'BRZA_WORKSPACE': str(ws)}), quiet_terminal(temp), \
+                    patch.object(RUN['runtime'], 'rpc', rpc), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = RUN['run_in_chat']('exit 2', 'claude_x')
+            lines = measured(ws)
+        self.assertEqual(code, 2)
+        self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
+
+    def test_the_cpu_is_the_difference_around_the_command(self):
+        subprocess.run([sys.executable, '-c', 'import time\nwhile time.process_time() < 1.0: pass'], check=True)
+        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp):
+            code, _, metrics = RUN['run_here']('true', Path(temp))
+        self.assertEqual(code, 0)
+        self.assertLess(metrics['cpu_s'], 0.5)
+
 
 if __name__ == '__main__':
     unittest.main()
