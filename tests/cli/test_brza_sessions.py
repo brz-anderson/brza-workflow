@@ -653,6 +653,8 @@ class CommandTest(unittest.TestCase):
                 rename_calls = [c for c in self.calls('agentSession.rename') if c['sessionId'] == chat]
                 self.assertEqual(rename_calls[-1]['name'], 'Título Customizado')
                 self.assertEqual(self.read_map()[0]['title'], 'Título Customizado')
+                self.assertIn('a aba ficou com o título "Título Customizado"; o nome ficou no mapa', out)
+                self.assertNotIn('o nome ficou na aba e no mapa', out)
 
     def test_dry_run_says_with_slash_rename_only_for_claude(self):
         """P10/A3: dry-run diz 'com /rename' no Claude e 'com rename' nos outros agentes."""

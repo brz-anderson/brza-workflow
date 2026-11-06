@@ -4,7 +4,7 @@
 O open abre o chat e dá à aba o título do --title, ou o <nome> sem ele, pelo `agentSession.rename` do app; o prompt da
 tarefa entra na abertura. Com --rename no Claude, manda antes o `/rename <nome>`, que dá o nome à sessão, e o prompt entra
 depois pelo `agentSession.send`, com `delivery: 'queue-if-active'`: ele espera na fila até o /rename terminar; no Codex,
-o nome vem do título da aba; no Grok e no Antigravity, o nome fica na aba e no mapa de sessões. Passe o --rename quando
+o nome vem do título da aba; no Grok e no Antigravity, o título fica na aba e o nome no mapa de sessões. Passe o --rename quando
 a sessão for mandar ou receber correio: sem ele, ela entra no correio com um nome automático, como `<workspace>-5b`,
 que ninguém sabe antes de abrir.
 
@@ -410,7 +410,7 @@ def main():
                     help='o id do agente: claude, codex, grok ou antigravity (agy); padrão: claude')
     ap.add_argument('--title', help='o título da aba; sem ele, o <nome>')
     ap.add_argument('--rename', action='store_true',
-                    help='dá o nome à sessão no runtime que suporta; no Grok e Antigravity, na aba e no mapa')
+                    help='dá o nome à sessão no runtime que suporta; no Grok e Antigravity, o título na aba e o nome no mapa')
     ap.add_argument('--checkout', type=Path, default=WORKSPACE,
                     help='o checkout do chat; o relativo parte da raiz do workspace, não do cwd; padrão a raiz do workspace')
     group = ap.add_mutually_exclusive_group()
@@ -471,7 +471,9 @@ def main():
     record('open', name=args.name, title=title, chat=session_id, checkout=str(checkout), renamed=args.rename,
            **({'agent': agent} if agent != 'claude' else {}))
     if args.rename and NAMED.get(agent) is None:
-        print(f'CHECK:    {args.name}: o {agent} não recebe o /rename pelo chat do app; o nome ficou na aba e no mapa')
+        where = ('o nome ficou na aba e no mapa' if title == args.name
+                 else f'a aba ficou com o título "{title}"; o nome ficou no mapa')
+        print(f'CHECK:    {args.name}: o {agent} não recebe o /rename pelo chat do app; {where}')
     if args.rename and agent == 'claude' and prompt:
         try:
             send_to_chat(session_id, prompt)

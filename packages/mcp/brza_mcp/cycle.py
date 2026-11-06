@@ -1,7 +1,7 @@
 """O ciclo do worker (D6): o `Scheduler` pede à fila o próximo pedido admissível e o abre pelo `orchestration` do cliente.
 
 Abrir é, pelo `--help` do CLI do app: `run-create --objective`, `task-create --run --task-title --spec` e
-`worker-start --task --agent claude --model --effort --run`, cada um com `--json`, e com `ORCA_AGENT_SESSION_ID` (o
+`worker-start --task --agent <agente do runtime> --model --effort --run`, cada um com `--json`, e com `ORCA_AGENT_SESSION_ID` (o
 `caller`, o `X-Brza-Session`) e `ORCA_USER_DATA_PATH` do cliente no env (H4). O CLI não tem flag de conta no
 `worker-start`: a conta vale só para o `claude -p` (`accounts.claude_env`). O fim se sabe por consulta: a cada volta, o
 `task-list --run` de cada worker aberto; a task `completed` fecha o pedido como `done` e a `failed` como `failed` (M14),
