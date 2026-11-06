@@ -553,7 +553,7 @@ def to_json_facts(facts):
 #
 # A tarefa é o worklog: o `brza note commit` grava um evento `task` por commit com worklog (D1), e cada um é um marco da
 # sessão. O segmento k de uma sessão são os turnos dela cujo começo (`timestamp − duration_s`) cai em
-# (marco k−1, marco k]; depois do último marco, os turnos ficam "sem tarefa". O `brza-note` usa `task_segments` e
+# [marco k−1, marco k); depois do último marco, os turnos ficam "sem tarefa". O `brza-note` usa `task_segments` e
 # `task_measure` por `runpy`, para a `## Medida` do worklog e esta tabela darem o mesmo número.
 
 PAUSE_S = 1800  # a espera acima disto é pausa, e não tempo de Anderson (PLN-012/R2.3)
@@ -650,7 +650,8 @@ def task_segments(rows):
 
     def by_marks(sid, start):
         stamps = [m for m, _ in marks[sid]]
-        return by_session[sid][bisect.bisect_left(stamps, start)]  # o turno do marco fica com a tarefa que ele fecha
+        # [marco k−1, marco k): o turno que começa no marco é da tarefa seguinte (X2); o do commit, que começa antes, da dele
+        return by_session[sid][bisect.bisect_right(stamps, start)]
 
     turns_of = collections.defaultdict(list)  # sessão → [(começo, fim, segmento)]
     for r in sorted((r for r in items if r.get("event") == "turn"), key=row_start):
@@ -910,14 +911,14 @@ def print_by_task(result):
                   str(s["no_task_since"] or "")[:16].replace("T", " ")) for s in result["sessions"]])
 
 
-def pending(rows, session_id, now):
+def pending(rows, session_id, now, workstream=None):
     """O que o commit da sessão vai fechar (D6): os turnos depois do último marco dela, e os sem tarefa das outras
-    sessões do mesmo workstream cujo último turno tem mais de STALE_S."""
+    sessões do mesmo workstream cujo último turno tem mais de STALE_S. O `workstream` dado vence o derivado da sessão."""
     segments = task_segments(rows)
     own = [seg for seg in segments if seg["session_id"] == session_id]
     open_ = own[-1] if own and own[-1]["task"] is None else {"rows": []}
     turns = sorted((r for r in open_["rows"] if r.get("event") == "turn"), key=row_start)
-    workstream = session_workstream(own)
+    workstream = workstream or session_workstream(own)
     others = {"turns": 0, "sessions": 0, "cost": 0.0}
     if workstream:
         for sid in dict.fromkeys(seg["session_id"] for seg in segments):
@@ -937,8 +938,8 @@ def pending(rows, session_id, now):
             "others": others}
 
 
-def pending_text(rows, session_id, now):
-    data = pending(rows, session_id, now)
+def pending_text(rows, session_id, now, workstream=None):
+    data = pending(rows, session_id, now, workstream)
     measure, lines = data["measure"], []
     if not data["turns"]:
         lines.append("nada a fechar")
@@ -948,11 +949,20 @@ def pending_text(rows, session_id, now):
         if measure["subagents"]:
             cost += (f" dos turnos e US$ {brl(measure['cost_subagents'])} de {measure['subagents']} "
                      + ("subagente" if measure["subagents"] == 1 else "subagentes"))
-        since = parse_time(data["turns"][0]["start"]).strftime("%H:%M")
+        starts = [parse_time(t["start"]) for t in data["turns"]]
+        minutes = collections.Counter(d.strftime("%Y-%m-%d %H:%M") for d in starts)
+        several_days = len({d.date() for d in starts}) > 1
+
+        def hour(d):  # no mesmo minuto de outro turno, a hora inteira: é o que o --until do close-task recebe
+            if minutes[d.strftime("%Y-%m-%d %H:%M")] > 1:
+                return d.isoformat()
+            return d.strftime("%d/%m %H:%M" if several_days else "%H:%M")
+
+        since = hour(starts[0])
         lines.append(f"este commit fecha {n} {'turno' if n == 1 else 'turnos'} desde {since} "
                      f"(corrido {human_duration(measure['elapsed_s'])}, {cost}):")
-        for t in data["turns"]:
-            lines.append(f"  {parse_time(t['start']).strftime('%H:%M')} {t['prompt_head']}".rstrip())
+        for d, t in zip(starts, data["turns"]):
+            lines.append(f"  {hour(d)} {t['prompt_head']}".rstrip())
     others = data["others"]
     if others["turns"]:
         k = others["sessions"]
@@ -974,7 +984,9 @@ def main():
                         help="só o acerto dos fatos do desenho, por papel, classe, faixa de confiança e tipo")
     parser.add_argument("--by-task", action="store_true",
                         help="só a medida por tarefa: as tarefas por workstream e dia, as não medidas e as sessões")
-    parser.add_argument("--workstream", default="", help="com --by-task, só as tarefas e as sessões do workstream")
+    parser.add_argument("--workstream", default="",
+                        help="com --by-task, só as tarefas e as sessões do workstream; com --pending, o workstream das "
+                             "outras sessões, no lugar do da sessão")
     parser.add_argument("--pending", action="store_true",
                         help="com --by-task e --session, o que o commit da sessão vai fechar (o aviso do close-task)")
     parser.add_argument("--session", default="", help="o id da sessão do --pending")
@@ -985,8 +997,8 @@ def main():
         parser.error("--by-task não se combina com --facts, --by-workstream nem --denials")
     if (args.pending or args.workstream) and not args.by_task:
         parser.error("--pending e --workstream vão com --by-task")
-    if args.pending != bool(args.session):
-        parser.error("--pending e --session vão juntos")
+    if args.session and not args.pending:
+        parser.error("--session vai com --pending")
 
     # No --facts a data filtra o `fact`, e não o log: o desfecho que chega depois dela vale para o fato de dentro. No
     # --by-task, filtra a saída, porque os marcos de antes da data cortam os segmentos de depois.
@@ -999,7 +1011,7 @@ def main():
         return 2
 
     if args.pending:
-        print(pending_text(rows, args.session, datetime.datetime.now().astimezone()))
+        print(pending_text(rows, args.session, datetime.datetime.now().astimezone(), args.workstream or None))
         return 0
 
     if args.by_task:

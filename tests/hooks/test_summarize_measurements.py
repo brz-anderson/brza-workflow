@@ -760,6 +760,78 @@ class ByTaskTest(unittest.TestCase):
             self.assertEqual(self.summarize.task_mark(row), self.summarize.parse_time(at("10:01:00")))
             self.measure([tturn("10:00:00", 60, 1.0), row])
 
+    def test_a_turn_that_starts_exactly_at_the_mark_goes_to_the_next_segment(self):
+        # o turno 10:00:07–10:05:07; o segmento k é [marco k−1, marco k)
+        rows = [tturn("10:05:07", 300, 1.0), task("10:00:07", [OPENING], "e1", until=at("10:00:07")),
+                task("10:20:00", [GROK], "e2")]
+        by = by_worklog(self.measure(rows))
+        self.assertEqual((by[OPENING]["turns"], by[GROK]["turns"]), (0, 1))
+        rows = [tturn("10:05:07", 300, 1.0), task("10:30:00", [OPENING], "e1", until=at("10:00:07"))]
+        (session,) = self.measure(rows)["sessions"]
+        self.assertEqual(session["no_task_turns"], 1)
+
+    def test_a_turn_that_starts_at_hh_mm_00_goes_after_the_until_hh_mm(self):
+        rows = [tturn("10:05:00", 300, 1.0), task("10:30:00", [OPENING], "e3", until="10:00")]
+        by = by_worklog(self.measure(rows))
+        self.assertEqual(by.get(OPENING, {"turns": 0})["turns"], 0)
+        (session,) = self.measure(rows)["sessions"]
+        self.assertEqual(session["no_task_turns"], 1)
+
+    def test_a_subagent_that_starts_after_the_mark_but_inside_the_turn_goes_to_the_task(self):
+        rows = [tturn("10:20:00", 1200, 1.0), tsub("10:25:00", 600, 3.0), task("10:10:00", [OPENING], "e4")]
+        task_ = by_worklog(self.measure(rows))[OPENING]
+        self.assertEqual((task_["subagents"], task_["cost_subagents"]), (1, 3.0))
+        (session,) = self.measure(rows)["sessions"]
+        self.assertEqual((session["no_task_subagents"], session["no_task_cost_subagents"]), (0, 0))
+
+    def test_pending_shows_the_full_time_of_turns_in_the_same_minute(self):
+        rows = [task("2026-11-03T22:00:00-03:00", [OPENING], "f0"),
+                tturn("2026-11-03T22:32:50-03:00", 4, 1.0, prompt_head="a"),
+                tturn("2026-11-03T22:33:00-03:00", 4, 1.0, prompt_head="b"),
+                tturn("2026-11-03T22:40:10-03:00", 10, 1.0, prompt_head="c")]
+        lines = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time(at("23:00:00"))).splitlines()
+        self.assertEqual(lines[1:], ["  2026-11-03T22:32:46-03:00 a", "  2026-11-03T22:32:56-03:00 b",
+                                     "  22:40 c"])
+
+    def test_pending_puts_the_day_in_front_when_the_turns_span_days(self):
+        rows = [task("2026-11-03T20:00:00-03:00", [OPENING], "f0"),
+                tturn("2026-11-03T22:30:00-03:00", 60, 1.0, prompt_head="a"),
+                tturn("2026-11-04T09:15:00-03:00", 60, 1.0, prompt_head="b")]
+        lines = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T10:00:00-03:00")
+                                            ).splitlines()
+        self.assertIn("desde 03/11 22:29", lines[0])
+        self.assertEqual(lines[1:], ["  03/11 22:29 a", "  04/11 09:14 b"])
+
+    def test_pending_takes_the_workstream_of_the_flag_over_the_session(self):
+        rows = SESSION + [tturn("2026-11-04T01:30:00-03:00", 60, 9.0, session="bbbbbbbb-2")]
+        now = self.summarize.parse_time("2026-11-04T05:00:00-03:00")
+        self.assertIn("sem tarefa no workstream tools-kit: ",
+                      self.summarize.pending_text(rows, "sem-linha", now, workstream="tools-kit"))
+        self.assertEqual(self.summarize.pending_text(rows, "sem-linha", now), "nada a fechar")  # sem linha, sem workstream
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "measurements.jsonl"), "w", encoding="utf-8") as f:
+                f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+            out = io.StringIO()
+            argv = ["summarize", "--dir", tmp, "--by-task", "--pending", "--session", "sem-linha",
+                    "--workstream", "tools-kit"]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
+                self.assertEqual(self.summarize.main(), 0)
+            self.assertIn("sem tarefa no workstream tools-kit", out.getvalue())
+
+    def test_pending_counts_the_subagent_cost_of_the_stale_session(self):
+        rows = SESSION + [tturn("2026-11-04T01:30:00-03:00", 60, 1.0, session="bbbbbbbb-2"),
+                          tsub("2026-11-04T01:20:00-03:00", 60, 5.0, session="bbbbbbbb-2")]
+        text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T05:00:00-03:00"))
+        self.assertIn("(US$ 6,00)", text.splitlines()[-1])
+
+    def test_the_counts_of_a_commit_with_two_worklogs_enter_whole(self):
+        rows = [tturn("10:05:00", 300, 1.0), tsub("10:03:00", 60, 1.0), run("10:04:00", 10, 1.0, 100),
+                task("10:10:00", [OPENING, GROK], "g1")]
+        by = by_worklog(self.measure(rows))
+        for path in (OPENING, GROK):
+            self.assertEqual((by[path]["turns"], by[path]["subagents"], by[path]["runs"]), (1, 1, 1))
+            self.assertAlmostEqual(by[path]["cost_turns"], 0.5)
+
     def test_pending_with_nothing_open_says_so(self):
         rows = [tturn("10:00:00", 100, 1.0), task("10:01:00", [OPENING], "a1")]
         self.assertEqual(self.summarize.pending_text(rows, SID, now=self.summarize.parse_time(at("11:00:00"))),
@@ -796,8 +868,11 @@ class ByTaskTest(unittest.TestCase):
     def test_command_line_pending_exits_zero(self):
         code, text = self.run_main(SESSION, "--by-task", "--pending", "--session", "nenhuma")
         self.assertEqual((code, text.strip()), (0, "nada a fechar"))
+        for flags in (("--by-task", "--pending"), ("--by-task", "--pending", "--session", "")):
+            code, text = self.run_main(SESSION, *flags)  # sem --session, o aviso do close-task sai 0 do mesmo jeito
+            self.assertEqual((code, text.strip()), (0, "nada a fechar"))
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            self.run_main(SESSION, "--by-task", "--pending")  # sem --session
+            self.run_main(SESSION, "--by-task", "--session", SID)  # --session sem --pending
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             self.run_main(SESSION, "--by-task", "--facts")
 
