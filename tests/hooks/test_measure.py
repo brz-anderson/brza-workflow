@@ -176,5 +176,253 @@ class ClaudeTranscriptTest(HookTest):
         self.assertIsNone(mcp["bridge_session_id"])  # sessão sem controle remoto
 
 
+def at(seconds):
+    """O horário do transcript, `seconds` depois de 2026-11-03T21:59:33Z."""
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 11, 3, 21, 59, 33, tzinfo=timezone.utc)
+    return (base + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def asks(when, ident, request="r1"):
+    return {"type": "assistant", "timestamp": at(when), "requestId": request,
+            "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 10},
+                        "content": [{"type": "tool_use", "id": ident, "name": "AskUserQuestion",
+                                     "input": {"questions": [{"question": "Qual?", "options": [
+                                         {"label": "A (Recomendado)"}, {"label": "B"}]}]}}]}}
+
+
+def answers(when, ident):
+    return {"type": "user", "timestamp": at(when), "toolUseResult": {"answers": {"Qual?": "A (Recomendado)"}},
+            "message": {"content": [{"type": "tool_result", "tool_use_id": ident, "content": "ok"}]}}
+
+
+def says(when, request):
+    return {"type": "assistant", "timestamp": at(when), "requestId": request,
+            "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 10}, "content": []}}
+
+
+def prompt(when, text, **extra):
+    return {"type": "user", "timestamp": at(when), "message": {"content": text}, **extra}
+
+
+def side(when, kind="queue-operation"):
+    """Uma linha que o Claude Code escreve junto do pedido — a fila, o hook —, e que não é a conversa."""
+    if kind == "queue-operation":
+        return {"type": kind, "operation": "enqueue", "timestamp": at(when)}
+    return {"type": "attachment", "timestamp": at(when), "attachment": {"type": "hook_success"}}
+
+
+class WaitsAndHeadTest(HookTest):
+    """D2: a espera de Anderson dentro do turno e o começo do pedido."""
+
+    LONG = "siga com o `PLN-012`\n" + "x" * 100
+
+    def segment(self):
+        return [side(-1), prompt(0, self.LONG), asks(5, "q1"), answers(464, "q1"), says(470, "r2"),
+                prompt(500, "<local-command-caveat>Caveat</local-command-caveat>", isMeta=True),
+                side(619), side(619.5, "attachment"),
+                prompt(620, "e agora o segundo pedido"), says(630, "r3")]
+
+    def test_the_round_and_the_interrupted_turn_are_waits_and_the_meta_prompt_is_not(self):
+        measured, seen = self.measure.measure([json.dumps(e) for e in self.segment()])
+        self.assertEqual(seen["waits_s"], [459, 120])  # a fila e o hook antes do pedido não encurtam a espera
+        self.assertEqual(measured["duration_s"], 630)
+        self.assertNotIn("waits_s", measured)  # o subagente usa só o primeiro dicionário, e não muda
+
+    def test_the_head_is_the_first_prompt_cut_at_80_without_line_breaks(self):
+        _, seen = self.measure.measure([json.dumps(e) for e in self.segment()])
+        self.assertEqual(seen["prompt_head"], ("siga com o `PLN-012` " + "x" * 100)[:80])
+        self.assertEqual(len(seen["prompt_head"]), 80)
+        self.assertNotIn("\n", seen["prompt_head"])
+
+    def test_the_head_skips_a_local_command_and_the_command_typed_alone_is_the_head(self):
+        rename = prompt(0, "<command-name>/rename</command-name>\n  <command-message>rename</command-message>\n"
+                           "  <command-args>pln012-p1</command-args>")
+        stdout = prompt(0.05, "<local-command-stdout>Session renamed to: pln012-p1</local-command-stdout>")
+        lines = [rename, stdout, prompt(0.1, "Execute o P1"), says(9, "r1")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["prompt_head"], "Execute o P1")
+        self.assertEqual(seen["waits_s"], [])  # o pedido colado no comando não espera
+        _, seen = self.measure.measure([json.dumps(e) for e in (rename, stdout, says(1, "r1"))])
+        self.assertEqual(seen["prompt_head"], "/rename pln012-p1")
+
+    def test_interruption_marker_and_task_notification_are_not_prompts(self):
+        lines = [prompt(0, "primeiro"), says(10, "r1"),
+                 prompt(40, [{"type": "text", "text": "[Request interrupted by user]"}]),
+                 prompt(100, "<task-notification>\n<task-id>x</task-id></task-notification>",
+                        origin={"kind": "task-notification"}),
+                 says(110, "r2"), prompt(300, "segundo", origin={"kind": "human"}), says(310, "r3")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["waits_s"], [190])  # do fim do agente (110) ao pedido de Anderson (300)
+        self.assertEqual(seen["prompt_head"], "primeiro")
+
+    def test_a_refused_question_still_waited(self):
+        refused = answers(64, "q1")
+        refused["message"]["content"][0]["is_error"] = True
+        lines = [prompt(0, "pergunta"), asks(4, "q1"), refused, says(70, "r2")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["waits_s"], [60])
+
+    def test_segment_without_a_prompt_has_no_head(self):
+        _, seen = self.measure.measure([json.dumps(says(0, "r1"))])
+        self.assertEqual((seen["waits_s"], seen["prompt_head"]), ([], None))
+
+
+class FakeRusage:
+    """O `proc_pid_rusage` falso: devolve as leituras em ordem, ou levanta."""
+
+    def __init__(self, *readings):
+        self.readings = list(readings)
+        self.pids = []
+
+    def __call__(self, pid):
+        self.pids.append(pid)
+        reading = self.readings.pop(0)
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+
+def reading(cpu_self, cpu_children, rss_mb=357, footprint_mb=209, start=1000):
+    return {"cpu_self_s": cpu_self, "cpu_children_s": cpu_children, "rss_bytes": rss_mb * 2 ** 20,
+            "footprint_bytes": footprint_mb * 2 ** 20, "start": start}
+
+
+class MachineTest(HookTest):
+    """D2: a CPU e o RSS do `claude` no turno, pelo `proc_pid_rusage`, com o delta guardado no `state.json`."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(self.tmp.name, "session.jsonl")
+        self.env = mock.patch.dict(os.environ, {"CLAUDE_PID": "44452"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def add_turn(self, n):
+        with open(self.path, "a", encoding="utf-8") as f:
+            for entry in (prompt(100 * n, f"pedido {n}"), says(100 * n + 10, f"r{n}")):
+                f.write(json.dumps(entry) + "\n")
+
+    def stop(self):
+        self.run_hook({"hook_event_name": "Stop", "session_id": "s", "transcript_path": self.path}, mode="turn")
+
+    def state(self):
+        with open(self.measure.STATE, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_two_turns_of_the_same_pid_give_the_delta(self):
+        fake = FakeRusage(reading(0.84, 6.13), reading(1.5, 8.5, rss_mb=400, footprint_mb=250))
+        with mock.patch.object(self.measure, "proc_pid_rusage", fake):
+            self.add_turn(1)
+            self.stop()
+            self.add_turn(2)
+            self.stop()
+        first, second = self.logged()
+        self.assertEqual(first["machine"], {"pid": 44452, "from": "env", "cpu_self_s": 0.84, "cpu_children_s": 6.13,
+                                            "rss_mb": 357, "footprint_mb": 209})  # o primeiro mede desde o começo
+        self.assertEqual(second["machine"], {"pid": 44452, "from": "env", "cpu_self_s": 0.66, "cpu_children_s": 2.37,
+                                             "rss_mb": 400, "footprint_mb": 250})
+        self.assertEqual(fake.pids, [44452, 44452])
+        self.assertEqual(self.state()["machine:44452"], {"start": 1000, "cpu_self_s": 1.5, "cpu_children_s": 8.5})
+        self.assertEqual((first["waits_s"], first["prompt_head"]), ([], "pedido 1"))
+
+    def test_a_new_process_with_the_same_pid_measures_from_its_start(self):
+        fake = FakeRusage(reading(5.0, 9.0), reading(0.5, 0.25, start=2000))
+        with mock.patch.object(self.measure, "proc_pid_rusage", fake):
+            self.add_turn(1)
+            self.stop()
+            self.add_turn(2)
+            self.stop()
+        _, second = self.logged()
+        self.assertEqual((second["machine"]["cpu_self_s"], second["machine"]["cpu_children_s"]), (0.5, 0.25))
+
+    def test_without_claude_pid_the_pid_comes_from_the_parent_chain(self):
+        os.environ.pop("CLAUDE_PID")
+        chain = {100: (90, "/bin/sh"), 90: (80, "/Users/andepb/.local/bin/claude"), 80: (1, "/Applications/X")}
+        with mock.patch.object(self.measure.os, "getppid", return_value=100), \
+                mock.patch.object(self.measure, "ps_entry", side_effect=lambda pid: chain[pid]), \
+                mock.patch.object(self.measure, "proc_pid_rusage", FakeRusage(reading(1.0, 2.0))) as fake:
+            self.add_turn(1)
+            self.stop()
+        (row,) = self.logged()
+        self.assertEqual((row["machine"]["pid"], row["machine"]["from"]), (90, "ppid"))
+        self.assertEqual(fake.pids, [90])
+
+    def test_the_parent_chain_stops_at_six_levels_and_gives_null(self):
+        os.environ.pop("CLAUDE_PID")
+        seen = []
+
+        def entry(pid):
+            seen.append(pid)
+            return pid + 1, "/bin/zsh"
+        with mock.patch.object(self.measure.os, "getppid", return_value=100), \
+                mock.patch.object(self.measure, "ps_entry", side_effect=entry):
+            self.assertEqual(self.measure.claude_pid(), (None, None))
+        self.assertEqual(seen, [100, 101, 102, 103, 104, 105])
+
+    def test_a_reading_that_fails_gives_null_and_the_line_is_written(self):
+        with mock.patch.object(self.measure, "proc_pid_rusage", FakeRusage(OSError("sem libproc"))):
+            self.add_turn(1)
+            self.stop()
+        (row,) = self.logged()
+        self.assertIsNone(row["machine"])
+        self.assertEqual((row["event"], row["prompt_head"], row["api_calls"]), ("turn", "pedido 1", 1))
+        self.assertNotIn("machine:44452", self.state())
+        self.assertFalse(any(r["event"] == "hook_error" for r in self.logged()))
+
+    def test_the_ps_that_fails_gives_null_and_the_line_is_written(self):
+        os.environ.pop("CLAUDE_PID")
+        with mock.patch.object(self.measure, "ps_entry", side_effect=OSError("sem ps")):
+            self.add_turn(1)
+            self.stop()
+        (row,) = self.logged()
+        self.assertIsNone(row["machine"])
+
+    def test_turn_without_api_call_does_not_read_the_machine(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(prompt(0, "/clear")) + "\n")
+        fake = FakeRusage()
+        with mock.patch.object(self.measure, "proc_pid_rusage", fake):
+            self.stop()
+        self.assertEqual(fake.pids, [])
+
+    def test_the_subagent_line_does_not_change(self):
+        agent = os.path.join(self.tmp.name, "agent-a1.jsonl")
+        with open(agent, "w", encoding="utf-8") as f:
+            for entry in (prompt(0, "tarefa"), says(10, "r1")):
+                f.write(json.dumps(entry) + "\n")
+        fake = FakeRusage()
+        with mock.patch.object(self.measure, "proc_pid_rusage", fake):
+            self.run_hook({"session_id": "s", "agent_type": "implementer", "agent_id": "a1",
+                           "agent_transcript_path": agent}, mode="subagent")
+        (row,) = self.logged()
+        self.assertEqual(row["event"], "subagent")
+        for key in ("waits_s", "prompt_head", "machine"):
+            self.assertNotIn(key, row)
+        self.assertEqual(fake.pids, [])
+
+
+@unittest.skipUnless(sys.platform == "darwin", "o proc_pid_rusage é do macOS")
+class RealRusageTest(HookTest):
+    """A leitura de verdade, pelo `ctypes`: confere o struct e a unidade do `mach_timebase_info`."""
+
+    def test_reads_own_cpu_and_rss_and_counts_a_reaped_child(self):
+        import subprocess
+        before = self.measure.proc_pid_rusage(os.getpid())
+        subprocess.run([sys.executable, "-c", "import time\nt=time.process_time()\nwhile time.process_time()-t<0.4: pass"],
+                       check=True)
+        after = self.measure.proc_pid_rusage(os.getpid())
+        self.assertGreater(before["cpu_self_s"], 0)
+        self.assertGreater(before["rss_bytes"], 1 * 2 ** 20)
+        self.assertGreater(before["footprint_bytes"], 0)
+        self.assertGreaterEqual(after["cpu_children_s"] - before["cpu_children_s"], 0.3)
+        self.assertLess(after["cpu_children_s"] - before["cpu_children_s"], 5)  # a unidade convertida, e não em ticks
+        self.assertEqual(before["start"], after["start"])
+
+    def test_a_pid_that_does_not_exist_raises(self):
+        with self.assertRaises(OSError):
+            self.measure.proc_pid_rusage(99_999_999)
+
+
 if __name__ == "__main__":
     unittest.main()
