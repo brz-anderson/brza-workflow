@@ -26,7 +26,22 @@ git status --short --untracked-files=all -- work plans wiki memory .claude/agent
 ls work/worklogs/ | grep "^$(date +%F)-"
 ```
 
-## 2. O worklog de hoje
+## 2. O que o commit vai fechar
+
+```bash
+python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE_CODE_SESSION_ID"
+```
+
+A saída lista os turnos desde o último worklog que esta sessão commitou — a hora e o começo do pedido de cada um — e
+os turnos sem tarefa das outras sessões do workstream. **Se os turnos listados são de mais de uma tarefa**, feche antes
+a mais antiga: o worklog dela e `brza note commit <worklog> --until <HH:MM>`, com a hora do fim do último turno dela; o
+resto fica para o worklog da tarefa em curso. **Os turnos sem tarefa das outras sessões** se dizem a quem pediu, numa
+linha, sem fechá-los daqui.
+
+Sem turno pendente, a saída é "nada a fechar". Sem a `CLAUDE_CODE_SESSION_ID` no ambiente, fora do Claude Code, o passo
+não se aplica: o commit sai sem carimbo de sessão.
+
+## 3. O worklog de hoje
 
 - **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois.
 - **Não tem:** crie `work/worklogs/AAAA-MM-DD-assunto-em-kebab.md`, com `scope` no frontmatter e sem `status` nem `date`,
@@ -34,10 +49,12 @@ ls work/worklogs/ | grep "^$(date +%F)-"
 - **O conteúdo** é o registro escrito, não a transcrição: o que se fez, o que se decidiu (com a resposta literal da
   rodada), o que ficou aberto, e `## Fora do workspace` quando algo mudou fora dos dois repositórios. Cite no corpo os
   IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`) ou links relativos das notas tocadas: o `brza note commit`
-  extrai e preenche `refs:` no frontmatter do worklog automaticamente. Questão aberta não fica no worklog: vai ao passo 3.
+  extrai e preenche `refs:` no frontmatter do worklog automaticamente. Questão aberta não fica no worklog: vai ao passo 4.
+- **A `## Medida` não se escreve à mão:** o `brza note commit` a põe como última seção do worklog e a reescreve a cada
+  commit dele.
 - **Depois de uma compactação**, escreva a partir do resumo que ela deixou no contexto, sem inventar o que ele não diz.
 
-## 3. O pendente
+## 4. O pendente
 
 - **Com plano:** o `Retomar`, a primeira linha abaixo do H1 do `PLN-NNN-plan.md`, diz de onde a próxima sessão parte. O
   `## Worklogs` ganha a linha com a data, os IDs e o link do worklog. A forma está no `plans/README.md`.
@@ -46,22 +63,27 @@ ls work/worklogs/ | grep "^$(date +%F)-"
   custos do workstream sem desfecho. O que a sonda, a rodada ou a execução da tarefa respondeu vai ao
   `fact_outcome.py` com a `--ref`; o resto fica.
 
-## 4. A memória
+## 5. A memória
 
 Leia o que mudou em `memory/` e em `.claude/agent-memory/`. A memória que mudou vai no mesmo commit do worklog. O que vale
 para todos os workstreams é candidato à norma: diga isso no worklog e a quem pediu, sem mexer na norma daqui.
 
-## 5. Commitar
+## 6. Commitar
 
 ```bash
 brza note commit <caminhos> -m "docs: <o que a tarefa fechou>"
 ```
 
-Os caminhos são o worklog, o plano ou a issue, e a memória. O comando atualiza o `refs:` dos worklogs pedidos, recusa a
+Os caminhos são o worklog, o plano ou a issue, e a memória. O comando atualiza o `refs:` dos worklogs pedidos, carimba
+neles o `sessions:` com a sessão, escreve a `## Medida` e grava o marco da tarefa na medição; recusa a
 `master`, roda o checador antes e dá o push. Se o checador barrar, corrija e rode de novo; o
 `notes-checker` explica o erro.
 
-## 6. Conferir e devolver
+**A tarefa mais antiga, quando o passo 2 achou duas**, fecha antes, com `--until <HH:MM>` (ou a hora ISO): o marco vai
+à hora dada, e os turnos depois dela ficam para o commit seguinte, o da tarefa em curso. A hora tem de cair entre o
+marco anterior da sessão e agora; fora disso, o commit recusa sem tocar o worklog.
+
+## 7. Conferir e devolver
 
 Rode de novo o `git status` do passo 1: os cinco caminhos devem estar limpos, e o worklog de hoje deve existir. Diga a
 quem pediu, numa linha, o commit e que o `/compact` já pode ser digitado.
