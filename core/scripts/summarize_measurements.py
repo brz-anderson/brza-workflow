@@ -951,12 +951,12 @@ def pending_text(rows, session_id, now, workstream=None):
                      + ("subagente" if measure["subagents"] == 1 else "subagentes"))
         starts = [parse_time(t["start"]) for t in data["turns"]]
         minutes = collections.Counter(d.strftime("%Y-%m-%d %H:%M") for d in starts)
-        several_days = len({d.date() for d in starts}) > 1
+        today = now.date()
 
-        def hour(d):  # no mesmo minuto de outro turno, a hora inteira: é o que o --until do close-task recebe
-            if minutes[d.strftime("%Y-%m-%d %H:%M")] > 1:
+        def hour(d):  # de outro dia, ou no mesmo minuto de outro turno, a hora inteira: é o que o --until recebe
+            if d.astimezone(now.tzinfo).date() != today or minutes[d.strftime("%Y-%m-%d %H:%M")] > 1:
                 return d.isoformat()
-            return d.strftime("%d/%m %H:%M" if several_days else "%H:%M")
+            return d.strftime("%H:%M")
 
         since = hour(starts[0])
         lines.append(f"este commit fecha {n} {'turno' if n == 1 else 'turnos'} desde {since} "

@@ -718,10 +718,11 @@ class ByTaskTest(unittest.TestCase):
         self.assertEqual(set(by_worklog(self.measure(rows, since="2026-11-04"))), {"work/worklogs/2026-11-05-x.md"})
 
     def test_pending_lists_the_turns_after_the_last_mark_and_the_stale_sessions(self):
-        rows = SESSION + [tturn("22:20:00", 60, 1.0, session="aaaaaaaa-1"), tturn("22:25:00", 60, 0.5, session="aaaaaaaa-1"),
-                          tturn("2026-11-04T01:30:00-03:00", 60, 9.0, session="bbbbbbbb-2"),  # parada há 30 min
+        rows = SESSION + [task("19:00:00", ["work/worklogs/2026-11-03-deploy.md"], "d0", session="deploy"),
+                          tturn("20:20:00", 60, 1.0, session="aaaaaaaa-1"), tturn("20:25:00", 60, 0.5, session="aaaaaaaa-1"),
+                          tturn("23:30:00", 60, 9.0, session="bbbbbbbb-2"),  # parada há 29 min
                           tturn("22:25:00", 60, 9.0, session="cccccccc-3", workstream="studio")]  # outro workstream
-        text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T02:00:00-03:00"))
+        text = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-03T23:59:00-03:00"))
         lines = text.splitlines()
         self.assertEqual(lines[0], "este commit fecha 3 turnos desde 22:32 (corrido 10 min, US$ 0,65 dos turnos e "
                                    "US$ 4,05 de 2 subagentes):")
@@ -793,14 +794,20 @@ class ByTaskTest(unittest.TestCase):
         self.assertEqual(lines[1:], ["  2026-11-03T22:32:46-03:00 a", "  2026-11-03T22:32:56-03:00 b",
                                      "  22:40 c"])
 
-    def test_pending_puts_the_day_in_front_when_the_turns_span_days(self):
+    def test_pending_shows_the_full_time_of_the_turns_of_another_day(self):
         rows = [task("2026-11-03T20:00:00-03:00", [OPENING], "f0"),
                 tturn("2026-11-03T22:30:00-03:00", 60, 1.0, prompt_head="a"),
                 tturn("2026-11-04T09:15:00-03:00", 60, 1.0, prompt_head="b")]
         lines = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T10:00:00-03:00")
                                             ).splitlines()
-        self.assertIn("desde 03/11 22:29", lines[0])
-        self.assertEqual(lines[1:], ["  03/11 22:29 a", "  04/11 09:14 b"])
+        self.assertIn("desde 2026-11-03T22:29:00-03:00", lines[0])
+        self.assertEqual(lines[1:], ["  2026-11-03T22:29:00-03:00 a", "  09:14 b"])
+        rows = [task("2026-11-03T20:00:00-03:00", [OPENING], "f0"),
+                tturn("2026-11-03T22:41:30-03:00", 30, 1.0, prompt_head="a"),
+                tturn("2026-11-03T23:10:30-03:00", 30, 1.0, prompt_head="b")]
+        lines = self.summarize.pending_text(rows, SID, now=self.summarize.parse_time("2026-11-04T23:30:00-03:00")
+                                            ).splitlines()
+        self.assertEqual(lines[1:], ["  2026-11-03T22:41:00-03:00 a", "  2026-11-03T23:10:00-03:00 b"])
 
     def test_pending_takes_the_workstream_of_the_flag_over_the_session(self):
         rows = SESSION + [tturn("2026-11-04T01:30:00-03:00", 60, 9.0, session="bbbbbbbb-2")]
