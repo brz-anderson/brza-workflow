@@ -34,9 +34,9 @@ python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE
 
 A saída lista os turnos desde o último worklog que esta sessão commitou — a hora e o começo do pedido de cada um — e
 os turnos sem tarefa das outras sessões do workstream. **Se os turnos listados são de mais de uma tarefa**, feche antes
-a mais antiga: o worklog dela e `brza note commit <worklog> --until <HH:MM>`, com a hora do fim do último turno dela; o
-resto fica para o worklog da tarefa em curso. **Os turnos sem tarefa das outras sessões** se dizem a quem pediu, numa
-linha, sem fechá-los daqui.
+a mais antiga: o worklog dela e `brza note commit <worklog> --until <HH:MM> -m "docs: …"`, com a hora do fim do último
+turno dela; com três ou mais, repita da mais antiga para a mais nova. O resto fica para o worklog da tarefa em
+curso. **Os turnos sem tarefa das outras sessões** se dizem a quem pediu, numa linha, sem fechá-los daqui.
 
 Sem turno pendente, a saída é "nada a fechar". Sem a `CLAUDE_CODE_SESSION_ID` no ambiente, fora do Claude Code, o passo
 não se aplica: o commit sai sem carimbo de sessão.
@@ -79,9 +79,10 @@ neles o `sessions:` com a sessão, escreve a `## Medida` e grava o marco da tare
 `master`, roda o checador antes e dá o push. Se o checador barrar, corrija e rode de novo; o
 `notes-checker` explica o erro.
 
-**A tarefa mais antiga, quando o passo 2 achou duas**, fecha antes, com `--until <HH:MM>` (ou a hora ISO): o marco vai
-à hora dada, e os turnos depois dela ficam para o commit seguinte, o da tarefa em curso. A hora tem de cair entre o
-marco anterior da sessão e agora; fora disso, o commit recusa sem tocar o worklog.
+**As tarefas mais antigas, quando o passo 2 achou mais de uma**, fecham antes, uma a uma, cada uma com
+`--until <HH:MM>` (ou a hora ISO): o marco vai à hora dada, e os turnos depois dela ficam para o commit seguinte; o
+último fica com a tarefa em curso. A hora tem de cair entre o marco anterior da sessão e agora; fora disso, o commit
+recusa sem tocar o worklog.
 
 ## 7. Conferir e devolver
 
