@@ -213,7 +213,7 @@ def side(when, kind="queue-operation"):
 
 
 class WaitsAndHeadTest(HookTest):
-    """D2: a espera de Anderson dentro do turno e o começo do pedido."""
+    """D2: a espera de quem pediu dentro do turno e o começo do pedido."""
 
     LONG = "siga com o `PLN-012`\n" + "x" * 100
 
@@ -253,7 +253,7 @@ class WaitsAndHeadTest(HookTest):
                         origin={"kind": "task-notification"}),
                  says(110, "r2"), prompt(300, "segundo", origin={"kind": "human"}), says(310, "r3")]
         _, seen = self.measure.measure([json.dumps(e) for e in lines])
-        self.assertEqual(seen["waits_s"], [190])  # do fim do agente (110) ao pedido de Anderson (300)
+        self.assertEqual(seen["waits_s"], [190])  # do fim do agente (110) ao pedido de quem pediu (300)
         self.assertEqual(seen["prompt_head"], "primeiro")
 
     def test_a_slash_skill_with_the_message_before_the_name_is_a_command(self):
@@ -317,7 +317,7 @@ class WaitsAndHeadTest(HookTest):
         lines = [prompt(0, "primeiro"), says(10, "r1"), prompt(50, "mensagem de outra sessão", origin={"kind": "peer"}),
                  prompt(80, "segundo"), says(90, "r2")]
         _, seen = self.measure.measure([json.dumps(e) for e in lines])
-        self.assertEqual(seen["waits_s"], [30])  # só o pedido de Anderson espera, e a mensagem é fala, não pedido
+        self.assertEqual(seen["waits_s"], [30])  # só o pedido de quem pediu espera, e a mensagem é fala, não pedido
         lines = [prompt(0, "mensagem de outra sessão", origin={"kind": "peer"}), prompt(1, "pedido real"), says(9, "r1")]
         _, seen = self.measure.measure([json.dumps(e) for e in lines])
         self.assertEqual((seen["prompt_head"], seen["waits_s"]), ("pedido real", []))

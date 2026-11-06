@@ -17,7 +17,7 @@ decisões das travas de retomada e do /compact. As negações de hook saem com o
   python3 scripts/summarize_measurements.py --facts              o acerto dos fatos do desenho (PLN-005), por papel, classe,
                                                                  faixa de confiança e tipo (com --json, em JSON); --since
                                                                  filtra pela data do fato
-  python3 scripts/summarize_measurements.py --by-task            por tarefa (o worklog): o corrido, o agente, Anderson e a
+  python3 scripts/summarize_measurements.py --by-task            por tarefa (o worklog): o corrido, o agente, quem pediu e a
                                                                  pausa, o custo, a CPU e o `brza run`; as tarefas não
                                                                  medidas; e a ociosa e os turnos sem tarefa por sessão
                                                                  (com --since, --workstream <nome> e --json)
@@ -556,10 +556,10 @@ def to_json_facts(facts):
 # [marco k−1, marco k); depois do último marco, os turnos ficam "sem tarefa". O `brza-note` usa `task_segments` e
 # `task_measure` por `runpy`, para a `## Medida` do worklog e esta tabela darem o mesmo número.
 
-PAUSE_S = 1800  # a espera acima disto é pausa, e não tempo de Anderson (PLN-012/R2.3)
+PAUSE_S = 1800  # a espera acima disto é pausa, e não tempo de quem pediu (PLN-012/R2.3)
 STALE_S = 2 * 3600  # a outra sessão do workstream parada há mais disto entra no aviso do --pending (R3.3)
 NO_SESSION = "(sem sessão)"
-ADDITIVE = ("agent_s", "anderson_s", "pause_s", "elapsed_s", "cost_turns", "cost_subagents", "cpu_self_s",
+ADDITIVE = ("agent_s", "requester_s", "pause_s", "elapsed_s", "cost_turns", "cost_subagents", "cpu_self_s",
             "cpu_children_s", "run_cpu_s", "run_duration_s")
 COUNTS = ("turns", "subagents", "runs", "machine_turns", "no_cost_turns", "no_cost_subagents")
 PEAKS = ("rss_max_mb", "run_max_rss_mb")
@@ -691,13 +691,13 @@ def peak(current, value):
 
 
 def split_wait(measure, wait):
-    measure["anderson_s"] += min(wait, PAUSE_S)
+    measure["requester_s"] += min(wait, PAUSE_S)
     measure["pause_s"] += max(wait - PAUSE_S, 0)
 
 
 def task_measure(rows):
     """Os três tempos, o custo e a máquina das linhas de um segmento (D2): agente = Σ (duration_s − Σ waits_s);
-    Anderson e pausa dividem, no PAUSE_S, cada `waits_s` e cada intervalo entre dois turnos; o corrido é a soma. A
+    Quem pediu e a pausa dividem, no PAUSE_S, cada `waits_s` e cada intervalo entre dois turnos; o corrido é a soma. A
     linha sem `waits_s` não teve espera; sem `machine`, não tem CPU (`machine_turns` conta as que têm)."""
     measure = new_measure()
     turns = sorted((r for r in rows if r.get("event") == "turn" and row_end(r)), key=row_start)
@@ -722,7 +722,7 @@ def task_measure(rows):
             measure["cpu_self_s"] += float(machine.get("cpu_self_s") or 0)
             measure["cpu_children_s"] += float(machine.get("cpu_children_s") or 0)
             measure["rss_max_mb"] = peak(measure["rss_max_mb"], machine.get("rss_mb"))
-    measure["elapsed_s"] = measure["agent_s"] + measure["anderson_s"] + measure["pause_s"]
+    measure["elapsed_s"] = measure["agent_s"] + measure["requester_s"] + measure["pause_s"]
     if turns:
         measure["start"], measure["end"] = row_start(turns[0]).isoformat(), last_end.isoformat()
     for r in rows:
@@ -886,12 +886,12 @@ def cpu_min(value):
 
 def print_by_task(result):
     print_table("Tarefas, por workstream e dia — tempos em h:mm, CPU em minutos",
-                ("workstream", "dia", "tarefa", "sessões", "turnos", "corrido", "agente", "Anderson", "pausa",
+                ("workstream", "dia", "tarefa", "sessões", "turnos", "corrido", "agente", "quem pediu", "pausa",
                  "US$ turnos", "US$ subag.", "US$ total", "CPU claude", "CPU comandos", "runs", "CPU runs",
                  "pico runs MB", "RSS máx MB"),
                 ("<", "<", "<", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">"),
                 [(t["workstream"], t["day"], t["task"] + (f" ÷{t['shared_with'] + 1}" if t["shared_with"] else ""),
-                  t["sessions"], t["turns"], hm(t["elapsed_s"]), hm(t["agent_s"]), hm(t["anderson_s"]),
+                  t["sessions"], t["turns"], hm(t["elapsed_s"]), hm(t["agent_s"]), hm(t["requester_s"]),
                   hm(t["pause_s"]), money({"cost": t["cost_turns"], "no_cost": t["no_cost_turns"]}),
                   money({"cost": t["cost_subagents"], "no_cost": t["no_cost_subagents"]}),
                   money({"cost": t["cost_turns"] + t["cost_subagents"],

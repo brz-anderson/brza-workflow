@@ -599,7 +599,7 @@ class ByTaskTest(unittest.TestCase):
         tasks = by_worklog(result)
         self.assertEqual(set(tasks), {OPENING, GROK})
         opening = tasks[OPENING]
-        self.assertEqual((opening["agent_s"], opening["anderson_s"], opening["pause_s"], opening["elapsed_s"]),
+        self.assertEqual((opening["agent_s"], opening["requester_s"], opening["pause_s"], opening["elapsed_s"]),
                          (452, 625, 0, 1077))
         self.assertEqual((opening["turns"], opening["sessions"], opening["commits"]), (1, 1, 2))
         self.assertAlmostEqual(opening["cost_turns"], 2.35)
@@ -608,7 +608,7 @@ class ByTaskTest(unittest.TestCase):
         self.assertEqual((opening["workstream"], opening["day"], opening["task"]),
                          ("tools-kit", "2026-11-03", "pln-012-abertura-da-produtividade-por-tarefa"))
         grok = tasks[GROK]
-        self.assertEqual((grok["turns"], grok["agent_s"], grok["anderson_s"], grok["elapsed_s"]), (1, 87, 0, 87))
+        self.assertEqual((grok["turns"], grok["agent_s"], grok["requester_s"], grok["elapsed_s"]), (1, 87, 0, 87))
         self.assertAlmostEqual(grok["cost_turns"], 0.43)
         self.assertEqual(grok["machine_turns"], 0)  # a linha antiga, sem machine, fica sem CPU
         self.assertIsNone(grok["cpu_self_s"])
@@ -635,16 +635,16 @@ class ByTaskTest(unittest.TestCase):
         self.assertEqual([r["timestamp"] for r in open_["rows"] if r["event"] == "turn"],
                          [at("22:32:51"), at("22:35:19"), at("22:42:21")])
         measure = self.summarize.task_measure(closed[0]["rows"])
-        self.assertEqual((measure["agent_s"], measure["anderson_s"], measure["pause_s"]), (452, 625, 0))
+        self.assertEqual((measure["agent_s"], measure["requester_s"], measure["pause_s"]), (452, 625, 0))
 
-    def test_a_wait_of_fifty_minutes_is_thirty_of_anderson_and_twenty_of_pause(self):
+    def test_a_wait_of_fifty_minutes_is_thirty_of_the_requester_and_twenty_of_pause(self):
         rows = [tturn("10:00:00", 3600, 1.0, waits_s=[3000]), task("10:01:00", [OPENING], "a1")]
         t = by_worklog(self.measure(rows))[OPENING]
-        self.assertEqual((t["agent_s"], t["anderson_s"], t["pause_s"], t["elapsed_s"]), (600, 1800, 1200, 3600))
+        self.assertEqual((t["agent_s"], t["requester_s"], t["pause_s"], t["elapsed_s"]), (600, 1800, 1200, 3600))
         # o mesmo para o intervalo entre dois turnos do segmento
         rows = [tturn("09:00:00", 60, 0.1), tturn("09:51:00", 60, 0.1), task("09:52:00", [OPENING], "a1")]
         t = by_worklog(self.measure(rows))[OPENING]
-        self.assertEqual((t["agent_s"], t["anderson_s"], t["pause_s"], t["elapsed_s"]), (120, 1800, 1200, 3120))
+        self.assertEqual((t["agent_s"], t["requester_s"], t["pause_s"], t["elapsed_s"]), (120, 1800, 1200, 3120))
 
     def test_two_worklogs_in_one_commit_split_the_segment_in_halves(self):
         rows = [tturn("10:00:00", 100, 1.0, machine=MACHINE), task("10:01:00", [OPENING, GROK], "a1")]

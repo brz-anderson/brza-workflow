@@ -10,7 +10,7 @@ Um modo por evento do Claude Code, no primeiro argumento:
 - `skill` (PostToolUse, matcher Skill): a skill que o modelo invocou e o momento — o começo da janela.
 - `command` (UserPromptExpansion): a skill ou o comando digitado como `/nome`, que não passa pela ferramenta Skill.
 - `turn` (Stop): o turno da sessão principal, medido como o subagente, com as skills e os agentes que rodaram nele. É
-  o que fecha a janela da skill na sessão principal. Leva também `waits_s` (as esperas de Anderson dentro do turno: a
+  o que fecha a janela da skill na sessão principal. Leva também `waits_s` (as esperas de quem pediu dentro do turno: a
   de cada pergunta com opções e a do pedido que segue um turno interrompido), `prompt_head` (os 80 primeiros
   caracteres do pedido) e `machine` (a CPU do `claude` e dos filhos colhidos desde o último turno do mesmo pid, e o RSS,
   pelo `proc_pid_rusage`; null fora do macOS ou quando a leitura falha). A marca da CPU fica no `state.json`, em
@@ -326,9 +326,9 @@ def seconds_between(earlier, later):
     return (t1 - t0).total_seconds()
 
 
-# O que chega como mensagem do usuário sem ser pedido de Anderson: a saída de um comando local, a marca da interrupção,
+# O que chega como mensagem do usuário sem ser pedido de quem pediu: a saída de um comando local, a marca da interrupção,
 # o aviso de tarefa em segundo plano, que o Claude Code entrega como prompt, o `<system-reminder>` e a saída do modo `!`
-# (`<bash-stdout>`, `<bash-stderr>`). O `<bash-input>` é ação de Anderson e fica como pedido.
+# (`<bash-stdout>`, `<bash-stderr>`). O `<bash-input>` é ação de quem pediu e fica como pedido.
 NOT_A_REQUEST = ("<local-command-stdout>", "<local-command-stderr>", "[Request interrupted by user",
                  "<task-notification>", "<system-reminder>", "<bash-stdout>", "<bash-stderr>")
 COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.S)
@@ -339,7 +339,7 @@ HEAD_CHARS = 80
 
 
 def request_text(e, kind, msg):
-    """O texto do pedido de Anderson nesta linha, ou None se ela não é um: a linha `isMeta` (o aviso do comando local,
+    """O texto do pedido de quem pediu nesta linha, ou None se ela não é um: a linha `isMeta` (o aviso do comando local,
     a expansão da skill), o resumo da compactação, o resultado de ferramenta, a saída de comando, a interrupção e o
     aviso de tarefa."""
     if kind != "user" or e.get("isMeta") or e.get("isCompactSummary") or only_tool_results(msg.get("content")):
@@ -378,7 +378,7 @@ def measure(lines):
     # tool_result que fechou a execução anterior e registros de sistema com o horário dela; contá-los poria a espera
     # entre as duas na duração.
     opened = False
-    # As esperas de Anderson dentro do trecho (D2 do PLN-012): a de cada pergunta com opções, do `tool_use` ao
+    # As esperas de quem pediu dentro do trecho (D2 do PLN-012): a de cada pergunta com opções, do `tool_use` ao
     # `tool_result`, e a de cada pedido depois do primeiro, desde a linha anterior da conversa. Só `user` e `assistant`
     # contam como linha anterior: a fila (`queue-operation`) e o hook do pedido têm o horário do próprio pedido.
     waits, asked_at, requests, last_talk = [], {}, 0, None
