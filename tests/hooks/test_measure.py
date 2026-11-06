@@ -225,7 +225,7 @@ class WaitsAndHeadTest(HookTest):
 
     def test_the_round_and_the_interrupted_turn_are_waits_and_the_meta_prompt_is_not(self):
         measured, seen = self.measure.measure([json.dumps(e) for e in self.segment()])
-        self.assertEqual(seen["waits_s"], [459, 120])  # a fila e o hook antes do pedido não encurtam a espera
+        self.assertEqual(seen["waits_s"], [459, 150])  # a fila, o hook e o caveat isMeta não encurtam a espera: de 470 a 620
         self.assertEqual(measured["duration_s"], 630)
         self.assertNotIn("waits_s", measured)  # o subagente usa só o primeiro dicionário, e não muda
 
@@ -269,6 +269,51 @@ class WaitsAndHeadTest(HookTest):
         quoted = "Como a tag <command-name>/help</command-name> é gravada?"
         _, seen = self.measure.measure([json.dumps(e) for e in (prompt(0, quoted), says(9, "r1"))])
         self.assertEqual(seen["prompt_head"], quoted[:80])
+
+    def test_the_compaction_summary_is_not_a_prompt(self):
+        summary = prompt(0, "This session is being continued from a previous conversation that ran out of context.",
+                         isCompactSummary=True, isVisibleInTranscriptOnly=True)
+        caveat = prompt(1, "<local-command-caveat>Caveat</local-command-caveat>", isMeta=True)
+        compact = prompt(1, "<command-name>/compact</command-name>\n<command-args></command-args>")
+        stdout = prompt(2, "<local-command-stdout>Compacted</local-command-stdout>")
+        lines = [summary, caveat, compact, stdout, prompt(3, "siga com o P2"), says(9, "r1")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["prompt_head"], "siga com o P2")
+
+    def test_bash_mode_output_is_not_a_prompt_and_the_input_shows_as_a_bang(self):
+        lines = [prompt(0, "<bash-input>brza-app install</bash-input>"), prompt(1, "<bash-stdout>ok</bash-stdout>"),
+                 prompt(2, "<bash-stderr>aviso</bash-stderr>"), says(9, "r1")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual((seen["prompt_head"], seen["waits_s"]), ("! brza-app install", []))
+
+    def test_a_wait_never_starts_before_the_segment_clock(self):
+        # a forma real: o caveat abre o trecho em 1000, o `<bash-input>` vem com data de 120 s antes, e o pedido seguinte
+        lines = [prompt(880, [{"type": "tool_result", "tool_use_id": "t0", "content": "ok"}]),
+                 prompt(1000, "<local-command-caveat>Caveat</local-command-caveat>", isMeta=True),
+                 prompt(880.5, "<bash-input>ls</bash-input>"), prompt(1000, "<bash-stdout>x</bash-stdout>"),
+                 prompt(1010, "agora outro pedido"), says(1033, "r1")]
+        measured, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertLessEqual(sum(seen["waits_s"]), measured["duration_s"])
+        self.assertEqual(seen["waits_s"], [10])
+        self.assertEqual(seen["prompt_head"], "! ls")
+
+    def test_the_meta_caveat_is_not_the_previous_line_of_the_conversation(self):
+        lines = [prompt(0, "pedido"), says(10, "r1"), prompt(40, "[Request interrupted by user]"),
+                 prompt(1000.1, "<local-command-caveat>Caveat</local-command-caveat>", isMeta=True),
+                 prompt(1000, "<command-name>/model</command-name>\n<command-args>opus</command-args>"),
+                 prompt(1200, "outro pedido"), says(1210, "r2")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        # o /model espera 960 desde o aviso de interrupção (40), e o pedido seguinte 200 desde o /model (1000)
+        self.assertEqual(seen["waits_s"], [960, 200])
+
+    def test_a_peer_message_is_not_a_prompt(self):
+        lines = [prompt(0, "primeiro"), says(10, "r1"), prompt(50, "mensagem de outra sessão", origin={"kind": "peer"}),
+                 prompt(80, "segundo"), says(90, "r2")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["waits_s"], [30])  # só o pedido de Anderson espera, e a mensagem é fala, não pedido
+        lines = [prompt(0, "mensagem de outra sessão", origin={"kind": "peer"}), prompt(1, "pedido real"), says(9, "r1")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual((seen["prompt_head"], seen["waits_s"]), ("pedido real", []))
 
     def test_a_system_reminder_is_not_a_prompt(self):
         reminder = '<system-reminder>\nThe user named this session "tools-kit".</system-reminder>'

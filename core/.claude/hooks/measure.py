@@ -327,19 +327,22 @@ def seconds_between(earlier, later):
 
 
 # O que chega como mensagem do usuário sem ser pedido de Anderson: a saída de um comando local, a marca da interrupção,
-# o aviso de tarefa em segundo plano, que o Claude Code entrega como prompt, e o `<system-reminder>`.
+# o aviso de tarefa em segundo plano, que o Claude Code entrega como prompt, o `<system-reminder>` e a saída do modo `!`
+# (`<bash-stdout>`, `<bash-stderr>`). O `<bash-input>` é ação de Anderson e fica como pedido.
 NOT_A_REQUEST = ("<local-command-stdout>", "<local-command-stderr>", "[Request interrupted by user",
-                 "<task-notification>", "<system-reminder>")
+                 "<task-notification>", "<system-reminder>", "<bash-stdout>", "<bash-stderr>")
 COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.S)
 COMMAND_LINE = re.compile(r"\s*(?:<command-message>.*?</command-message>\s*)?<command-name>", re.S)
+BASH_INPUT = re.compile(r"\s*<bash-input>(.*?)</bash-input>", re.S)
 COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 HEAD_CHARS = 80
 
 
 def request_text(e, kind, msg):
     """O texto do pedido de Anderson nesta linha, ou None se ela não é um: a linha `isMeta` (o aviso do comando local,
-    a expansão da skill), o resultado de ferramenta, a saída de comando, a interrupção e o aviso de tarefa."""
-    if kind != "user" or e.get("isMeta") or only_tool_results(msg.get("content")):
+    a expansão da skill), o resumo da compactação, o resultado de ferramenta, a saída de comando, a interrupção e o
+    aviso de tarefa."""
+    if kind != "user" or e.get("isMeta") or e.get("isCompactSummary") or only_tool_results(msg.get("content")):
         return None
     origin = e.get("origin")
     if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
@@ -350,7 +353,10 @@ def request_text(e, kind, msg):
 
 def head_of(text):
     """Os primeiros 80 caracteres do pedido, numa linha só. O comando digitado (`/rename x`) sai pelo nome e os
-    argumentos, e não pelas marcas `<command-name>` que o transcript grava."""
+    argumentos, e não pelas marcas `<command-name>` que o transcript grava; o do modo `!`, como `! comando`."""
+    bash = BASH_INPUT.match(text)
+    if bash:
+        text = f"! {bash.group(1).strip()}"
     name = COMMAND_NAME.search(text) if COMMAND_LINE.match(text) else None
     if name:
         args = COMMAND_ARGS.search(text)
@@ -396,7 +402,11 @@ def measure(lines):
         if text is not None:
             requests += 1
             if requests > 1 and last_talk and ts:
-                waits.append(seconds_between(last_talk, ts))
+                # A espera não começa antes do relógio do trecho: o caveat e o `<bash-input>` vêm com data fora de ordem.
+                begin = last_talk
+                if start and (seconds_between(last_talk, start) or 0) > 0:
+                    begin = start
+                waits.append(seconds_between(begin, ts))
             if COMMAND_LINE.match(text):
                 command_head = command_head or head_of(text)
             elif head is None and text:
@@ -405,8 +415,8 @@ def measure(lines):
             for b in msg.get("content") or []:
                 if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in asked_at:
                     waits.append(seconds_between(asked_at.pop(b["tool_use_id"]), ts))
-        if kind in ("user", "assistant") and ts:
-            last_talk = ts
+        if kind in ("user", "assistant") and ts and not e.get("isMeta"):
+            last_talk = ts  # o caveat `isMeta` vem com a data do comando que ele antecede, e não é fala
         if kind == "assistant":
             if msg.get("model") != "<synthetic>":  # a mensagem de erro que o próprio Claude Code escreve
                 model = msg.get("model") or model
