@@ -326,10 +326,10 @@ def seconds_between(earlier, later):
     return (t1 - t0).total_seconds()
 
 
-# O que chega como mensagem do usuário sem ser pedido de Anderson: a saída de um comando local, a marca da interrupção
-# e o aviso de tarefa em segundo plano, que o Claude Code entrega como prompt.
+# O que chega como mensagem do usuário sem ser pedido de Anderson: a saída de um comando local, a marca da interrupção,
+# o aviso de tarefa em segundo plano, que o Claude Code entrega como prompt, e o `<system-reminder>`.
 NOT_A_REQUEST = ("<local-command-stdout>", "<local-command-stderr>", "[Request interrupted by user",
-                 "<task-notification>")
+                 "<task-notification>", "<system-reminder>")
 COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.S)
 COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 HEAD_CHARS = 80
@@ -396,7 +396,7 @@ def measure(lines):
             requests += 1
             if requests > 1 and last_talk and ts:
                 waits.append(seconds_between(last_talk, ts))
-            if COMMAND_NAME.match(text):
+            if COMMAND_NAME.search(text):
                 command_head = command_head or head_of(text)
             elif head is None and text:
                 head = head_of(text)
@@ -652,13 +652,13 @@ def machine_of(pid, origin, last):
 
     def delta(key):
         d = r[key] - (base.get(key) or 0)
-        return round(d if d >= 0 else r[key], 2)
+        return round(max(d, 0.0), 2)  # o mesmo processo não gasta CPU negativa: é só a folga do float
 
     machine = {"pid": pid, "from": origin, "cpu_self_s": delta("cpu_self_s"),
                "cpu_children_s": delta("cpu_children_s"),
                "rss_mb": round(r["rss_bytes"] / 2 ** 20), "footprint_mb": round(r["footprint_bytes"] / 2 ** 20)}
-    return machine, {"start": r["start"], "cpu_self_s": round(r["cpu_self_s"], 4),
-                     "cpu_children_s": round(r["cpu_children_s"], 4)}
+    return machine, {"start": r["start"], "cpu_self_s": r["cpu_self_s"],
+                     "cpu_children_s": r["cpu_children_s"]}
 
 
 def turn(p):

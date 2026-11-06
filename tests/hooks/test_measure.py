@@ -256,6 +256,25 @@ class WaitsAndHeadTest(HookTest):
         self.assertEqual(seen["waits_s"], [190])  # do fim do agente (110) ao pedido de Anderson (300)
         self.assertEqual(seen["prompt_head"], "primeiro")
 
+    def test_a_slash_skill_with_the_message_before_the_name_is_a_command(self):
+        skill = prompt(0, "<command-message>plan-runner</command-message>\n<command-name>/plan-runner</command-name>\n"
+                          "<command-args>abra o plano</command-args>")
+        lines = [skill, prompt(1, "abra o PLN-012"), says(9, "r1")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["prompt_head"], "abra o PLN-012")
+        _, seen = self.measure.measure([json.dumps(e) for e in (skill, says(9, "r1"))])
+        self.assertEqual(seen["prompt_head"], "/plan-runner abra o plano")
+
+    def test_a_system_reminder_is_not_a_prompt(self):
+        reminder = '<system-reminder>\nThe user named this session "tools-kit".</system-reminder>'
+        lines = [prompt(0, "primeiro"), says(10, "r1"), prompt(50, reminder), prompt(80, "segundo"), says(90, "r2")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["waits_s"], [30])  # o lembrete é linha `user`: a espera conta do 50, não do fim do agente
+        lines = [prompt(0, reminder), prompt(1, "pedido real"), says(9, "r1")]
+        _, seen = self.measure.measure([json.dumps(e) for e in lines])
+        self.assertEqual(seen["prompt_head"], "pedido real")
+        self.assertEqual(seen["waits_s"], [])
+
     def test_a_refused_question_still_waited(self):
         refused = answers(64, "q1")
         refused["message"]["content"][0]["is_error"] = True
@@ -323,7 +342,7 @@ class MachineTest(HookTest):
         self.assertEqual(second["machine"], {"pid": 44452, "from": "env", "cpu_self_s": 0.66, "cpu_children_s": 2.37,
                                              "rss_mb": 400, "footprint_mb": 250})
         self.assertEqual(fake.pids, [44452, 44452])
-        self.assertEqual(self.state()["machine:44452"], {"start": 1000, "cpu_self_s": 1.5, "cpu_children_s": 8.5})
+        self.assertEqual(self.state()["machine:44452"], {"start": 1000, "cpu_self_s": 1.5, "cpu_children_s": 8.5})  # float exato
         self.assertEqual((first["waits_s"], first["prompt_head"]), ([], "pedido 1"))
 
     def test_a_new_process_with_the_same_pid_measures_from_its_start(self):
@@ -335,6 +354,16 @@ class MachineTest(HookTest):
             self.stop()
         _, second = self.logged()
         self.assertEqual((second["machine"]["cpu_self_s"], second["machine"]["cpu_children_s"]), (0.5, 0.25))
+
+    def test_a_negative_delta_of_the_same_process_is_zero_not_the_accumulated(self):
+        fake = FakeRusage(reading(100.0001, 5.0), reading(100.00009, 5.0))
+        with mock.patch.object(self.measure, "proc_pid_rusage", fake):
+            self.add_turn(1)
+            self.stop()
+            self.add_turn(2)
+            self.stop()
+        _, second = self.logged()
+        self.assertEqual((second["machine"]["cpu_self_s"], second["machine"]["cpu_children_s"]), (0.0, 0.0))
 
     def test_without_claude_pid_the_pid_comes_from_the_parent_chain(self):
         os.environ.pop("CLAUDE_PID")
