@@ -407,7 +407,7 @@ def measure(lines):
                 if start and (seconds_between(last_talk, start) or 0) > 0:
                     begin = start
                 waits.append(seconds_between(begin, ts))
-            if COMMAND_LINE.match(text):
+            if COMMAND_LINE.match(text) or BASH_INPUT.match(text):
                 command_head = command_head or head_of(text)
             elif head is None and text:
                 head = head_of(text)

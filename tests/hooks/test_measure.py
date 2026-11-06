@@ -290,12 +290,19 @@ class WaitsAndHeadTest(HookTest):
         # a forma real: o caveat abre o trecho em 1000, o `<bash-input>` vem com data de 120 s antes, e o pedido seguinte
         lines = [prompt(880, [{"type": "tool_result", "tool_use_id": "t0", "content": "ok"}]),
                  prompt(1000, "<local-command-caveat>Caveat</local-command-caveat>", isMeta=True),
-                 prompt(880.5, "<bash-input>ls</bash-input>"), prompt(1000, "<bash-stdout>x</bash-stdout>"),
+                 prompt(880.5, "<bash-input>ls</bash-input>"), prompt(880.6, "<bash-stdout>x</bash-stdout>"),
                  prompt(1010, "agora outro pedido"), says(1033, "r1")]
         measured, seen = self.measure.measure([json.dumps(e) for e in lines])
         self.assertLessEqual(sum(seen["waits_s"]), measured["duration_s"])
         self.assertEqual(seen["waits_s"], [10])
-        self.assertEqual(seen["prompt_head"], "! ls")
+        self.assertEqual(seen["prompt_head"], "agora outro pedido")  # o `! ls` só seria o head sozinho
+
+    def test_the_bash_input_is_the_head_only_when_there_is_no_written_prompt(self):
+        git = prompt(0, "<bash-input>git status</bash-input>")
+        _, seen = self.measure.measure([json.dumps(e) for e in (git, prompt(1, "agora o P2"), says(9, "r1"))])
+        self.assertEqual(seen["prompt_head"], "agora o P2")
+        _, seen = self.measure.measure([json.dumps(e) for e in (git, says(9, "r1"))])
+        self.assertEqual(seen["prompt_head"], "! git status")
 
     def test_the_meta_caveat_is_not_the_previous_line_of_the_conversation(self):
         lines = [prompt(0, "pedido"), says(10, "r1"), prompt(40, "[Request interrupted by user]"),
