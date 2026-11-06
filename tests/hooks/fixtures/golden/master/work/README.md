@@ -192,7 +192,7 @@ por um formatador que junta linhas.
 `work/`, `plans/` e `wiki/` são deste repositório, mas **não moram na `master`**: cada nota mora na branch do
 workstream dela, `workstream/<nome>`, no worktree `.worktrees/<nome>`, como diz o `AGENTS.md`. **A nota nasce no
 workstream da sessão que a escreve.** **O commit é pelo `brza note commit`**, que extrai e atualiza o `refs:` dos
-worklogs pedidos, roda o checador, commita só os
+worklogs pedidos — e o `sessions:` e a `## Medida`, como diz a seção `work/worklogs/` —, roda o checador, commita só os
 caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `master`. O commit é com a identidade do
 `brz-anderson`, que vem do `env` da sessão, e o push vai pela chave `personal` do `origin`
 (`git@personal:brz-anderson/brza-workspace.git`).

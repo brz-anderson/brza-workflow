@@ -34,16 +34,19 @@ python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE
 
 A saída lista os turnos desde o último worklog que esta sessão commitou — a hora e o começo do pedido de cada um — e
 os turnos sem tarefa das outras sessões do workstream. **Se os turnos listados são de mais de uma tarefa**, feche antes
-a mais antiga: o worklog dela e `brza note commit <worklog> --until <HH:MM> -m "docs: …"`, com a hora do fim do último
-turno dela; com três ou mais, repita da mais antiga para a mais nova. O resto fica para o worklog da tarefa em
-curso. **Os turnos sem tarefa das outras sessões** se dizem a quem pediu, numa linha, sem fechá-los daqui.
+a mais antiga: o worklog dela e `brza note commit <worklog> --until <HH:MM> -m "docs: …"`. O `--until` leva a hora que
+a lista mostra para o primeiro turno da tarefa seguinte (a lista dá a hora do começo do turno, e o turno vai à tarefa
+pela hora em que começa); se o último turno da tarefa anterior começou no mesmo minuto, use a hora ISO, com os
+segundos. Com três ou mais, repita da mais antiga para a mais nova. O resto fica para o worklog da tarefa em curso.
+**Os turnos sem tarefa das outras sessões** se dizem a quem pediu, numa linha, sem fechá-los daqui.
 
 Sem turno pendente, a saída é "nada a fechar". Sem a `CLAUDE_CODE_SESSION_ID` no ambiente, fora do Claude Code, o passo
 não se aplica: o commit sai sem carimbo de sessão.
 
 ## 3. O worklog de hoje
 
-- **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois.
+- **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois, acima da `## Medida` quando ela existe: o
+  que ficar abaixo dela se perde no commit seguinte.
 - **Não tem:** crie `work/worklogs/AAAA-MM-DD-assunto-em-kebab.md`, com `scope` no frontmatter e sem `status` nem `date`,
   na forma da seção `work/worklogs/` do `work/README.md`. Mudou o assunto, virou o dia ou houve decisão: é arquivo novo.
 - **O conteúdo** é o registro escrito, não a transcrição: o que se fez, o que se decidiu (com a resposta literal da
