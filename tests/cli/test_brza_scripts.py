@@ -505,6 +505,23 @@ class BrzaRunTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
 
+    def test_chat_mode_without_a_workspace_warns_and_writes_nothing(self):
+        def rpc(method, params):
+            return {'page': {'fence': 7}, 'providerSession': {'id': 'sess-9'}} if method == 'agentSession.history' else {}
+
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp:
+            before = os.getcwd()
+            os.chdir(temp)
+            self.addCleanup(os.chdir, before)
+            with no_workspace(), quiet_terminal(temp), patch.object(RUN['runtime'], 'rpc', rpc), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = RUN['run_in_chat']('exit 2', 'claude_x')
+            os.chdir(before)
+            self.assertEqual(code, 2)
+            self.assertIn('brza-run: sem workspace', err.getvalue())
+            self.assertEqual(list(Path(temp).rglob('.measurements')), [])
+
 
 if __name__ == '__main__':
     unittest.main()
