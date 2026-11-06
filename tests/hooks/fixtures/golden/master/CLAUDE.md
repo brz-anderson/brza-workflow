@@ -93,13 +93,17 @@ O `.claude/hooks/measure.py`, ligado no `settings.json`, grava uma linha JSON po
 | Evento     | Quando                                            | O que grava                                                                                                                                         |
 | :--------- | :------------------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `subagent` | `SubagentStop`, inclusive o `agent()` de workflow | duração, chamadas à API e de ferramenta, tokens por tipo, o maior contexto de uma chamada, custo estimado em US$, conta, modelo, modelo pedido, esforço, versão do plugin, workflow e fase |
-| `turn`     | `Stop`, o fim de cada turno da sessão principal   | o mesmo, as skills e os agentes que rodaram no turno, e as rodadas: perguntas com opções, na recomendada, em outra opção e em texto livre          |
+| `turn`     | `Stop`, o fim de cada turno da sessão principal   | o mesmo, as skills e os agentes que rodaram no turno, e as rodadas: perguntas com opções, na recomendada, em outra opção e em texto livre; as esperas de Anderson dentro do turno (`waits_s`), o começo do pedido (`prompt_head`), e a CPU do `claude` e dos comandos que ele rodou, com o RSS (`machine`) |
 | `skill`    | a ferramenta `Skill`                              | o nome, os argumentos e a versão do plugin                                                                                                         |
 | `command`  | `/nome` digitado, que não passa pela `Skill`      | o nome, os argumentos e a origem                                                                                                                   |
 | `failure`  | `StopFailure`                                     | o erro de API que encerrou o turno, como o limite de uso                                                                                           |
 | `mcp`      | toda chamada `mcp__*`                             | o servidor, a ferramenta, a duração e a falha                                                                                                      |
 | `memory`   | `Stop` e `SubagentStop`, pelo retrato da memória  | a memória criada, editada ou apagada no workstream: o dono (a sessão ou o papel), o arquivo, o nome e o tipo                                        |
+| `task`     | `brza note commit` com worklog, depois do commit  | o marco da tarefa: a sessão (`CLAUDE_CODE_SESSION_ID`), o chat do app, o nome da sessão, o `pid`, o workstream, os worklogs, o commit e o `until` do `--until` |
+| `run`      | o fim do comando do `brza run`                    | a sessão que chamou, o modo (aba ou chat), o comando, o código de saída, a duração, a CPU e o pico de memória do comando                            |
 
+- **O `task` e o `run` vêm dos comandos, e não do hook**, para o mesmo log da raiz do workspace. O `task` corta a
+  sessão em tarefas: cada uma vai do primeiro turno depois do marco anterior da sessão ao commit do worklog.
 - **O workstream em toda linha:** sai da branch do cwd; no `brza-studio`, do plano da branch. O retrato da memória fica
   em `.measurements/memory-snapshot.json`, e o primeiro retrato de um worktree não gera evento.
 - **Só o trecho novo do transcript:** retomada e turno medem só o que veio depois da última leitura.
@@ -109,8 +113,10 @@ O `.claude/hooks/measure.py`, ligado no `settings.json`, grava uma linha JSON po
 - **Python:** o da `BRZA_PYTHON`, ou `python3` sem ela.
 - **Precisão:** a saída de tokens fica subcontada, porque o transcript guarda a contagem do início de cada mensagem.
   Entrada e cache valem, e são eles que pesam no custo.
-- **Resumo:** `python3 scripts/summarize_measurements.py`, `--by-workstream` para o aprendizado por workstream e dia, e
-  `--facts` para o acerto da confiança dos fatos.
+- **Resumo:** `python3 scripts/summarize_measurements.py`, `--by-workstream` para o aprendizado por workstream e dia,
+  `--facts` para o acerto da confiança dos fatos, e `--by-task` para as tarefas por workstream e dia — o corrido de cada
+  worklog (agente, Anderson, pausa), o custo e a máquina, as tarefas não medidas e os turnos sem tarefa. O
+  `--by-task --pending --session <id>` é o aviso do `close-task`: o que o próximo commit da sessão vai fechar.
 - **Testes:** em `.claude/hooks/tests/`.
 
 ## A auditoria da confiança dos fatos
