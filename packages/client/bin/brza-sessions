@@ -1,60 +1,40 @@
 #!/usr/bin/env python3
-"""Abre, lista, manda mensagem, dá título e fecha as sessões de agentes em modo chat no BrzA Studio, pelo nome.
+"""Coordena chats de agentes pelo nome no BrzA Studio.
 
-O open abre o chat e dá à aba o título do --title, ou o <nome> sem ele, pelo `agentSession.rename` do app; o prompt da
-tarefa entra na abertura. Com --rename no Claude, manda antes o `/rename <nome>`, que dá o nome à sessão, e o prompt entra
-depois pelo `agentSession.send`, com `delivery: 'queue-if-active'`: ele espera na fila até o /rename terminar; no Codex,
-o nome vem do título da aba; no Grok e no Antigravity, o título fica na aba e o nome no mapa de sessões. Passe o --rename quando
-a sessão for mandar ou receber correio: sem ele, ela entra no correio com um nome automático, como `<workspace>-5b`,
-que ninguém sabe antes de abrir.
-
-O chat não passa pelo zsh de login, e a função `claude` do ~/.zshrc não roda. No workspace isso não falta: o chat
-lê o `.claude/settings.json` do projeto pelo `--setting-sources`. Num checkout do código, os hooks e a identidade só
-chegam pelo `agentCmdOverrides.claude` apontado para o claude-brza; sem ele, o script avisa numa linha CHECK e abre
-assim mesmo.
-
-O --agent escolhe o agente (padrão: claude); agy vira antigravity antes do launch. As checagens de claude-brza,
-hooks, processos e transcripts só se aplicam a Claude. O --rename dá nome à sessão no Claude (pelo /rename) e no
-Codex (pelo título da aba gravado em session_index.jsonl, trocando o --title pelo nome); no Grok e Antigravity, dá o título
-da aba e grava no mapa, avisando em linha CHECK que o agente não recebe /rename pelo chat. O --wait espera a sessão nos
-quatro agentes e, com --rename, a confirmação do nome nos runtimes que suportam.
-
-O mapa de sessões é o .sessions/sessions.jsonl do workspace do cwd (o `brza_root.find`), fora do git, uma linha por evento: `open`, `session`
-(o id da sessão do runtime, que o --wait espera), `title` e `close`. O open pula o nome que o mapa tem com o chat ainda
-aberto no app, ou que roda com o /rename (<config>/sessions/<pid>.json; o config é o ~/.claude ou o de uma conta do app,
-em <dados do app>/claude-profiles/<id>/home).
-
-O list, o send, o title e o close acham o chat pelo nome: o do mapa e, sem entrada num chat Claude, o último /rename gravado no
-transcript da sessão (<config>/projects/*/<id>.jsonl), cujo id vem do `agentSession.history`. O título da aba
-é outro: é o nome do chat no app. Chat sem nenhum dos dois não tem nome e não é achado.
+A abertura usa worker-start no worktree explícito, com o ciclo de vida do app: status de mailbox por rodada,
+worker_done só no encerramento e fechamento automático cerca de dois minutos depois, com Manter aberto na UI.
+O chamador precisa de ORCA_AGENT_SESSION_ID ou ORCA_TERMINAL_HANDLE próprios. Nome, Dispatch, Run, modelo,
+esforço, envios e latência ficam no .sessions/sessions.jsonl do workspace, fora do git.
 
 Uso:
-  brza sessions <nome>                                  # abre o chat no workspace; o `open` é opcional
-  brza sessions <nome> --agent grok                     # abre Grok; codex e agy (antigravity) também aceitos
-  brza sessions <nome> --title "PLN-001: Coordenador"   # com o título na aba; sem ele, o <nome>
-  brza sessions <nome> --rename                         # e dá o nome à sessão (Claude, Codex; Grok/agy na aba e mapa)
-  brza sessions <nome> --prompt "<tarefa>"              # e manda a tarefa
-  brza sessions <nome> --prompt-file <arquivo>          # a tarefa lida de um arquivo
-  brza sessions <nome> --checkout <caminho>             # noutro checkout, como um worktree do código; o relativo
-                                                        # parte da raiz do workspace, não do cwd
-  brza sessions <nome> --wait                           # só anuncia com a sessão no ar; com --rename, nomeada
-  brza sessions <nome> --dry-run                        # só mostra o que faria
-  brza sessions list [--json]                           # os chats do app: nome, estado, chat, worktree, título
-  brza sessions send <nome> <texto> [--json]            # manda ao chat, na fila se ele estiver num turno
-  brza sessions title <nome> <título> [--json]          # troca o título da aba
-  brza sessions close <nome> [--force] [--json]         # fecha o chat e a aba; o chat num turno pede --force
+  brza sessions <nome> [--agent claude|codex|grok|antigravity|agy] [--checkout CAMINHO]
+                [--prompt TEXTO | --prompt-file ARQUIVO] [--model MODELO [--effort ESFORÇO]]
+                [--title TÍTULO] [--rename] [--wait] [--dry-run]
+  brza sessions list [--json]
+  brza sessions send <nome> <texto> [--json]
+  brza sessions send [nomes...] [--prefix PREFIXO] (--text TEXTO | --file ARQUIVO) [--operation ID] [--json]
+  brza sessions wait [nomes...] [--prefix PREFIXO] [--marker ARQUIVO:REGEX] [--any] [--timeout SEGUNDOS] [--json]
+  brza sessions read <nome> --last [--json]
+  brza sessions title <nome> <título> [--json]
+  brza sessions close [nome] [--prefix PREFIXO] [--force | --keep-open] [--json]
 
-As linhas de saída do open são `open:     <nome>  (chat, <caminho>, <sessionId>)`, `running:  <nome>` e `CHECK:    …`.
-Saídas: 0 feito; 1 nome ausente ou repetido, chat num turno sem --force, o --wait vencido, ou o app sem resposta. O
---json do list, do send, do title e do close é o contrato do roteador do PLN-003; o arquivo do mapa não é:
-  list   {"sessions": [{"name", "title", "chat", "claude_session", "provider_session", "worktree", "state", "source", "opened"}]}
-         source: "map", "transcript" ou null; opened: o horário do open no mapa, ou null
-  send   {"sent": true, "name", "chat"}
-  title  {"titled": true, "name", "chat", "title"}
-  close  {"closed": true, "name", "chat"}; num turno, {"closed": false, "name", "chat", "state"}
-  erro   {"error": "<motivo>"}
+send devolve status, operação e recibo real; sent só é true em accepted/queued. --operation usa o id emitido
+no recibo e o mesmo texto. wait observa a mailbox sem consumir/ack e exige remetente, Dispatch e round_id;
+recupera também mensagens já entregues ao chat e devolve events sem descartar perguntas/escalations.
+Sessão antiga sem Dispatch usa estado, updatedAt posterior ao envio e saída da fila como fallback.
+close de worker ativo pede worker_done e retorna closing; --force exige parada guardada confirmada e
+settlement antes de liberar. retained e resultados incertos jamais significam closed. O close legado
+mantém seus dois RPCs; --keep-open requer Dispatch. O --checkout relativo parte da raiz do workspace.
+Saídas: 0 feito ou closing; 1 erro/recusa; 75 pending/unknown/timeout. O --wait de abertura conserva o
+contrato legado: erro 1 se o id do provedor ou o nome não aparecer no prazo.
 """
 import argparse
+import fcntl
+import hashlib
+import io
+import re
+import shlex
+from contextlib import redirect_stdout
 import json
 import os
 import sys
@@ -65,12 +45,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
 from brza_runtime import (WORKSPACE, BrzaError, NoWorkspace, brza, brza_root, canonicalize, git,  # noqa: E402,F401
-                          require_workspace, rpc, send_to_chat, user_data)
+                          require_workspace, rpc, send_to_chat, user_data, mutation, new_operation)
 
 CHAT_COMMAND = 'claude-brza'
-VERBS = ('open', 'list', 'send', 'title', 'close')
+VERBS = ('open', 'list', 'send', 'title', 'close', 'wait', 'read')
 SESSION_MAP = WORKSPACE / '.sessions' / 'sessions.jsonl' if WORKSPACE else None  # sem workspace, sem mapa
 WAIT_SECONDS = 60.0
+
+
+class AlreadyRunning(BrzaError):
+    """Outro processo terminou de abrir este nome enquanto se aguardava a trava."""
 
 
 def record(event: str, **fields):
@@ -78,7 +62,7 @@ def record(event: str, **fields):
     if SESSION_MAP is None:
         require_workspace()
     SESSION_MAP.parent.mkdir(parents=True, exist_ok=True)
-    row = {'event': event, 'at': datetime.now().astimezone().isoformat(timespec='seconds'), **fields}
+    row = {'event': event, 'at': datetime.now().astimezone().isoformat(timespec='milliseconds'), **fields}
     with SESSION_MAP.open('a') as f:
         f.write(json.dumps(row, ensure_ascii=False) + '\n')
 
@@ -100,7 +84,15 @@ def session_map() -> dict[str, dict]:
             continue
         if event == 'open':
             entries[chat] = {'name': row.get('name'), 'title': row.get('title'), 'opened': row.get('at'),
-                             'claude_session': None, 'provider_session': None, 'agent': row.get('agent')}
+                             'claude_session': row.get('claude_session'), 'provider_session': row.get('provider_session') or row.get('claude_session'), 'checkout':row.get('checkout'), 'agent': row.get('agent'),
+                             **{k:row.get(k) for k in ('dispatch','run','sender','coordinator','model','effort')}}
+            if row.get('operation'):
+                entries[chat]['last_send'] = row
+        elif chat in entries and event in ('model', 'send', 'turn'):
+            if event == 'model':
+                entries[chat].update({k:row[k] for k in ('model','effort') if k in row})
+            else:
+                entries[chat]['last_' + event] = row
         elif event == 'close':
             entries.pop(chat, None)
         elif chat in entries and event == 'title':
@@ -299,19 +291,23 @@ def chats() -> list[dict]:
         entry = mapped.get(chat)
         # O agente pela chave real, a legada do app, o mapa e o prefixo do id do chat do app.
         agent = chat_agent(chat, tab=tab)
-        claude_session = provider_session(chat) if agent == 'claude' else None
+        claude_session = (provider_session(chat) or (entry or {}).get('claude_session')) if agent == 'claude' else None
         prov_session = claude_session if agent == 'claude' else ((entry or {}).get('provider_session'))
         name = entry['name'] if entry else (chat_name(claude_session) if claude_session else None)
         found.append({'name': name, 'title': tab.get('title'), 'chat': chat, 'claude_session': claude_session,
                       'provider_session': prov_session,
                       'worktree': worktree, 'state': (tab.get('chatStatus') or {}).get('state'),
                       'source': 'map' if entry else ('transcript' if name else None),
-                      'opened': entry['opened'] if entry else None, 'tab': tab['id']})
+                      'opened': entry['opened'] if entry else None, 'tab': tab['id'],
+                      'agent':agent, **{k:(entry or {}).get(k) for k in ('model','effort','dispatch')},
+                      'updated_at':(tab.get('chatStatus') or {}).get('updatedAt'),
+                      'last_latency_s':((entry or {}).get('last_turn') or {}).get('latency_s'),
+                      'last_turn_at':((entry or {}).get('last_turn') or {}).get('ended_at')})
     return found
 
 
 def public(chat: dict) -> dict:
-    return {k: v for k, v in chat.items() if k != 'tab'}
+    return {k:v for k,v in chat.items() if k not in ('tab','agent','model','effort','dispatch','updated_at','last_latency_s','last_turn_at','auto_release_at')}
 
 
 def find(name: str) -> dict:
@@ -327,22 +323,13 @@ def emit(as_json: bool, data: dict, line: str):
     print(json.dumps(data, ensure_ascii=False) if as_json else line)
 
 
-def list_command(args) -> int:
-    found = chats()
+def list_command(args):
+    found=chats()
     if args.json:
-        print(json.dumps({'sessions': [public(chat) for chat in found]}, ensure_ascii=False))
-        return 0
-    for chat in found:
-        print(f'{chat["name"] or "-":<24} {chat["state"] or "-":<9} {chat["chat"]}  {chat["worktree"]}  '
-              f'{chat["title"]}')
-    return 0
-
-
-def send_command(args) -> int:
-    chat = find(args.name)
-    send_to_chat(chat['chat'], args.text)
-    emit(args.json, {'sent': True, 'name': chat['name'], 'chat': chat['chat']},
-         f'sent:     {chat["name"]}  ({chat["chat"]})')
+        print(json.dumps({'sessions':[public(chat) for chat in found]},ensure_ascii=False))
+    else:
+        for chat in found:
+            print(f'{chat["name"] or "-":<24} {chat["state"] or "-":<9} {chat["chat"]}  {chat["worktree"]}  {chat["title"]}')
     return 0
 
 
@@ -355,7 +342,7 @@ def title_command(args) -> int:
     return 0
 
 
-def close_command(args) -> int:
+def legacy_close_command(args) -> int:
     chat = find(args.name)
     if chat['state'] == 'working' and not args.force:
         emit(args.json, {'closed': False, 'name': chat['name'], 'chat': chat['chat'], 'state': chat['state']},
@@ -370,31 +357,540 @@ def close_command(args) -> int:
     return 0
 
 
-def by_name(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog='brza sessions',
-                                 description='Lista, manda mensagem, dá título e fecha chats pelo nome.')
-    verbs = ap.add_subparsers(dest='verb', required=True)
-    listing = verbs.add_parser('list', help='os chats do app')
-    listing.add_argument('--json', action='store_true')
-    send = verbs.add_parser('send', help='manda o texto ao chat')
-    send.add_argument('name')
-    send.add_argument('text')
-    send.add_argument('--json', action='store_true')
-    title = verbs.add_parser('title', help='troca o título da aba')
-    title.add_argument('name')
-    title.add_argument('title')
-    title.add_argument('--json', action='store_true')
-    close = verbs.add_parser('close', help='fecha o chat e a aba, sem --resume')
-    close.add_argument('name')
-    close.add_argument('--force', action='store_true', help='fecha também o chat no meio de um turno')
-    close.add_argument('--json', action='store_true')
-    args = ap.parse_args(argv)
+def coordinator_identity():
+    chat = os.environ.get('ORCA_AGENT_SESSION_ID', '').strip()
+    return ('orca_session_id:' + chat.removeprefix('orca_session_id:')) if chat else os.environ.get('ORCA_TERMINAL_HANDLE')
+
+
+def selected(args, include_released=False):
+    """Resolve todos os alvos antes de enviar: nome inválido não deixa um lote enviado pela metade."""
+    names = getattr(args, 'names', None) or ([args.name] if getattr(args, 'name', None) else [])
+    prefix = getattr(args, 'prefix', None)
+    if not names and prefix is None:
+        raise BrzaError('informe pelo menos um nome ou --prefix')
+    found = chats()
+    if include_released:
+        names_open = {c['name'] for c in found}
+        mapped = session_map()
+        for cid, entry in reversed(list(mapped.items())):
+            if not entry.get('dispatch') or entry.get('name') in names_open:
+                continue
+            names_open.add(entry.get('name'))
+            found.append({'name':entry.get('name'),'chat':cid,'agent':entry.get('agent'),
+                          'provider_session':entry.get('provider_session'),'claude_session':entry.get('claude_session'),
+                          'state':'released','worktree':entry.get('checkout'), 'tab':None,
+                          **{k:entry.get(k) for k in ('model','effort','dispatch')}})
+    result = []
+    for name in names:
+        matches = [c for c in found if c['name'] == name]
+        if len(matches) != 1:
+            raise BrzaError(f'{len(matches)} chats abertos se chamam {name}: ' + ', '.join(c['chat'] for c in matches))
+        if matches[0] not in result:
+            result.append(matches[0])
+    for c in found:
+        if prefix is not None and c['name'] is not None and c['name'].startswith(prefix) and c not in result:
+            result.append(c)
+    if not result:
+        raise BrzaError(f'nenhum chat aberto com o prefixo {prefix}')
+    return result
+
+
+def receipt_of(result, operation):
+    result = result or {}
+    value = result.get('value') or {}
+    queued = value.get('queued') or result.get('queued')
+    submission = value.get('submission') or result.get('submission') or {}
+    if result.get('ok') is False:
+        status = 'rejected'
+    elif queued:
+        status = {'waiting':'queued','dispatched':'pending','returned':'returned','withdrawn':'withdrawn'}.get(
+            queued.get('state'), 'queued' if queued.get('state') is None else 'unknown')
+    else:
+        status = submission.get('dispatchState') or result.get('status') or 'unknown'
+    return {'status': status, 'operation': operation, 'replayed': bool(result.get('replayed')),
+            'message_id': (queued or {}).get('messageId') or (queued or {}).get('id') or submission.get('clientMessageId'),
+            'position': (queued or {}).get('position'), 'refusal': result.get('refusal'), 'receipt': result}
+
+
+def receipt_code(receipt):
+    return (0 if receipt['status'] in ('accepted', 'queued') else
+            75 if receipt['status'] in ('unknown', 'pending') else 1)
+
+
+def round_instruction(round_id, dispatch):
+    payload = json.dumps({'round_id': round_id, 'dispatchId': dispatch}, ensure_ascii=False)
+    return ('\n\nProtocolo da rodada: ao concluir esta rodada, envie uma mensagem de mailbox '
+            f'por orchestration send --type status --subject brza-sessions-round --payload {shlex.quote(payload)} '
+            'usando sua própria identidade do preâmbulo. Não combine --payload com flags estruturadas. '
+            'Não envie worker_done nesta rodada; envie worker_done somente quando a coordenação pedir o encerramento.')
+
+
+def send_command(args):
+    # A forma posicional histórica é exatamente dois argumentos; com --text/--file todos são nomes.
+    if args.text is None and args.file is None:
+        if len(args.names) != 2 or args.prefix is not None:
+            raise BrzaError('use send <nome> <texto>, ou nomes/--prefix com --text/--file')
+        args.names, text = args.names[:1], args.names[1]
+    else:
+        text = args.file.read_text() if args.file else args.text
+    targets = selected(args)
+    if args.operation and len(targets) != 1:
+        raise BrzaError('--operation exige exatamente um nome')
+    rows, codes = [], []
+    for chat in targets:
+        operation = args.operation or new_operation()
+        entry = session_map().get(chat['chat'], {})
+        wire_text = text + round_instruction(operation, entry['dispatch']) if entry.get('dispatch') else text
+        try:
+            response = send_to_chat(chat['chat'], wire_text, operation=operation)
+            receipt = receipt_of(response, operation)
+        except BrzaError as error:
+            # O envio pode ter sido aceito: falha de transporte não prova recusa nem autoriza novo envio.
+            receipt = {'status': 'unknown', 'operation': operation, 'replayed': False, 'error': str(error)}
+        previous = entry.get('last_send') or {}
+        if not (receipt.get('replayed') and previous.get('operation') == operation):
+            record('send', name=chat['name'], chat=chat['chat'], operation=operation, round_id=operation, receipt=receipt)
+        row = {'sent': receipt_code(receipt) == 0, 'name': chat['name'], 'chat': chat['chat'], **receipt}
+        rows.append(row); codes.append(receipt_code(receipt))
+    result = rows[0] if len(rows) == 1 else {'results': rows}
+    emit(args.json, result, '\n'.join(f'{r["status"]}: {r["name"]}  ({r["operation"]})' for r in rows))
+    return 1 if 1 in codes else 75 if 75 in codes else 0
+
+
+def epoch(value):
+    if isinstance(value, (int, float)):
+        return value / 1000 if value > 100000000000 else value
+    if not value:
+        return None
     try:
-        return {'list': list_command, 'send': send_command, 'title': title_command,
-                'close': close_command}[args.verb](args)
-    except BrzaError as e:
-        emit(args.json, {'error': str(e)}, f'CHECK:    {e}')
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def marker_present(markers):
+    for marker in markers:
+        path, sep, pattern = marker.partition(':')
+        if not sep:
+            raise BrzaError('--marker exige ARQUIVO:REGEX')
+        try:
+            expression = re.compile(pattern)
+        except re.error as error:
+            raise BrzaError(f'--marker inválido: {error}') from None
+        try:
+            if expression.search(Path(path).read_text()) is None:
+                return False
+        except FileNotFoundError:
+            return False
+    return True
+
+
+def read_command(args):
+    chat = find(args.name)
+    page = rpc('agentSession.history', {'sessionId': chat['chat'], 'direction': 'tail', 'limit': 30})['page']
+    prompts = set(page.get('actionablePromptIds') or [])
+    last = None
+    items=list(reversed(page.get('items') or []))
+    if chat['state']=='blocked':
+        items=([i for i in items if i.get('itemId') in prompts]+
+               [i for i in items if i.get('itemId') not in prompts])
+    for item in items:
+        body = item.get('body') or {}
+        prompt = chat['state'] == 'blocked' and item.get('itemId') in prompts
+        if prompt or (body.get('kind') == 'message' and body.get('role') == 'assistant'):
+            blocks = body.get('blocks') or []
+            text = '\n'.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
+            text = text or body.get('text') or body.get('question') or body.get('title')
+            if text:
+                last = {'role': 'question' if prompt else 'assistant', 'text': text, 'at': item.get('observedAt')}
+                break
+    result = {'name': chat['name'], 'state': chat['state'], 'last': last, 'queued': page.get('queuedMessages') or []}
+    emit(args.json, result, last['text'] if last else '')
+    return 0
+
+
+def normalize_message(message):
+    row=dict(message)
+    payload=row.get('payload') or {}
+    if isinstance(payload,str):
+        try:
+            payload=json.loads(payload)
+        except ValueError:
+            payload={}
+    row['payload']=payload if isinstance(payload,dict) else {}
+    row['from']=row.get('from') or row.get('from_handle')
+    if row.get('created_at') and not row.get('createdAt'):
+        row['createdAt']=row['created_at']
+    return row
+
+
+def mailbox_messages(run, wait_ms=None, since=None):
+    args = ['orchestration', 'check', '--run', run]
+    if wait_ms is None:
+        args += ['--all']  # Inclui mensagens já entregues ao chat; nunca marca lidas.
+    else:
+        args += ['--peek', '--wait', '--types', 'status,worker_done', '--timeout-ms', str(wait_ms)]
+    rows=[normalize_message(m) for m in brza(*args).get('messages') or []]
+    if wait_ms is None and len(rows)>=100:
+        # --all tem janela fixa de 100 no host. O inbox é leitura, sem consumer/ack.
+        limit=200
+        while True:
+            history=brza('orchestration','inbox','--terminal','run:'+run,'--limit',str(limit),'--full')
+            raw=history.get('messages') or []
+            page=[normalize_message(m) for m in raw if m.get('run_id')==run]
+            rows.extend(page)
+            timestamps=[epoch(m.get('createdAt')) for m in page]
+            timestamps=[t for t in timestamps if t is not None]
+            if len(raw)<limit or (since is not None and timestamps and min(timestamps)<since-1):
+                break
+            if limit>=10000:
+                raise BrzaError('histórico da mailbox excede a janela de leitura; nenhum evento foi consumido')
+            limit=min(10000,limit*2)
+    return rows
+
+
+def worker_state(data):
+    return (data.get('dispatch') or {}).get('status') or (data.get('worker') or {}).get('state') or data.get('state')
+
+
+def wait_command(args):
+    targets = selected(args, include_released=True)
+    mapped = session_map()
+    for chat in targets:
+        entry = mapped.get(chat['chat'], {})
+        if not entry.get('last_send'):
+            raise BrzaError(f'{chat["name"]}: nenhum send registrado para esperar; envie a rodada primeiro')
+        if entry.get('dispatch') and entry.get('coordinator') != coordinator_identity():
+            raise BrzaError(f'{chat["name"]}: esta identidade não é a coordenação do Run {entry.get("run")}')
+    # Valida o formato mesmo quando os arquivos ainda não existem.
+    marker_present(args.marker)
+    deadline = time.monotonic() + args.timeout
+    done, events, seen_events = [], [], set()
+    remaining = {c['chat']: c for c in targets}
+    while remaining:
+        started = time.monotonic()
+        tabs = {t['sessionId']: t for _, t in open_tabs()}
+        by_run = {}
+        for cid in remaining:
+            entry = mapped.get(cid, {})
+            if entry.get('dispatch'):
+                run = entry.get('run')
+                if not run:
+                    raise BrzaError(f'{cid}: o mapa tem Dispatch sem Run')
+                if run not in by_run:
+                    by_run[run] = mailbox_messages(run, since=min(
+                        epoch(mapped[c]['last_send']['at']) for c in remaining if mapped.get(c,{}).get('run')==run))
+                for message in by_run[run]:
+                    key = (run, message.get('id') or json.dumps(message, sort_keys=True))
+                    if key not in seen_events:
+                        events.append(message); seen_events.add(key)
+        pending = []
+        for cid, chat in list(remaining.items()):
+            entry = mapped.get(cid, {}); sent = entry['last_send']
+            send_time = epoch(sent.get('at'))
+            if send_time is None:
+                raise BrzaError(f'{chat["name"]}: send sem horário válido')
+            status = (tabs.get(cid) or {}).get('chatStatus') or {}
+            state = status.get('state')
+            outcome, source = None, 'poll'
+            lifecycle_error=None
+            if entry.get('dispatch'):
+                for message in by_run[entry['run']]:
+                    payload = message.get('payload') or {}
+                    dispatch = payload.get('dispatchId') or payload.get('dispatch_id')
+                    same_sender = message.get('from') == entry.get('sender')
+                    message_time = epoch(message.get('createdAt') or message.get('at'))
+                    fresh = message_time is None or message_time + 1 >= send_time
+                    if dispatch != entry['dispatch'] or not same_sender or not fresh:
+                        continue
+                    if message.get('type') == 'status' and payload.get('round_id') == sent.get('round_id'):
+                        if outcome != 'failed':
+                            outcome, source = 'done', 'mailbox'
+                    elif message.get('type') == 'worker_done':
+                        # worker_done não é resposta da rodada: confirma o encerramento do Dispatch,
+                        # e o envio já concluído não pode ser reaberto por um evento antigo.
+                        try:
+                            show = brza('orchestration', 'worker-show', '--dispatch', entry['dispatch'], '--full')
+                        except BrzaError as error:
+                            lifecycle_error=str(error)
+                            continue
+                        settled = worker_state(show) in ('succeeded', 'failed', 'stopped', 'abandoned')
+                        completed = epoch((show.get('dispatch') or {}).get('completedAt'))
+                        if settled and completed is not None and completed >= send_time:
+                            outcome, source = ('failed' if payload.get('outcome') == 'failed' else 'done'), 'mailbox'
+                if state == 'blocked' and outcome != 'failed':
+                    outcome, source = 'blocked', 'poll'
+                if outcome != 'done':
+                    try:
+                        show=brza('orchestration','worker-show','--dispatch',entry['dispatch'],'--full')
+                    except BrzaError as error:
+                        lifecycle_error=str(error);show={}
+                    if worker_state(show) in ('failed','stopped','abandoned'):
+                        outcome,source='failed','dispatch'
+            else:
+                fresh = (epoch(status.get('updatedAt')) or 0) > send_time
+                receipt = sent.get('receipt') or {}
+                queued = False
+                if receipt.get('status') == 'queued':
+                    mid = receipt.get('message_id')
+                    if not mid:
+                        queued = True  # Sem id não há prova de que este envio saiu da fila.
+                    else:
+                        page = rpc('agentSession.history', {'sessionId': cid, 'direction': 'tail', 'limit': 1})['page']
+                        queued = any(mid in (q.get('id'), q.get('messageId'), q.get('clientMessageId'))
+                                     for q in page.get('queuedMessages') or [])
+                if fresh and not queued and state in ('done', 'waiting', 'blocked'):
+                    outcome = 'blocked' if state == 'blocked' else 'done'
+            # O id pode aparecer depois do recibo de abertura; a espera o conserva antes do auto-release.
+            prov=chat.get('provider_session') or entry.get('provider_session')
+            if chat.get('agent') in ('claude','codex'):
+                prov=prov or provider_session(cid)
+                if prov and not entry.get('provider_session'):
+                    record('session',name=chat['name'],chat=cid,provider_session=prov,
+                           **({'claude_session':prov} if chat['agent']=='claude' else {}))
+                    entry['provider_session']=prov;chat['provider_session']=prov
+                    if chat['agent']=='claude':entry['claude_session']=prov
+            # O erro do rollout nunca transforma cota esgotada em resposta pronta.
+            if chat.get('agent') == 'codex':
+                usage = codex_usage(prov)
+                failure = usage.get('error')
+                if failure and (epoch(usage.get('error_at')) or 0) >= send_time and state != 'working':
+                    outcome = 'failed'
+            elapsed = max(0, time.time() - send_time)
+            if outcome:
+                if outcome == 'done' and args.marker and not marker_present(args.marker):
+                    outcome = 'ended_without_marker'
+                row = {k: chat.get(k) for k in ('name', 'agent', 'model', 'effort')}
+                row.update(outcome=outcome, ended_at=datetime.now().astimezone().isoformat(),
+                           latency_s=round(elapsed, 3), latency_source=source)
+                done.append(row)
+                record('turn', chat=cid, name=chat['name'], operation=sent.get('operation'), **{k:v for k,v in row.items() if k!='name'})
+                del remaining[cid]
+            else:
+                pending.append({'name': chat['name'], 'state': state or 'missing', 'elapsed_s': round(elapsed, 3),
+                                **({'lifecycle_error':lifecycle_error} if lifecycle_error else {})})
+        if not remaining or (args.any and done) or time.monotonic() >= deadline:
+            timed_out = bool(remaining) and not (args.any and done)
+            result = {'done': done, 'pending': pending, 'timed_out': timed_out, 'events': events}
+            emit(args.json, result, '\n'.join([*(f'{r["outcome"]}: {r["name"]}' for r in done),
+                                               *(f'faltam: {r["name"]} {r["state"]}' for r in pending)]))
+            return 75 if timed_out else 1 if any(r['outcome']=='failed' for r in done) else 0
+        runs = list(by_run)
+        if runs:
+            mailbox_messages(runs[0], max(1, min(2000, int((deadline-time.monotonic())*1000))))
+        # Caixa com mensagens antigas pode acordar imediatamente: limita o polling a 2 s.
+        time.sleep(max(0, min(2 - (time.monotonic()-started), deadline-time.monotonic())))
+
+
+def observe_worker(dispatch):
+    """Falha da inspeção não apaga a prova de que uma parada foi pedida."""
+    try:
+        return {'observation':brza('orchestration','worker-show','--dispatch',dispatch,'--full')}
+    except BrzaError as error:
+        return {'observation_error':str(error)}
+
+
+def close_command(args):
+    rows = []; codes = []
+    for chat in selected(args, include_released=True):
+        try:
+            entry = session_map().get(chat['chat'], {})
+            dispatch = entry.get('dispatch')
+            if not dispatch:
+                if args.keep_open:
+                    raise BrzaError('--keep-open exige um worker com Dispatch')
+                one = argparse.Namespace(name=chat['name'], force=args.force, json=True)
+                # Executa o contrato legado e agrega sua saída sem mudar os dois RPCs.
+                with io.StringIO() as buffer, redirect_stdout(buffer):
+                    code = legacy_close_command(one)
+                    result = json.loads(buffer.getvalue())
+            else:
+                if entry.get('coordinator') != coordinator_identity():
+                    raise BrzaError(f'{chat["name"]}: identidade diferente da coordenação do Dispatch')
+                result = {'name': chat['name'], 'chat': chat['chat'], 'closed': False}
+                data = brza('orchestration','worker-show','--dispatch',dispatch,'--full')
+                state = worker_state(data)
+                settled = state in ('succeeded','failed','stopped','abandoned')
+                if args.keep_open:
+                    keep = brza('orchestration','worker-keep-open','--dispatch',dispatch)
+                    result.update(status='kept_open', receipt=keep); code=0
+                elif not settled and not args.force:
+                    receipt = brza('orchestration','send','--to','dispatch:'+dispatch,'--subject','Encerrar persona',
+                                   '--body','Encerre a tarefa e envie worker_done exatamente uma vez, conforme seu preâmbulo.')
+                    result.update(status='closing', receipt=receipt);code=0
+                else:
+                    if not settled:
+                        try:
+                            stopped = brza('orchestration','worker-stop','--dispatch',dispatch)
+                        except BrzaError as error:
+                            if error.code not in ('stop_unknown','helper_stop_unknown') and (error.body.get('result') or {}).get('state')!='stop_unknown':
+                                raise
+                            result.update(status='stop_unknown',receipt=error.body,
+                                          **observe_worker(dispatch))
+                            rows.append(result);codes.append(75);continue
+                        confirmed = stopped.get('state') == 'stopped' or stopped.get('outcome') == 'stopped'
+                        if not confirmed:
+                            result.update(status='stop_unknown', receipt=stopped,
+                                          **observe_worker(dispatch))
+                            rows.append(result);codes.append(75);continue
+                        inspection=observe_worker(dispatch)
+                        data=inspection.get('observation') or {}
+                        if worker_state(data) not in ('succeeded','failed','stopped','abandoned'):
+                            result.update(status='stop_unknown', receipt=stopped, **inspection)
+                            rows.append(result);codes.append(75);continue
+                    try:
+                        release = brza('orchestration','worker-release','--dispatch',dispatch)
+                    except BrzaError as error:
+                        if error.code != 'release_unknown' and (error.body.get('result') or {}).get('state')!='release_unknown':
+                            raise
+                        result.update(status='release_unknown',receipt=error.body)
+                        rows.append(result);codes.append(75);continue
+                    release_state = release.get('state') or release.get('terminalState')
+                    closed = release_state in ('released','already_released')
+                    result.update(status=release_state or 'unknown', closed=closed, receipt=release)
+                    code=0 if closed else 75 if release_state in ('release_unknown','release_pending') else 1
+                    if closed:
+                        record('close', name=chat['name'], chat=chat['chat'])
+            rows.append(result);codes.append(code)
+        except BrzaError as error:
+            rows.append({'name':chat['name'],'chat':chat['chat'],'closed':False,'status':'refused',
+                         'error':str(error),'receipt':error.body})
+            codes.append(1)
+    result = rows[0] if len(rows)==1 and args.prefix is None else {
+        'closed':[r for r in rows if r.get('closed')], 'refused':[r for r,c in zip(rows,codes) if c],
+        'results':rows}
+    emit(args.json,result,'\n'.join(f'{r.get("status") or ("closed" if r["closed"] else "refused")}: {r["name"]}' for r in rows))
+    return 1 if 1 in codes else 75 if 75 in codes else 0
+
+
+def jsonl_rows(path):
+    try:
+        with path.open(encoding='utf-8', errors='replace') as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
+    except FileNotFoundError:
+        return
+
+
+def codex_usage(sid):
+    """Totais cumulativos: pega o último contador válido, nunca soma snapshots."""
+    if not sid or not re.fullmatch(r'[A-Za-z0-9_-]+', sid):
+        return {'measured': False, 'reason': 'provider_session_missing'}
+    paths = list((codex_home() / 'sessions').rglob(f'rollout-*-{sid}.jsonl'))
+    if not paths:
+        return {'measured': False, 'reason': 'rollout_missing'}
+    tokens, error, error_at, durations, starts = None, None, None, [], {}
+    for path in sorted(paths):
+        for row in jsonl_rows(path):
+            if row.get('type') != 'event_msg':
+                continue
+            payload = row.get('payload') or {}
+            kind = payload.get('type')
+            if kind == 'token_count':
+                info = payload.get('info') or {}
+                if isinstance(info.get('total_token_usage'), dict):
+                    tokens = info['total_token_usage']
+            elif kind == 'task_started':
+                starts[payload.get('turn_id')] = epoch(row.get('timestamp'))
+                error, error_at = None, None
+            elif kind == 'task_complete':
+                error = payload.get('error')
+                error_at = row.get('timestamp') if error else None
+                start = starts.pop(payload.get('turn_id'), None)
+                end = epoch(row.get('timestamp'))
+                if start is not None and end is not None:
+                    durations.append({'turn_id': payload.get('turn_id'), 'duration_s': max(0, end-start)})
+    return {'measured': tokens is not None, **({'tokens': tokens} if tokens is not None else {'reason': 'tokens_missing'}),
+            'turns': durations, 'error': error, 'error_at': error_at}
+
+
+
+
+
+
+def by_name(argv):
+    ap=argparse.ArgumentParser(prog='brza sessions')
+    verbs=ap.add_subparsers(dest='verb',required=True)
+    listing=verbs.add_parser('list')
+    for verb in ('send','wait'):
+        parser=verbs.add_parser(verb);parser.add_argument('names',nargs='*');parser.add_argument('--prefix')
+        if verb=='send':
+            group=parser.add_mutually_exclusive_group();group.add_argument('--text');group.add_argument('--file',type=Path)
+            parser.add_argument('--operation')
+        if verb=='wait':
+            parser.add_argument('--marker',action='append',default=[]);parser.add_argument('--any',action='store_true')
+            parser.add_argument('--timeout',type=float,default=300)
+    parser=verbs.add_parser('read');parser.add_argument('name');parser.add_argument('--last',action='store_true',required=True)
+    parser=verbs.add_parser('title');parser.add_argument('name');parser.add_argument('title')
+    parser=verbs.add_parser('close');parser.add_argument('name',nargs='?');parser.add_argument('--prefix')
+    flags=parser.add_mutually_exclusive_group();flags.add_argument('--force',action='store_true');flags.add_argument('--keep-open',action='store_true')
+    for parser in verbs.choices.values():parser.add_argument('--json',action='store_true')
+    args=ap.parse_args(argv)
+    try:
+        if args.verb=='wait' and (args.timeout<0 or not __import__('math').isfinite(args.timeout)):
+            raise BrzaError('--timeout exige segundos finitos não negativos')
+        return {'list':list_command,'send':send_command,'title':title_command,'close':close_command,
+                'wait':wait_command,'read':read_command}[args.verb](args)
+    except (BrzaError,OSError,ValueError) as error:
+        emit(args.json,{'error':str(error)},f'CHECK:    {error}')
         return 1
+
+
+def launch_worker(name,agent,checkout,prompt,model=None,effort=None):
+    """Serializa abertura por workspace; o primeiro worker-start cria e vincula o Run no host."""
+    operation=new_operation()
+    spec=(prompt or 'Aguarde uma tarefa da coordenação.') + (
+        '\n\nProtocolo da persona: o fim de rodada é mensagem de mailbox --type status, com round_id '
+        'e dispatchId indicados a cada envio. Use seu remetente do preâmbulo e nunca --payload junto '
+        'com flags estruturadas. worker_done somente no encerramento pedido pela coordenação; '
+        'um fim de rodada não encerra a Task. Carregue o guia versionado orchestration antes de enviar comandos.'
+        ' Ao concluir a tarefa inicial, use o comando abaixo, substituindo SEU_DISPATCH_ID pelo Dispatch do preâmbulo.')
+    initial_payload=json.dumps({'round_id':operation,'dispatchId':'SEU_DISPATCH_ID'},ensure_ascii=False)
+    spec+='\nProtocolo inicial: orchestration send --type status --subject brza-sessions-round --payload '+shlex.quote(initial_payload)
+    spec+='\nUse sua própria identidade --from do preâmbulo. Os identificadores devem estar no payload JSON, não somente no body.'
+    identity=coordinator_identity()
+    if not identity:
+        raise BrzaError('abertura de worker exige ORCA_AGENT_SESSION_ID ou ORCA_TERMINAL_HANDLE próprios; nenhuma sessão foi aberta')
+    if SESSION_MAP is None:require_workspace()
+    SESSION_MAP.parent.mkdir(parents=True,exist_ok=True)
+    with (SESSION_MAP.parent/'.open.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        if mapped_and_open(name):
+            raise AlreadyRunning(name)
+        recovery=SESSION_MAP.parent/('pending-'+hashlib.sha256(name.encode()).hexdigest()+'.json')
+        if recovery.exists():
+            raise BrzaError(f'abertura anterior de {name} sem conclusão; confira {recovery} antes de repetir')
+        recovery.write_text(json.dumps({'name':name,'operation':operation,'coordinator':identity,'checkout':str(checkout)},ensure_ascii=False))
+        args=['orchestration','worker-start','--agent',agent,'--worktree',f'path:{checkout}','--spec',spec,'--from',identity]
+        if model:args+=['--model',model]
+        if effort:args+=['--effort',effort]
+        try:
+            result=brza(*args)
+        except BrzaError as error:
+            recovery.write_text(json.dumps({'name':name,'operation':operation,'argv':args,
+                                           'error':str(error),'receipt':error.body},ensure_ascii=False))
+            raise BrzaError(f'{error}; não relance: confira {recovery}',body=error.body) from None
+        recovery.write_text(json.dumps({'name':name,'operation':operation,'receipt':result},ensure_ascii=False))
+        dispatch=result.get('dispatchId')
+        if not dispatch:
+            raise BrzaError('worker-start não devolveu Dispatch; confira o recibo antes de repetir: '+json.dumps(result))
+        show=brza('orchestration','worker-show','--dispatch',dispatch,'--full')
+        resource=show.get('terminalResource') or {}
+        incarnation=resource.get('endpointIncarnation') or ''
+        chat=incarnation.removeprefix('structured:') if incarnation.startswith('structured:') else None
+        handle=result.get('terminal') or (show.get('dispatch') or {}).get('assigneeHandle')
+        if not chat and handle and handle.startswith('orca_session_id:'):
+            chat=handle.split(':',1)[1]
+        if result.get('mode')!='structured' or not chat:
+            raise BrzaError('worker não abriu em Chat ou identidade não comprovada; não relance: '+json.dumps(result))
+        prov=provider_session(chat)
+        return chat, {'provider_session':prov,'claude_session':prov if agent=='claude' else None, 'dispatch':dispatch,'run':result.get('runId'),'sender':handle,'coordinator':identity,
+                      'model':model,'effort':effort,'operation':operation,'round_id':operation}
 
 
 def main():
@@ -416,10 +912,15 @@ def main():
     group = ap.add_mutually_exclusive_group()
     group.add_argument('--prompt')
     group.add_argument('--prompt-file', type=Path)
+    ap.add_argument('--model')
+    ap.add_argument('--effort')
     ap.add_argument('--wait', action='store_true',
                     help='espera a sessão no ar, e com --rename o nome só no Claude e no Codex, e nos outros só a sessão, antes de anunciar')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
+    if args.effort and not args.model:
+        print('CHECK:    --effort exige --model; nada foi aberto')
+        return 1
     AGENTS = {'claude': 'claude', 'codex': 'codex', 'grok': 'grok', 'antigravity': 'antigravity', 'agy': 'antigravity'}
     agent = AGENTS.get(args.agent)
     if agent is None:
@@ -432,7 +933,11 @@ def main():
     except NoWorkspace as e:
         print(f'recusado: {e}')
         return 1
-    prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
+    try:
+        prompt = args.prompt_file.read_text().strip() if args.prompt_file else (args.prompt or '').strip()
+    except OSError as error:
+        print(f'CHECK:    {error}')
+        return 1
     if agent == 'codex' and args.rename and args.title:
         title = args.name
     else:
@@ -451,32 +956,28 @@ def main():
 
     if agent == 'codex' and args.rename and args.title:
         print(f'CHECK:    {args.name}: o --title foi trocado pelo nome')
-    first = f'/rename {args.name}' if (args.rename and agent == 'claude') else prompt
     try:
-        launched = brza('agent', 'launch', '--agent', agent, '--surface', 'chat', '--worktree', f'path:{checkout}',
-                        *(['--prompt', first] if first else []))
+        session_id, worker = launch_worker(args.name,agent,checkout,prompt,args.model,args.effort)
+    except AlreadyRunning:
+        print(f'running:  {args.name}')
+        return 0
     except BrzaError as e:
         print(f'CHECK:    {args.name} não abriu: {e}')
         return 1
-    outcome = launched.get('outcome') or {}
-    if outcome.get('kind') != 'structured' or not outcome.get('sessionId'):
-        detail = (launched.get('receipt') or {}).get('detail') or 'sem motivo'
-        print(f'CHECK:    {args.name} abriu como {outcome.get("kind")}, não como chat: {detail}')
-        return 1
-    session_id = outcome['sessionId']
     try:
         rpc('agentSession.rename', {'sessionId': session_id, 'name': title})
     except BrzaError as e:
         print(f'CHECK:    {args.name} abriu, mas a aba não ganhou o título: {e}')
     record('open', name=args.name, title=title, chat=session_id, checkout=str(checkout), renamed=args.rename,
-           **({'agent': agent} if agent != 'claude' else {}))
+           agent=agent, **worker)
+    (SESSION_MAP.parent/('pending-'+hashlib.sha256(args.name.encode()).hexdigest()+'.json')).unlink(missing_ok=True)
     if args.rename and NAMED.get(agent) is None:
         where = ('o nome ficou na aba e no mapa' if title == args.name
                  else f'a aba ficou com o título "{title}"; o nome ficou no mapa')
         print(f'CHECK:    {args.name}: o {agent} não recebe o /rename pelo chat do app; {where}')
-    if args.rename and agent == 'claude' and prompt:
+    if args.rename and agent == 'claude':
         try:
-            send_to_chat(session_id, prompt)
+            send_to_chat(session_id, f'/rename {args.name}')
         except BrzaError as e:
             print(f'CHECK:    {args.name} abriu, mas o prompt não entrou: {e}')
             return 1

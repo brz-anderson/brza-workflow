@@ -112,6 +112,11 @@ def tab(chat: str, title: str, state: str | None = 'done') -> dict:
             **({'chatStatus': {'state': state}} if state else {})}
 
 
+def worker_reply(chat, args):
+    return {'dispatchId':'ctx_fake','taskId':'task_fake','runId':'run_fake','mode':'structured','state':'ready',
+            'terminal':'orca_session_id:'+chat,'terminalResource':{'endpointIncarnation':'structured:'+chat}}
+
+
 class FakeApp:
     """O runtime do app: as abas do listAll, o providerSession de cada chat e as chamadas recebidas."""
 
@@ -127,6 +132,8 @@ class FakeApp:
             provider = {'providerSession': {'key': 'session_id', 'id': self.providers[chat]}} \
                 if chat in self.providers else {}
             return {'page': {'fence': 3}, **provider}
+        if method == 'agentSession.send':
+            return {'ok':True,'value':{'submission':{'dispatchState':'accepted'}}}
         return {'ok': True, 'closed': True}
 
     def methods(self) -> list[str]:
@@ -165,8 +172,8 @@ class CommandTest(unittest.TestCase):
         (folder / f'{claude_id}.jsonl').write_text(''.join(json.dumps(line) + '\n' for line in lines))
 
     def launch(self, *args):
-        self.launches.append(args)
-        return {'outcome': {'kind': 'structured', 'sessionId': 'claude_n'}}
+        if args[1] == 'worker-start':self.launches.append(args)
+        return worker_reply('claude_n',args)
 
     def write_map(self, *events: dict):
         self.map.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +198,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(code, 0)
         sessions = json.loads(out)['sessions']
         self.assertEqual([s['name'] for s in sessions], ['pln-002-p7', 'pln-003', None])
-        self.assertEqual(sessions[0], {'name': 'pln-002-p7', 'title': 'PLN-002 P7: renomear chat', 'chat': 'claude_a',
+        self.assertEqual({k:v for k,v in sessions[0].items() if k not in ('agent','model','effort','dispatch','updated_at','last_latency_s','last_turn_at')}, {'name': 'pln-002-p7', 'title': 'PLN-002 P7: renomear chat', 'chat': 'claude_a',
                                        'claude_session': 'uuid-a', 'provider_session': 'uuid-a',
                                        'worktree': '/Users/x/brza-workspace',
                                        'state': 'working', 'source': 'transcript', 'opened': None})
@@ -213,7 +220,8 @@ class CommandTest(unittest.TestCase):
     def test_send_queues_the_text_to_the_chat_found_by_name(self):
         code, out = self.run_main('send', 'pln-003', 'faça o P1', '--json')
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {'sent': True, 'name': 'pln-003', 'chat': 'claude_b'})
+        self.assertEqual({k:json.loads(out)[k] for k in ('sent','name','chat')}, {'sent': True, 'name': 'pln-003', 'chat': 'claude_b'})
+        self.assertEqual(json.loads(out)['status'],'accepted')
         method, params = self.app.calls[-1]
         self.assertEqual(method, 'agentSession.send')
         self.assertEqual(params['envelope']['sessionId'], 'claude_b')
@@ -353,13 +361,13 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('open:     pln-009', out)
         (launch,) = self.launches
-        self.assertNotIn('--prompt', launch)
+        self.assertIn('--spec', launch)
         self.assertEqual(self.calls('agentSession.rename'), [{'sessionId': 'claude_n', 'name': 'PLN-002 P9: prova'}])
         (event,) = self.read_map()
-        self.assertEqual({k: v for k, v in event.items() if k != 'at'},
+        self.assertEqual({k: v for k, v in event.items() if k not in ('at','agent','dispatch','run','sender','coordinator','model','effort','operation','round_id','provider_session','claude_session')},
                          {'event': 'open', 'name': 'pln-009', 'title': 'PLN-002 P9: prova', 'chat': 'claude_n',
                           'checkout': str(self.workspace), 'renamed': False})
-        self.assertRegex(event['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$')
+        self.assertRegex(event['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$')
         self.assertEqual(launch[launch.index('--agent') + 1], 'claude')
 
     def test_non_claude_launch_passes_agent_prompt_checkout_and_title_without_claude_checks(self):
@@ -374,9 +382,10 @@ class CommandTest(unittest.TestCase):
                                          '--title', 'Correção do CLI', '--prompt', 'Faça a correção')
                 self.assertEqual(code, 0, out)
                 launch = self.launches[-1]
-                self.assertEqual(launch, ('agent', 'launch', '--agent', canonical, '--surface', 'chat', '--worktree',
-                                          f'path:{Path("/tmp/checkout com espaço").resolve()}',
-                                          '--prompt', 'Faça a correção'))
+                self.assertEqual(launch[:2],('orchestration','worker-start'))
+                self.assertEqual(launch[launch.index('--agent')+1],canonical)
+                self.assertEqual(launch[launch.index('--worktree')+1],f'path:{Path("/tmp/checkout com espaço").resolve()}')
+                self.assertTrue(launch[launch.index('--spec')+1].startswith('Faça a correção'))
                 self.assertEqual(self.read_map()[-1]['agent'], canonical)
                 self.assertEqual(self.calls('agentSession.rename')[-1]['name'], 'Correção do CLI')
                 self.assertFalse(self.read_map()[-1]['renamed'])
@@ -392,7 +401,7 @@ class CommandTest(unittest.TestCase):
                     self.map.unlink()
                 chat = f'{canonical}_n'
                 self.app.providers[chat] = f'provider-{canonical}'
-                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: worker_reply(chat,args)}):
                     code, out = self.run_main('correcao', '--agent', requested, '--wait')
                     self.assertEqual(code, 0, out)
                     self.assertIn(f'open:     correcao  (chat, {self.workspace}, {chat})', out)
@@ -414,7 +423,7 @@ class CommandTest(unittest.TestCase):
         self.app.providers['codex_n'] = 'uuid-codex-1'
         chat = 'codex_n'
         with patch.dict(os.environ, {'CODEX_HOME': str(codex_dir)}), \
-                patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: (self.launches.append(args) if args[1]=='worker-start' else None) or worker_reply(chat,args)}):
             code, out = self.run_main('correcao', '--agent', 'codex', '--title', 'Título Antigo', '--rename',
                                      '--wait', '--prompt', 'tarefa do codex')
             self.assertEqual(code, 0, out)
@@ -423,7 +432,7 @@ class CommandTest(unittest.TestCase):
 
             # Não manda o /rename: o prompt no launch é a tarefa, sem chamada extra a send.
             launch = self.launches[-1]
-            self.assertEqual(launch[launch.index('--prompt') + 1], 'tarefa do codex')
+            self.assertTrue(launch[launch.index('--spec') + 1].startswith('tarefa do codex'))
             self.assertEqual(self.calls('agentSession.send'), [])
 
             # O título da aba é o nome, e não o --title passado.
@@ -448,7 +457,7 @@ class CommandTest(unittest.TestCase):
         with patch.dict(os.environ, {'CODEX_HOME': str(codex_dir)}), \
                 patch.dict(GLOBALS, {'WAIT_SECONDS': 0,
                                      'codex_thread_name': spy_thread_name,
-                                     'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                                     'brza': lambda *args, **kwargs: (self.launches.append(args) if args[1]=='worker-start' else None) or worker_reply(chat,args)}):
             code, out = self.run_main('correcao', '--agent', 'codex', '--rename', '--wait')
             self.assertEqual(code, 1)
             self.assertIn('CHECK:    correcao não registrou o nome em 0 s; confira a aba', out)
@@ -464,7 +473,7 @@ class CommandTest(unittest.TestCase):
                     self.map.unlink()
                 chat = f'{canonical}_n'
                 self.app.providers[chat] = f'provider-{canonical}'
-                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: (self.launches.append(args) if args[1]=='worker-start' else None) or worker_reply(chat,args)}):
                     code, out = self.run_main('correcao', '--agent', requested, '--rename', '--wait',
                                              '--prompt', 'tarefa sem slash')
                     self.assertEqual(code, 0, out)
@@ -474,7 +483,7 @@ class CommandTest(unittest.TestCase):
 
                     # Não manda o /rename no launch nem depois.
                     launch = self.launches[-1]
-                    self.assertEqual(launch[launch.index('--prompt') + 1], 'tarefa sem slash')
+                    self.assertTrue(launch[launch.index('--spec') + 1].startswith('tarefa sem slash'))
                     self.assertEqual(self.calls('agentSession.send'), [])
 
                     # Título da aba e mapa registrados com o nome.
@@ -561,7 +570,7 @@ class CommandTest(unittest.TestCase):
                     'opened': '2026-10-29T12:00:00-03:00',
                 }]})
                 self.assertEqual(self.run_main('correcao', '--agent', agent), (0, 'running:  correcao\n'))
-                self.assertEqual(json.loads(self.run_main('send', 'correcao', 'oi', '--json')[1]),
+                self.assertEqual({k:v for k,v in json.loads(self.run_main('send', 'correcao', 'oi', '--json')[1]).items() if k in ('sent','name','chat')},
                                  {'sent': True, 'name': 'correcao', 'chat': chat})
                 self.assertEqual(json.loads(self.run_main('title', 'correcao', 'Novo', '--json')[1]),
                                  {'titled': True, 'name': 'correcao', 'chat': chat, 'title': 'Novo'})
@@ -603,16 +612,16 @@ class CommandTest(unittest.TestCase):
     def test_open_without_rename_launches_with_the_task_prompt(self):
         self.run_main('pln-009', '--prompt', 'faça o P9')
         (launch,) = self.launches
-        self.assertEqual(launch[launch.index('--prompt') + 1], 'faça o P9')
+        self.assertTrue(launch[launch.index('--spec') + 1].startswith('faça o P9'))
         self.assertEqual(self.calls('agentSession.send'), [])
 
-    def test_open_with_rename_sends_the_rename_first_and_the_prompt_after(self):
+    def test_open_with_rename_keeps_the_task_and_queues_the_rename(self):
         code, _ = self.run_main('pln-009', '--rename', '--prompt', 'faça o P9')
         self.assertEqual(code, 0)
         (launch,) = self.launches
-        self.assertEqual(launch[launch.index('--prompt') + 1], '/rename pln-009')
+        self.assertTrue(launch[launch.index('--spec') + 1].startswith('faça o P9'))
         (sent,) = self.calls('agentSession.send')
-        self.assertEqual(sent['body']['blocks'][0]['text'], 'faça o P9')
+        self.assertEqual(sent['body']['blocks'][0]['text'], '/rename pln-009')
         self.assertTrue(self.read_map()[0]['renamed'])
 
     def test_wait_records_the_claude_session(self):
@@ -620,7 +629,7 @@ class CommandTest(unittest.TestCase):
         code, _ = self.run_main('pln-009', '--wait')
         self.assertEqual(code, 0)
         self.assertEqual([(e['event'], e.get('claude_session'), e.get('provider_session')) for e in self.read_map()],
-                         [('open', None, None), ('session', 'uuid-n', 'uuid-n')])
+                         [('open', 'uuid-n', 'uuid-n'), ('session', 'uuid-n', 'uuid-n')])
 
     def test_wait_with_rename_also_waits_for_the_name(self):
         self.app.providers['claude_n'] = 'uuid-n'
@@ -646,7 +655,7 @@ class CommandTest(unittest.TestCase):
                 if self.map.exists():
                     self.map.unlink()
                 chat = f'{agent}_n'
-                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: self.launches.append(args) or {'outcome': {'kind': 'structured', 'sessionId': chat}}}):
+                with patch.dict(GLOBALS, {'brza': lambda *args, **kwargs: (self.launches.append(args) if args[1]=='worker-start' else None) or worker_reply(chat,args)}):
                     code, out = self.run_main('correcao', '--agent', agent, '--title', 'Título Customizado', '--rename')
                 self.assertEqual(code, 0, out)
                 self.assertNotIn('o --title foi trocado pelo nome', out)
@@ -735,7 +744,7 @@ class CommandTest(unittest.TestCase):
                          [{'sessionId': 'claude_c', 'name': 'PLN-001: Coordenador'}])
         self.assertEqual(self.run_main('close', 'pln-coord')[0], 0)
         self.assertEqual([(e['event'], e.get('title')) for e in self.read_map()],
-                         [('open', 'Sem nome'), ('title', 'PLN-001: Coordenador'), ('close', None)])
+                         [('open', 'Sem nome'), ('send', None), ('title', 'PLN-001: Coordenador'), ('close', None)])
 
     def test_the_map_folds_a_name_reopened_after_a_close(self):
         self.write_map({'event': 'open', 'name': 'x', 'title': 'x', 'chat': 'claude_velho', 'checkout': '/x',
@@ -758,3 +767,447 @@ class CommandTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+# PLN-017: contratos novos sobre o runtime sondado em 2026-11-09.
+class MeetingCommandsTest(unittest.TestCase):
+    setUp = CommandTest.setUp
+    transcript = CommandTest.transcript
+    write_map = CommandTest.write_map
+    read_map = CommandTest.read_map
+    calls = CommandTest.calls
+    run_main = CommandTest.run_main
+    launch = CommandTest.launch
+
+    def mapped(self, name='persona', dispatch=None, state='done', agent='codex', **fields):
+        chat = agent + '_persona'
+        self.app.tabs = [{**tab(chat, name, state), 'agent': agent,
+                          'chatStatus': {'state': state, 'updatedAt': 2000000000000}}]
+        self.write_map({'event': 'open', 'name': name, 'chat': chat, 'agent': agent,
+                        **({'dispatch': dispatch, 'run': 'run_probe', 'sender': 'structworker_probe',
+                            'coordinator': GLOBALS['coordinator_identity']()} if dispatch else {}), **fields})
+        return chat
+
+    def sent(self, chat, receipt=None, **fields):
+        self.write_map({'event': 'send', 'chat': chat, 'operation': 'op_round', 'round_id': 'op_round',
+                        'at': '2026-01-01T12:00:00+00:00', 'receipt': receipt or {'status': 'accepted'}, **fields})
+
+    def orchestration(self, messages=None, state='succeeded', stop='stopped', release='released'):
+        self.orch_calls = []
+        def call(*args):
+            self.orch_calls.append(args)
+            if args[1] == 'check':
+                return {'messages': messages or []}
+            if args[1] == 'worker-show':
+                return {'dispatch': {'status': state, 'runId': 'run_probe',
+                                     'assigneeHandle': 'structworker_probe'},
+                        'worker': {'state': state}, 'autoReleaseAt': '2026-01-01T12:02:00Z',
+                        'terminalResource': {'endpointIncarnation': 'structured:codex_new'}}
+            if args[1] == 'worker-stop':
+                return {'state': stop, 'outcome': stop}
+            if args[1] == 'worker-release':
+                return {'state': release, 'terminalState': release}
+            if args[1] == 'worker-start':
+                return {'dispatchId': 'ctx_new', 'taskId': 'task_new', 'runId': 'run_probe',
+                        'state': 'ready', 'mode': 'structured', 'terminal': 'structworker_probe'}
+            if args[1] == 'run-create':
+                return {'runId': 'run_probe'}
+            return {'messageId': 'msg_new'}
+        return patch.dict(GLOBALS, {'brza': call})
+
+    def test_open_worker_uses_model_effort_and_explicit_checkout_and_records_dispatch(self):
+        with self.orchestration(), patch.dict(GLOBALS, {'running': lambda _: False}):
+            code, out = self.run_main('nova', '--agent', 'codex', '--model', 'gpt-6.1-sol',
+                                     '--effort', 'high', '--checkout', '/tmp/código', '--prompt', 'tarefa')
+        self.assertEqual(code, 0, out)
+        start = next(c for c in self.orch_calls if c[1] == 'worker-start')
+        self.assertIn('path:/private/tmp/código', start)
+        self.assertIn('--model', start)
+        self.assertIn('gpt-6.1-sol', start)
+        self.assertIn('--effort', start)
+        self.assertIn('worker_done', start[start.index('--spec')+1])
+        opened = next(e for e in self.read_map() if e['event'] == 'open')
+        self.assertEqual((opened['dispatch'], opened['chat'], opened['model'], opened['effort']),
+                         ('ctx_new', 'codex_new', 'gpt-6.1-sol', 'high'))
+
+    def test_effort_without_model_refuses_before_launch(self):
+        code, _ = self.run_main('nova', '--effort', 'high')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.launches, [])
+
+    def test_send_returns_the_real_rejection_and_records_it(self):
+        self.mapped()
+        with patch.dict(GLOBALS, {'send_to_chat': lambda *a, **kw: {'ok': False, 'refusal': {'code': 'denied'}}}):
+            code, out = self.run_main('send', 'persona', '--text', 'oi', '--json')
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)['status'], 'rejected')
+        self.assertFalse(json.loads(out)['sent'])
+        self.assertEqual(self.read_map()[-1]['event'], 'send')
+
+    def test_send_pending_is_75_and_never_claims_sent(self):
+        self.mapped()
+        with patch.dict(GLOBALS, {'send_to_chat': lambda *a, **kw: {'ok': True, 'value': {
+                'submission': {'dispatchState': 'pending', 'clientMessageId': 'm1'}}}}):
+            code, out = self.run_main('send', 'persona', '--text', 'oi', '--json')
+        self.assertEqual(code, 75)
+        self.assertEqual(json.loads(out)['status'], 'pending')
+        self.assertFalse(json.loads(out)['sent'])
+
+    def test_send_prefix_and_file_reads_many_names_and_operation_requires_one(self):
+        self.app.tabs = [tab('codex_a','a'), tab('codex_b','b')]
+        for c,n in [('codex_a','grupo-a'),('codex_b','grupo-b')]:
+            self.write_map({'event':'open','chat':c,'name':n,'agent':'codex'})
+        f = self.config / 'prompt.txt'; f.write_text('texto do arquivo')
+        received=[]
+        with patch.dict(GLOBALS, {'send_to_chat': lambda chat,text,**kw: received.append(text) or
+                                {'ok':True,'value':{'queued':{'messageId':'q1','position':1}}}}):
+            code,out = self.run_main('send','--prefix','grupo-','--file',str(f),'--json')
+            self.assertEqual(code,0,out)
+            self.assertEqual(received,['texto do arquivo']*2)
+            code,_ = self.run_main('send','--prefix','grupo-','--text','x','--operation','op','--json')
+            self.assertEqual(code,1)
+            self.assertEqual(len(received),2)
+
+    def test_send_replay_keeps_the_original_send_time(self):
+        chat=self.mapped(); self.sent(chat, operation='1790000000000-0123456789abcdef0123456789abcdef')
+        op=self.read_map()[-1]['operation']; received=[]
+        with patch.dict(GLOBALS, {'send_to_chat': lambda chat,text,**kw: received.append(kw.get('operation')) or
+                {'ok':True,'replayed':True,'value':{'submission':{'dispatchState':'accepted'}}}}):
+            code,out=self.run_main('send','persona','--text','oi','--operation',op,'--json')
+        self.assertEqual(code,0,out);self.assertEqual(received,[op])
+        self.assertEqual(GLOBALS['session_map']()[chat]['last_send']['at'],'2026-01-01T12:00:00+00:00')
+
+    def test_wait_ignores_done_older_than_send(self):
+        chat=self.mapped();self.sent(chat)
+        self.app.tabs[0]['chatStatus']['updatedAt']=1
+        code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,75);self.assertTrue(json.loads(out)['timed_out'])
+
+    def test_wait_checks_queued_message_even_when_status_is_done(self):
+        chat=self.mapped();self.sent(chat,{'status':'queued','message_id':'q1'})
+        base=self.app.rpc
+        def rpc(method,params=None):
+            if method=='agentSession.history':return {'page':{'fence':1,'queuedMessages':[{'id':'q1'}]}}
+            return base(method,params)
+        with patch.dict(GLOBALS,{'rpc':rpc}):
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,75);self.assertEqual(len(json.loads(out)['pending']),1)
+
+    def test_wait_records_latency_and_missing_marker(self):
+        chat=self.mapped();self.sent(chat)
+        code,out=self.run_main('wait','persona','--timeout','0','--marker',str(self.config/'absent')+':OK','--json')
+        self.assertEqual(code,0,out)
+        self.assertEqual(json.loads(out)['done'][0]['outcome'],'ended_without_marker')
+        self.assertEqual(self.read_map()[-1]['event'],'turn')
+        self.assertGreater(self.read_map()[-1]['latency_s'],0)
+
+    def message(self, dispatch='ctx_probe', round_id='op_round', sender='structworker_probe', kind='status'):
+        return {'id':'msg1','type':kind,'from':sender,'payload':{'dispatchId':dispatch,'round_id':round_id}}
+
+    def test_wait_requires_dispatch_round_sender_and_recovers_delivered_messages(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        for message in [self.message(dispatch='ctx_other'),self.message(round_id='old'),
+                        self.message(sender='someone'),{'type':'status','from':'structworker_probe','payload':{}}]:
+            with self.orchestration([message]):
+                code,out=self.run_main('wait','persona','--timeout','0','--json')
+            self.assertEqual(code,75,out)
+        with self.orchestration([self.message()]):
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out)
+        self.assertIn('--all',self.orch_calls[0]);self.assertIn('run_probe',self.orch_calls[0])
+        self.assertFalse(any('--ack' in c for c in self.orch_calls))
+        self.assertEqual(json.loads(out)['done'][0]['latency_source'],'mailbox')
+
+    def test_wait_returns_other_events_without_consuming_them(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        question={'id':'q','type':'question','from':'someone','body':'decisão?','payload':{}}
+        with self.orchestration([question,self.message()]):
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out)
+        self.assertIn(question,json.loads(out)['events'])
+        self.assertTrue(all('--all' in c or '--peek' in c for c in self.orch_calls if c[1]=='check'))
+
+    def test_wait_blocked_is_reported_without_counting_a_generic_status(self):
+        chat=self.mapped(dispatch='ctx_probe',state='blocked');self.sent(chat)
+        with self.orchestration([]):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'blocked')
+
+    def test_read_last_uses_last_assistant_or_pending_question(self):
+        self.mapped(state='blocked')
+        base=self.app.rpc
+        items=[{'itemId':'a','observedAt':1,'body':{'kind':'message','role':'assistant','blocks':[{'type':'text','text':'resposta'}]}},
+               {'itemId':'q','observedAt':2,'body':{'kind':'question','question':'Qual opção?','options':[],'resolution':{'state':'pending'}}}]
+        def rpc(method,params=None):
+            return {'page':{'items':items,'actionablePromptIds':['q'],'queuedMessages':[]}} if method=='agentSession.history' else base(method,params)
+        with patch.dict(GLOBALS,{'rpc':rpc}):code,out=self.run_main('read','persona','--last','--json')
+        self.assertEqual(code,0,out);self.assertEqual(json.loads(out)['last']['text'],'Qual opção?')
+        self.app.tabs[0]['chatStatus']['state']='done'
+        with patch.dict(GLOBALS,{'rpc':rpc}):code,out=self.run_main('read','persona','--last','--json')
+        self.assertEqual(json.loads(out)['last']['text'],'resposta')
+
+    def test_close_active_dispatch_requests_worker_done_and_returns_closing(self):
+        self.mapped(dispatch='ctx_probe',state='working')
+        with self.orchestration(state='ready'):code,out=self.run_main('close','persona','--json')
+        self.assertEqual(code,0,out);self.assertEqual(json.loads(out)['status'],'closing')
+        self.assertFalse(json.loads(out)['closed'])
+        self.assertTrue(any(c[1]=='send' and 'dispatch:ctx_probe' in c for c in self.orch_calls))
+        self.assertFalse(any(c[1] in ['worker-stop','worker-release'] for c in self.orch_calls))
+
+    def test_close_release_retained_is_not_closed(self):
+        self.mapped(dispatch='ctx_probe')
+        with self.orchestration(release='retained'):code,out=self.run_main('close','persona','--json')
+        self.assertEqual(code,1,out);self.assertFalse(json.loads(out)['closed'])
+        self.assertNotIn('close',[e['event'] for e in self.read_map()])
+
+    def test_close_force_unknown_never_releases_or_abandons(self):
+        self.mapped(dispatch='ctx_probe',state='working')
+        with self.orchestration(state='ready',stop='stop_unknown'):
+            code,out=self.run_main('close','persona','--force','--json')
+        self.assertEqual(code,75,out);self.assertFalse(json.loads(out)['closed'])
+        self.assertEqual(sum(c[1]=='worker-stop' for c in self.orch_calls),1)
+        self.assertFalse(any(c[1] in ['worker-release','worker-abandon'] for c in self.orch_calls))
+
+    def test_close_prefix_legacy_keeps_working_chat_without_force(self):
+        self.app.tabs=[tab('codex_a','a'),tab('codex_b','b','working')]
+        for c,n in [('codex_a','grupo-a'),('codex_b','grupo-b')]:self.write_map({'event':'open','chat':c,'name':n,'agent':'codex'})
+        code,out=self.run_main('close','--prefix','grupo-','--json')
+        self.assertEqual(code,1,out);self.assertEqual(len(json.loads(out)['closed']),1)
+        self.assertEqual(len(json.loads(out)['refused']),1)
+
+
+
+
+
+
+
+    def test_close_force_confirms_stop_and_settlement_before_release(self):
+        self.mapped(dispatch='ctx_probe',state='working');self.orch_calls=[];stopped=False
+        def brza(*args):
+            nonlocal stopped
+            self.orch_calls.append(args)
+            if args[1]=='worker-show':return {'dispatch':{'status':'stopped' if stopped else 'ready'}}
+            if args[1]=='worker-stop':stopped=True;return {'state':'stopped'}
+            if args[1]=='worker-release':return {'state':'released'}
+            self.fail(args)
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--force','--json')
+        self.assertEqual(code,0,out);self.assertTrue(json.loads(out)['closed'])
+        self.assertEqual([c[1] for c in self.orch_calls],['worker-show','worker-stop','worker-show','worker-release'])
+
+    def test_close_force_stop_unknown_cli_failure_preserves_receipt_and_inspects(self):
+        self.mapped(dispatch='ctx_probe',state='working');calls=[]
+        def brza(*args):
+            calls.append(args)
+            if args[1]=='worker-show':return {'dispatch':{'status':'ready'}}
+            if args[1]=='worker-stop':
+                raise GLOBALS['BrzaError']('incerto',body={'ok':False,'result':{'state':'stop_unknown'},'error':{'code':'stop_unknown'}})
+            self.fail('liberação indevida')
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--force','--json')
+        self.assertEqual(code,75,out);self.assertEqual(json.loads(out)['status'],'stop_unknown')
+        self.assertEqual([c[1] for c in calls],['worker-show','worker-stop','worker-show'])
+
+    def test_close_force_respects_custody_and_keep_open_refusals(self):
+        for reason in ['terminal_kept_open','worker_identity_unproven','worker_not_owned']:
+            self.app.tabs=[];self.map.unlink(missing_ok=True);self.mapped(dispatch='ctx_probe',state='working');calls=[]
+            def brza(*args):
+                calls.append(args)
+                if args[1]=='worker-show':return {'dispatch':{'status':'ready'}}
+                raise GLOBALS['BrzaError'](reason)
+            with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--force','--json')
+            self.assertEqual(code,1,out);self.assertNotIn('worker-release',[c[1] for c in calls])
+
+    def test_close_keep_open_uses_worker_keep_open_without_releasing(self):
+        self.mapped(dispatch='ctx_probe')
+        with self.orchestration():code,out=self.run_main('close','persona','--keep-open','--json')
+        self.assertEqual(code,0,out);self.assertFalse(json.loads(out)['closed'])
+        self.assertEqual(json.loads(out)['status'],'kept_open')
+        self.assertIn('worker-keep-open',[c[1] for c in self.orch_calls])
+
+    def test_wait_any_returns_one_and_names_the_pending(self):
+        self.app.tabs=[{**tab('codex_a','a'),'chatStatus':{'state':'done','updatedAt':2000000000000}},tab('codex_b','b','working')]
+        for c,n in [('codex_a','a'),('codex_b','b')]:
+            self.write_map({'event':'open','chat':c,'name':n,'agent':'codex'});self.sent(c)
+        code,out=self.run_main('wait','a','b','--any','--timeout','0','--json');self.assertEqual(code,0,out)
+        result=json.loads(out);self.assertEqual([r['name'] for r in result['done']],['a'])
+        self.assertEqual([r['name'] for r in result['pending']],['b']);self.assertFalse(result['timed_out'])
+
+    def test_wait_codex_quota_failure_is_failed_but_old_error_is_ignored(self):
+        chat=self.mapped();self.sent(chat)
+        with patch.dict(GLOBALS,{'codex_usage':lambda sid:{'error':'quota','error_at':'2026-01-01T12:00:01Z'}}):
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,1,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'failed')
+        with patch.dict(GLOBALS,{'codex_usage':lambda sid:{'error':'quota','error_at':'2025-01-01T12:00:01Z'}}):
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'done')
+
+    def test_wait_other_coordinator_cannot_read_the_run_mailbox(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        with patch.dict(GLOBALS,{'coordinator_identity':lambda:'orca_session_id:other'}),self.orchestration():
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,1,out);self.assertEqual(self.orch_calls,[])
+
+
+
+    def test_send_timeout_does_not_claim_rejection_or_success(self):
+        self.mapped()
+        with patch.dict(GLOBALS,{'send_to_chat':lambda *a,**kw:(_ for _ in ()).throw(GLOBALS['BrzaError']('timeout'))}):
+            code,out=self.run_main('send','persona','--text','oi','--json')
+        self.assertEqual(code,75,out);self.assertEqual(json.loads(out)['status'],'unknown')
+
+    def test_read_last_without_assistant_returns_null(self):
+        self.mapped();code,out=self.run_main('read','persona','--last','--json')
+        self.assertEqual(code,0,out);self.assertIsNone(json.loads(out)['last'])
+
+    def test_open_initial_round_demands_the_round_id_in_the_payload(self):
+        with self.orchestration(),patch.dict(GLOBALS,{'running':lambda _:False}):
+            code,out=self.run_main('nova','--agent','codex','--prompt','tarefa')
+        self.assertEqual(code,0,out)
+        start=next(c for c in self.orch_calls if c[1]=='worker-start');spec=start[start.index('--spec')+1]
+        self.assertIn('\"dispatchId\": \"SEU_DISPATCH_ID\"',spec)
+        entry=GLOBALS['session_map']()['codex_new'];self.assertEqual(entry['last_send']['round_id'],entry['last_send']['operation'])
+
+    def test_unknown_open_cannot_be_relaunched_as_a_new_worker(self):
+        count=[]
+        def brza(*args):
+            count.append(args)
+            raise GLOBALS['BrzaError']('resultado incerto',body={'result':{'state':'outcome_unknown','dispatchId':'ctx_unknown'}})
+        with patch.dict(GLOBALS,{'brza':brza,'running':lambda _:False}):
+            code,out=self.run_main('incerta','--agent','codex');self.assertEqual(code,1,out)
+            code,out=self.run_main('incerta','--agent','codex');self.assertEqual(code,1,out)
+        self.assertEqual(len(count),1)
+        pending=list(self.map.parent.glob('pending-*.json'));self.assertEqual(len(pending),1)
+        self.assertIn('ctx_unknown',pending[0].read_text())
+
+    def test_queue_replays_returned_and_withdrawn_are_not_success(self):
+        self.mapped()
+        for state,expected in [('waiting',0),('returned',1),('withdrawn',1),('dispatched',75)]:
+            response={'ok':True,'replayed':True,'value':{'queued':{'messageId':'q','position':0,'state':state}}}
+            with patch.dict(GLOBALS,{'send_to_chat':lambda *a,**kw:response}):
+                code,out=self.run_main('send','persona','--text','oi','--json')
+            self.assertEqual(code,expected,out)
+            self.assertEqual(json.loads(out)['sent'],state=='waiting')
+
+    def test_marker_regex_can_contain_colons(self):
+        f=self.config/'marker';f.write_text('round:done')
+        self.assertTrue(GLOBALS['marker_present']([str(f)+':^round:done$']))
+
+    def test_wait_can_finish_after_the_worker_tab_is_auto_released(self):
+        chat=self.mapped(dispatch='ctx_probe',model='modelo',effort='high');self.sent(chat);self.app.tabs=[]
+        with self.orchestration([self.message()]):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out);self.assertEqual(json.loads(out)['done'][0]['model'],'modelo')
+
+    def test_wait_recovers_a_round_hidden_by_the_host_100_row_history_limit(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        old=[{'id':str(i),'type':'status','from':'other','payload':{}} for i in range(100)]
+        seen=[]
+        def brza(*args):
+            seen.append(args)
+            if args[1]=='check':return {'messages':old}
+            if args[1]=='inbox':return {'messages':[{'id':'actual','run_id':'run_probe','from_handle':'structworker_probe',
+                'type':'status','payload':json.dumps({'dispatchId':'ctx_probe','round_id':'op_round'}),
+                'created_at':'2026-01-01T12:00:01Z'}]}
+            self.fail(args)
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out);self.assertTrue(any(c[1]=='inbox' and 'run:run_probe' in c for c in seen))
+        self.assertTrue(all('--all' in c or c[1]=='inbox' for c in seen))
+
+    def test_wait_observes_a_stopped_dispatch_without_worker_done(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        with self.orchestration([],state='stopped'):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,1,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'failed')
+
+    def test_wait_quota_uses_provider_session_even_without_wait_at_open(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat);self.app.providers[chat]='quota-provider'
+        home=self.config/'codex';rollout=home/'sessions';rollout.mkdir(parents=True)
+        (rollout/'rollout-fixture-quota-provider.jsonl').write_text(json.dumps({'timestamp':'2026-01-01T12:00:01Z',
+            'type':'event_msg','payload':{'type':'task_complete','error':{'message':'quota'}}})+'\n')
+        with patch.dict(os.environ,{'CODEX_HOME':str(home)}),self.orchestration([],state='ready'):
+            code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,1,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'failed')
+        self.assertEqual(GLOBALS['session_map']()[chat]['provider_session'],'quota-provider')
+
+
+    def test_close_prefix_reports_the_first_success_and_the_second_refusal(self):
+        self.app.tabs=[tab('codex_a','a'),tab('codex_b','b')]
+        for c,n,d in [('codex_a','grupo-a','ctx_a'),('codex_b','grupo-b','ctx_b')]:
+            self.write_map({'event':'open','chat':c,'name':n,'agent':'codex','dispatch':d,'run':'run_probe',
+                            'coordinator':GLOBALS['coordinator_identity']()})
+        def brza(*args):
+            if args[1]=='worker-show':return {'dispatch':{'status':'succeeded'}}
+            if args[-1]=='ctx_b':raise GLOBALS['BrzaError']('worker_not_owned')
+            return {'state':'released'}
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','--prefix','grupo-','--json')
+        self.assertEqual(code,1,out);result=json.loads(out)
+        self.assertEqual([r['name'] for r in result['closed']],['grupo-a'])
+        self.assertEqual([r['name'] for r in result['refused']],['grupo-b'])
+
+    def test_stop_unknown_cli_without_error_object_is_still_uncertain(self):
+        self.mapped(dispatch='ctx_probe',state='working');calls=[]
+        def brza(*args):
+            calls.append(args)
+            if args[1]=='worker-show':return {'dispatch':{'status':'ready'}}
+            raise GLOBALS['BrzaError']('stop_unknown',body={'ok':False,'result':{'state':'stop_unknown'}})
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--force','--json')
+        self.assertEqual(code,75,out);self.assertEqual(json.loads(out)['status'],'stop_unknown')
+        self.assertNotIn('worker-release',[c[1] for c in calls])
+
+    def test_release_unknown_cli_without_error_object_does_not_claim_closed(self):
+        self.mapped(dispatch='ctx_probe')
+        def brza(*args):
+            if args[1]=='worker-show':return {'dispatch':{'status':'succeeded'}}
+            raise GLOBALS['BrzaError']('release_unknown',body={'ok':False,'result':{'state':'release_unknown'}})
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--json')
+        self.assertEqual(code,75,out);self.assertFalse(json.loads(out)['closed'])
+
+
+    def test_open_rechecks_the_name_under_the_launch_lock(self):
+        answers=iter([False,True])
+        with self.orchestration(),patch.dict(GLOBALS,{'running':lambda _:False,'mapped_and_open':lambda _:next(answers)}):
+            code,out=self.run_main('mesmo-nome','--agent','codex')
+        self.assertEqual(code,0,out);self.assertIn('running:',out)
+        self.assertFalse(any(c[1]=='worker-start' for c in self.orch_calls))
+
+    def test_stop_unknown_survives_a_failed_followup_observation(self):
+        self.mapped(dispatch='ctx_probe',state='working');calls=[]
+        def brza(*args):
+            calls.append(args)
+            if len(calls)==1:return {'dispatch':{'status':'ready'}}
+            if args[1]=='worker-stop':raise GLOBALS['BrzaError']('incerto',body={'ok':False,'result':{'state':'stop_unknown'}})
+            raise GLOBALS['BrzaError']('app sem resposta')
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--force','--json')
+        self.assertEqual(code,75,out);r=json.loads(out);self.assertEqual(r['status'],'stop_unknown')
+        self.assertEqual(r['receipt']['result']['state'],'stop_unknown');self.assertIn('observation_error',r)
+
+    def test_wait_poll_failure_preserves_events_and_pending_persona(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        event={'id':'question','type':'question','from':'other','payload':{},'body':'ajuda?'}
+        def brza(*args):
+            if args[1]=='check':return {'messages':[event]}
+            raise GLOBALS['BrzaError']('app sem resposta')
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,75,out);r=json.loads(out);self.assertIn(event,r['events'])
+        self.assertIn('app sem resposta',r['pending'][0]['lifecycle_error'])
+
+    def test_worker_done_failed_cannot_be_overwritten_by_an_older_status(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        failed=self.message(kind='worker_done');failed['payload']['outcome']='failed'
+        def brza(*args):
+            if args[1]=='check':return {'messages':[failed,self.message()]}
+            return {'dispatch':{'status':'failed','completedAt':'2026-01-01T12:00:01Z'}}
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,1,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'failed')
+
+    def test_wait_persists_a_claude_provider_that_was_not_ready_at_open(self):
+        chat=self.mapped(dispatch='ctx_probe',agent='claude');self.sent(chat);self.app.providers[chat]='late-claude'
+        with self.orchestration([self.message()]):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,0,out)
+        entry=GLOBALS['session_map']()[chat]
+        self.assertEqual(entry['claude_session'],'late-claude');self.assertEqual(entry['provider_session'],'late-claude')
+
+    def test_wait_worker_done_observation_failure_keeps_pending_and_events(self):
+        chat=self.mapped(dispatch='ctx_probe');self.sent(chat)
+        event=self.message(kind='worker_done');event['payload']['outcome']='succeeded'
+        def brza(*args):
+            if args[1]=='check':return {'messages':[event]}
+            raise GLOBALS['BrzaError']('inspeção indisponível')
+        with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('wait','persona','--timeout','0','--json')
+        self.assertEqual(code,75,out);result=json.loads(out)
+        self.assertIn(event,result['events']);self.assertIn('inspeção indisponível',result['pending'][0]['lifecycle_error'])

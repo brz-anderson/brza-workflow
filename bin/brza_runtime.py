@@ -54,7 +54,12 @@ WORKSPACE, STUDIO, _MANIFEST = discover()
 
 
 class BrzaError(RuntimeError):
-    """O CLI ou o runtime respondeu com erro, ou não respondeu."""
+    """O erro conserva o recibo de uma mutação de resultado incerto."""
+
+    def __init__(self, message, body=None):
+        super().__init__(message)
+        self.body = body or {}
+        self.code = (self.body.get('error') or {}).get('code')
 
 
 def cli_command() -> str:
@@ -77,7 +82,7 @@ def brza(*args):
     except json.JSONDecodeError:
         raise BrzaError(f'brza {" ".join(args)} falhou: {r.stderr.strip() or r.stdout.strip()}') from None
     if not out.get('ok', False):
-        raise BrzaError(f'brza {" ".join(args)} falhou: {json.dumps(out.get("error", out), ensure_ascii=False)}')
+        raise BrzaError(f'brza {" ".join(args)} falhou: {json.dumps(out.get("error", out), ensure_ascii=False)}', body=out)
     return out['result']
 
 
@@ -127,22 +132,30 @@ def canonicalize(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def send_mutation(session_id: str, text: str, fence: int, now_ms: int, entropy: str) -> dict:
-    """Os parâmetros do agentSession.send, como os monta structuredAgentSessionMessageSendMutation no brza-studio."""
-    body = {'kind': 'message', 'role': 'user', 'blocks': [{'type': 'text', 'text': text}]}
-    fields = {'body': body, 'delivery': 'queue-if-active'}
-    payload = canonicalize({'method': 'agentSession.send', 'sessionId': session_id, 'fields': fields})
-    return {'envelope': {'sessionId': session_id, 'clientOperationId': f'{now_ms}-{entropy}',
+def mutation(method: str, session_id: str, fields: dict, fence: int, operation: str) -> dict:
+    """Envelope e impressão digital do host; o fence não faz parte da impressão digital."""
+    payload = canonicalize({'method': method, 'sessionId': session_id, 'fields': fields})
+    return {'envelope': {'sessionId': session_id, 'clientOperationId': operation,
                          'expectedRuntimeFence': fence,
-                         'payloadFingerprint': hashlib.sha256(payload.encode()).hexdigest()},
-            **fields}
+                         'payloadFingerprint': hashlib.sha256(payload.encode()).hexdigest()}, **fields}
 
 
-def send_to_chat(session_id: str, text: str):
-    """Manda uma mensagem ao chat, que espera na fila com o agente no meio de um turno."""
+def send_mutation(session_id: str, text: str, fence: int, now_ms: int, entropy: str) -> dict:
+    body = {'kind': 'message', 'role': 'user', 'blocks': [{'type': 'text', 'text': text}]}
+    return mutation('agentSession.send', session_id, {'body': body, 'delivery': 'queue-if-active'},
+                    fence, f'{now_ms}-{entropy}')
+
+
+def new_operation() -> str:
+    return f'{int(time.time() * 1000)}-{uuid.uuid4().hex}'
+
+
+def send_to_chat(session_id: str, text: str, operation: str | None = None):
+    """Devolve o recibo real; repetir a operação preserva a impressão digital mesmo com fence novo."""
     page = rpc('agentSession.history', {'sessionId': session_id, 'direction': 'tail', 'limit': 1})['page']
-    rpc('agentSession.send', send_mutation(session_id, text, page['fence'], int(time.time() * 1000),
-                                           uuid.uuid4().hex))
+    body = {'kind': 'message', 'role': 'user', 'blocks': [{'type': 'text', 'text': text}]}
+    return rpc('agentSession.send', mutation('agentSession.send', session_id,
+               {'body': body, 'delivery': 'queue-if-active'}, page['fence'], operation or new_operation()))
 
 
 def git(*args, cwd: Path | None = None) -> str:

@@ -112,15 +112,47 @@ quando o `--checkout` aponta para outro repositório.
 brza sessions correcao-cli --agent codex --checkout "$HOME/Projects/brza-workflow"
 ```
 
-O `--title` define o título da aba (sem ele, usa o nome), e `--prompt` ou `--prompt-file` envia a tarefa na abertura.
-O `--dry-run` mostra o agente canônico e o checkout sem abrir sessão. Só Claude usa as checagens de `claude-brza` e
-hooks. O `--wait` espera a sessão nos quatro agentes e, com `--rename`, a confirmação do nome nos runtimes que suportam.
-O `--rename` envia `/rename` ao Claude e dá o nome ao Codex pelo título da aba; no Grok e no Antigravity, o nome fica
-na aba e no mapa de sessões.
+A abertura usa `worker-start` e requer a identidade da própria sessão coordenadora (`ORCA_AGENT_SESSION_ID` ou
+`ORCA_TERMINAL_HANDLE`). O app segue a preferência Chat dos agentes; o recibo é conferido antes de registrar o
+nome. `--model` e `--effort` escolhem o modelo e o esforço, com `--effort` exigindo `--model`. Se uma abertura
+ficar sem resultado comprovado, o arquivo `.sessions/pending-*.json` conserva o recibo para recuperação, e o
+mesmo nome não é relançado automaticamente.
 
-O mapa local de sessões associa o nome ao chat de qualquer agente. `list`, `send`, `title` e `close` mantêm seus
-contratos, inclusive `--json`; `claude_session` fica `null` para outros agentes. A descoberta de nomes fora do mapa
-por transcripts e processos continua exclusiva de Claude. O wrapper não instala hooks de outros runtimes.
+O `--title` define o título da aba; sem ele, usa o nome. Com `--rename`, Claude recebe `/rename` na fila depois
+do briefing inicial; Codex usa o título da aba como nome; Grok e Antigravity mantêm o nome no mapa. O `--wait`
+de abertura espera o id do provedor e, com `--rename`, a confirmação do nome nos runtimes que suportam.
+Somente Claude usa as checagens de `claude-brza` e hooks.
+
+As personas enviam `status` com `dispatchId` e `round_id` ao concluir cada rodada. Só enviam `worker_done`
+quando a coordenação pede o encerramento: isso arma o fechamento automático em cerca de dois minutos,
+com o botão **Manter aberto** acima do input. O mapa `.sessions/sessions.jsonl` conserva nome, agente,
+modelo, esforço, Run, Dispatch, remetentes, recibos e latência, fora do git.
+
+```bash
+brza sessions send persona --text "Faça a próxima rodada" --json
+```
+
+O `send` mantém a forma posicional `send <nome> <texto>` e aceita vários nomes ou `--prefix`, `--text` ou `--file`.
+Devolve o recibo real com `status` e `operation`; repetir com `--operation` exige um alvo e o mesmo texto.
+A saída é 0 em `accepted`/`queued`, 1 em recusa e 75 em `pending`/`unknown`; `sent` só é verdadeiro nos dois primeiros.
+
+```bash
+brza sessions wait persona --timeout 120 --json
+```
+
+O `wait` observa a mailbox do Run da própria coordenação, sem consumir nem confirmar mensagens, recupera eventos já
+entregues ao chat e exige o remetente, o Dispatch e a rodada do último envio. Devolve `done`, `pending`, `timed_out`
+e os `events` observados, preservando perguntas e escalations para a coordenação. `--any` volta no primeiro término;
+`--marker ARQUIVO:REGEX` confirma o marcador. Chats antigos sem Dispatch usam estado, `updatedAt` posterior ao envio
+e saída da fila. `blocked`, `failed` e `ended_without_marker` aparecem explicitamente; timeout sai 75.
+
+`read <nome> --last` traz a última resposta ou pergunta pendente, sem cursor.
+
+`close` e `close --prefix` pedem `worker_done` a workers ativos e devolvem `closing`, sem declarar fechamento.
+Em workers encerrados, usam `worker-release`; `--force` solicita parada guardada e só libera após `stopped` e
+settlement confirmados. `stop_unknown`, `release_unknown` e `retained` não significam fechamento e não causam nova
+tentativa cega. `close --keep-open` usa `worker-keep-open`. Chats legados sem Dispatch mantêm o fechamento direto
+com a guarda de `--force`; `--keep-open` requer Dispatch. O leitor de uso não altera `measure.py`.
 
 ## O índice das notas
 
