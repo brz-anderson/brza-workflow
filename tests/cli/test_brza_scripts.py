@@ -367,7 +367,7 @@ class BrzaRunTest(unittest.TestCase):
         return code, calls, out.getvalue()
 
     def test_tab_mode_prints_blocks_and_closes_on_success(self):
-        code, calls, out = self.tab_run(['echo', "'a b'", '&&', 'pwd'])
+        code, calls, out = self.tab_run(["echo 'a b' && pwd"])
         self.assertEqual(code, 0)
         self.assertEqual(out, f"```bash\necho 'a b' && pwd\n```\n```\na b\n{HERE}\n```\nSaiu com 0.\n")
         create = calls[0]
@@ -437,6 +437,42 @@ class BrzaRunTest(unittest.TestCase):
         self.assertNotIn('close', [c[1] for c in calls])
         self.assertEqual([(l['code'], l['session_id'], l['mode']) for l in lines], [(4, None, 'tab')])
         self.assertGreater(lines[0]['duration_s'], 0)
+
+    def test_tab_mode_keeps_each_argument_whole(self):
+        # `brza run -- bash -c 'a && b'`: o `a && b` é um argumento só, e não pode sair do `bash -c` no shell da aba
+        code, _, out = self.tab_run(['bash', '-c', 'echo um && echo "dois  três"'])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "```bash\nbash -c 'echo um && echo \"dois  três\"'\n```\n```\num\ndois  três\n```\n"
+                              "Saiu com 0.\n")
+
+    def test_one_argument_is_still_a_shell_string(self):
+        self.assertEqual(RUN['command_of'](['echo a && exit 3']), 'echo a && exit 3')
+        self.assertEqual(RUN['command_of'](['ls', '-la', 'a b']), "ls -la 'a b'")
+        self.assertEqual(RUN['command_of'](['printf', '<%s>', '=ls', 'a=b', '=']), "printf '<%s>' '=ls' a=b '='")
+
+    @unittest.skipUnless(Path('/bin/zsh').exists(), 'o EQUALS é do zsh')
+    def test_a_word_starting_with_equals_reaches_the_command_whole_in_zsh(self):
+        # o zsh troca `=ls` por `/bin/ls`, e `=inexistente` aborta a linha: o shlex.quote, que segue o sh, não cita o `=`
+        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp), patch.dict(os.environ, {'SHELL': '/bin/zsh'}):
+            code, output, _ = RUN['run_here'](RUN['command_of'](['printf', '<%s>', '=ls', '=nao_existe']), Path(temp))
+        self.assertEqual(code, 0)
+        self.assertIn('<=ls><=nao_existe>', output)
+
+    def test_the_tab_quotes_a_word_starting_with_equals_for_its_zsh(self):
+        # a aba de mentira roda o --command em /bin/sh, que não expande `=`; no zsh da aba de verdade, `=x` sem aspas
+        # aborta a linha antes do --result, e o brza run espera para sempre
+        _, calls, _ = self.tab_run(['printf', '<%s>', '=ls'], result={'code': 0})
+        inner = calls[0][calls[0].index('--command') + 1]
+        self.assertTrue(inner.endswith(" -- printf '<%s>' '=ls'"), inner)
+
+    def test_the_chat_mode_of_main_keeps_each_argument_whole(self):
+        got = []
+        argv = ['brza-run', '--chat', 'claude_x', '--', 'git', 'commit', '-m', 'a b']
+        # o runpy devolve uma cópia dos globais: o main procura o run_in_chat nos dele
+        with patch.dict(RUN['main'].__globals__, {'run_in_chat': lambda command, chat: got.append((command, chat)) or 0}), \
+                patch.object(sys, 'argv', argv), self.assertRaises(SystemExit) as done:
+            RUN['main']()
+        self.assertEqual((done.exception.code, got), (0, [("git commit -m 'a b'", 'claude_x')]))
 
     def test_the_line_carries_the_workstream_of_the_cwd(self):
         with tempfile.TemporaryDirectory() as temp:
