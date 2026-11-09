@@ -17,7 +17,7 @@
       rode brza note index --rebuild`, com saída 0. Com --no-push, nenhuma linha. Antes do commit, e só com push,
       recusa a issue ou a decisão nova cujo id (`issue:<slug>`, `decision:<slug>`) já é, no índice, de outro
       workstream que ainda tem a nota: o nome repetido entre workstreams viraria um id só, e a primeira nota sumiria
-      do estado vigente. Worklog recebe sessions: e ## Medida quando há CLAUDE_CODE_SESSION_ID; cada commit com worklog
+      do estado vigente. Worklog recebe sessions: e ## Custo da tarefa quando há CLAUDE_CODE_SESSION_ID; cada commit com worklog
       grava um evento task antes do push, inclusive com --no-push e sem sessão (session_id null). --until HH:MM ou ISO
       fecha no começo do primeiro turno da tarefa seguinte, entre o marco anterior da sessão e agora.
   brza-note plan-open <slug> --title <H1> --description <frase> [--workstream <nome>]
@@ -831,6 +831,28 @@ def measure_line(measure: dict | None, event: dict, summary: dict, partial: bool
     return line + '\n'
 
 
+COST_TITLE = re.compile(r'## (?:Medida|Custo da tarefa)\s*')  # `## Medida` até o P7 do PLN-012 (R6.1)
+
+
+def without_cost_section(text: str) -> str:
+    """O worklog sem a seção do custo: corta no título dela fora de bloco cercado, que um exemplo pode citar. Com uma
+    cerca que não fecha, a leitura das cercas não é confiável, e o corte volta ao primeiro título, como antes do P7."""
+    fence, at = None, 0
+    for line in text.splitlines(keepends=True):
+        mark = re.match(r' {0,3}(`{3,}|~{3,})(.*)', line.rstrip('\r\n'))
+        if mark and fence is None and not (mark.group(1)[0] == '`' and '`' in mark.group(2)):
+            fence = mark.group(1)  # a info string da cerca de crase não tem crase
+        elif fence and mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) \
+                and not mark.group(2).strip():
+            fence = None  # a cerca que fecha não tem info string
+        elif fence is None and COST_TITLE.fullmatch(line.rstrip('\r\n')):
+            return text[:at].rstrip()
+        at += len(line)
+    if fence:
+        return re.split(r'^' + COST_TITLE.pattern + r'$', text, maxsplit=1, flags=re.MULTILINE)[0].rstrip()
+    return text.rstrip()
+
+
 def prepare_worklog_measure(root: Path, event: dict, rows: list[dict], summary: dict, directory: Path):
     if not event['session_id']:
         return
@@ -842,8 +864,8 @@ def prepare_worklog_measure(root: Path, event: dict, rows: list[dict], summary: 
         text = path.read_text(encoding='utf-8')
         sessions = as_list(parse_frontmatter(text).get('sessions'))
         text = set_frontmatter_list(text, 'sessions', [*sessions, event['session_id']])
-        text = re.split(r'^## Medida\s*$', text, maxsplit=1, flags=re.MULTILINE)[0].rstrip()
-        path.write_text(text + '\n\n## Medida\n\n' +
+        text = without_cost_section(text)
+        path.write_text(text + '\n\n## Custo da tarefa\n\n' +
                         measure_line(measures.get(rel), event, summary, preview is None), encoding='utf-8')
 
 

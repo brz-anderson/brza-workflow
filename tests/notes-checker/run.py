@@ -856,7 +856,7 @@ def read_core(*parts):
 
 
 def check_pln012_p5():
-    """P5 do PLN-012: o worklog com `sessions:` e a `## Medida`, que o `brza note commit` escreve, passa sem aviso (D3);
+    """P5 do PLN-012: o worklog com `sessions:` e a `## Custo da tarefa`, que o `brza note commit` escreve, passa sem aviso (D3);
     a norma, a skill `close-task` e o adaptador do Claude Code dizem o carimbo, a seção, o aviso e os eventos (D3, D6)."""
     tmp = os.path.realpath(tempfile.mkdtemp())
     fails = 0
@@ -874,7 +874,7 @@ def check_pln012_p5():
                                       "# A medida\n",
         worklog: "---\nscope:\n  - workspace\nrefs:\n  - issue:medida-alvo\nsessions:\n"
                  "  - 08e6c812-8bb3-42fc-a47f-403fdb472ccd\n  - 4a578e01-1c2d-4e5f-8a9b-0c1d2e3f4a5b\n---\n\n"
-                 "# A medida\n\nFechou a [medida](../issues/medida-alvo.md).\n\n## Medida\n\n"
+                 "# A medida\n\nFechou a [medida](../issues/medida-alvo.md).\n\n## Custo da tarefa\n\n"
                  "Corrido 18 min — agente 7 min, Anderson 10 min, pausa 0 · US$ 2,35 (turnos 2,35, subagentes 0,00) · "
                  "CPU 0,8 s do\n`claude` e 6,1 s dos comandos, RSS até 357 MB · 1 turno, 1 sessão · `brza run`: 2 "
                  "comandos, CPU 14 min, pico 1,8 GB · até 22:16 de 2026-11-03, pelo `brza note commit`\n",
@@ -885,25 +885,25 @@ def check_pln012_p5():
         exit_code, stdout = run_checker("--root", tmp, "--json")
         out = json.loads(stdout)
         found = [(r, w, t) for r, w, t in out["errors"] + out["warnings"] if w in (worklog, antigo)]
-        expect("o worklog com sessions: e ## Medida passa sem erro nem aviso", not found and exit_code == 0,
+        expect("o worklog com sessions: e ## Custo da tarefa passa sem erro nem aviso", not found and exit_code == 0,
                (exit_code, found))
-        expect("o worklog antigo, sem sessions: nem ## Medida, também passa", not any(w == antigo for _, w, _ in found))
+        expect("o worklog antigo, sem sessions: nem ## Custo da tarefa, também passa", not any(w == antigo for _, w, _ in found))
         full = os.path.join(tmp, worklog)
         refs_out, unk_out = cn.extract_worklog_refs(open(full, encoding="utf-8").read(), full, tmp)
-        expect("a ## Medida não põe nada no refs nem gera aviso de ID", refs_out == ["issue:medida-alvo"] and unk_out == [],
+        expect("a ## Custo da tarefa não põe nada no refs nem gera aviso de ID", refs_out == ["issue:medida-alvo"] and unk_out == [],
                (refs_out, unk_out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # A norma (D3): a linha sessions na tabela, e o sessions: e a ## Medida na seção work/worklogs/
+    # A norma (D3): a linha sessions na tabela, e o sessions: e a ## Custo da tarefa na seção work/worklogs/
     norm = read_core("work", "README.md")
     table = [line for line in norm.splitlines() if line.startswith("| `sessions` |")]
     expect("a tabela de propriedades tem a linha sessions, mantida pelo brza note commit",
            len(table) == 1 and "`brza note commit`" in table[0] and "sessões" in table[0], table)
     worklogs = norm.split("### `work/worklogs/`", 1)[-1].split("\n### ", 1)[0]
     expect("a seção work/worklogs/ diz o sessions: no frontmatter", "`sessions:`" in worklogs)
-    expect("a seção work/worklogs/ diz a ## Medida como última seção, escrita pelo comando e não à mão",
-           "`## Medida`" in worklogs and "última seção" in worklogs and "não à mão" in worklogs)
+    expect("a seção work/worklogs/ diz a ## Custo da tarefa como última seção, escrita pelo comando e não à mão",
+           "`## Custo da tarefa`" in worklogs and "última seção" in worklogs and "não à mão" in worklogs)
     expect("a seção work/worklogs/ diz que o worklog não ganha opened nem hora em completed (R3.2)",
            "`opened`" in worklogs and "`completed`" in worklogs)
 

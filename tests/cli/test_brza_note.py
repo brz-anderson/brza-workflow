@@ -50,7 +50,16 @@ class NoteFixture(unittest.TestCase):
         (self.ws / '.brza' / 'workspace.toml').write_text(runtime.brza_root.dump_manifest(
             runtime.brza_root.with_defaults(manifest)))
 
+    # O ambiente da sessão que roda a suíte, que o `brza note commit` leria e gravaria no log do workspace real (X9)
+    SESSION_ENV = ('BRZA_WORKSPACE', 'BRZA_STUDIO', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_BRIDGE_SESSION_ID',
+                   'ORCA_AGENT_SESSION_ID', 'CLAUDE_SESSION_NAME', 'MEASURE_DIR')
+
     def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for key in self.SESSION_ENV:
+            os.environ.pop(key, None)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
@@ -1157,6 +1166,53 @@ class TaskCommitTest(NoteFixture):
         self.assertEqual(state.read_bytes(), before)
         self.assertEqual([r['event'] for r in self.events()], ['task'])
 
+    def test_the_last_section_is_titled_custo_da_tarefa(self):  # R6.1 do PLN-012
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertEqual(text.count('## Custo da tarefa'), 1)
+        self.assertNotIn('## Medida', text)
+        self.assertNotIn('\n## ', text.split('## Custo da tarefa', 1)[1])  # a última seção
+
+    def test_a_worklog_with_the_old_medida_title_leaves_with_one_section_with_the_new_title(self):
+        self.path.write_text(self.original + '\n## Medida\n\nCorrido 1 min · velho\n')
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertEqual(text.count('## Custo da tarefa'), 1)
+        self.assertNotIn('## Medida', text)
+        self.assertNotIn('velho', text)
+        self.assertIn('Registro.', text)
+
+    def test_the_title_inside_a_fenced_block_is_not_the_section(self):  # A2 da revisão do P7
+        fenced = '\n```markdown\n## Custo da tarefa\n\nexemplo\n```\n\nDepois da cerca.\n'
+        self.path.write_text(self.original + fenced)
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertIn('Depois da cerca.', text)
+        self.assertEqual(text.count('## Custo da tarefa'), 2)
+        self.assertTrue(text.split('Depois da cerca.', 1)[1].lstrip().startswith('## Custo da tarefa\n'))
+
+    def test_the_cut_follows_how_fences_open_and_close(self):  # B1 e B2 da revisão do P7
+        cut = runpy.run_path(str(BIN / 'brza-note'), run_name='brza_note')['without_cost_section']
+        old = '\n\n## Custo da tarefa\n\nvelho\n'
+        cases = {
+            'aninhada com info string': ('# T\n\n```\n```python\n## Custo da tarefa\n```\n\nfim' + old,
+                                         '# T\n\n```\n```python\n## Custo da tarefa\n```\n\nfim'),
+            'til dentro de crase': ('# T\n\n```\n~~~\n## Medida\n```\n\nfim' + old, '# T\n\n```\n~~~\n## Medida\n```\n\nfim'),
+            'til': ('# T\n~~~\n## Medida\n~~~\nfim' + old, '# T\n~~~\n## Medida\n~~~\nfim'),
+            'cerca mais curta não fecha': ('# T\n\n````\n```\n## Custo da tarefa\n````\n\nfim' + old,
+                                           '# T\n\n````\n```\n## Custo da tarefa\n````\n\nfim'),
+            'cerca que não fecha': ('# T\n\n```\ncodigo' + old, '# T\n\n```\ncodigo'),
+            'crase na info string não abre cerca': ('# T\n\n```x``` no texto\n\n```\n## Medida\n```\n\nfim' + old,
+                                                    '# T\n\n```x``` no texto\n\n```\n## Medida\n```\n\nfim'),
+            'título antigo e CRLF': ('# T\r\n\r\n## Medida  \r\nvelho\r\n', '# T'),
+        }
+        for name, (text, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(cut(text), kept)
+
     def test_recommit_accumulates_sessions_and_replaces_measure_section(self):
         transcript, state = self.transcript()
         self.assertEqual(self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})[0], 0)
@@ -1170,7 +1226,8 @@ class TaskCommitTest(NoteFixture):
         self.assertEqual(code, 0, out)
         text = self.path.read_text()
         self.assertEqual(text.count('  - sid'), 1)
-        self.assertEqual(text.count('## Medida'), 1)
+        self.assertEqual(text.count('## Custo da tarefa'), 1)
+        self.assertNotIn('## Medida', text)
         self.assertIn('Corrido 10 min', text)
         self.assertEqual(len(self.events()), 3)
 
@@ -1388,6 +1445,44 @@ class TaskCommitTest(NoteFixture):
         self.assertNotEqual(code, 0, out)
         self.assertEqual(len(self.events()), 1)
         self.assertEqual(self.events()[-1]['commit'], git('rev-parse', 'HEAD', cwd=self.tree))
+
+
+
+class NoteEnvironmentIsolationTest(NoteFixture):
+    """X9 do PLN-012: o ambiente da sessão que roda a suíte (BRZA_WORKSPACE, CLAUDE_CODE_SESSION_ID…) não chega ao
+    `brza note commit` dos testes, e o evento `task` não vai ao log do workspace real."""
+
+    REAL = {'BRZA_WORKSPACE': None, 'CLAUDE_CODE_SESSION_ID': 'sessao-real', 'ORCA_AGENT_SESSION_ID': 'chat-real',
+            'CLAUDE_SESSION_NAME': 'nome-real', 'BRZA_STUDIO': None}
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temp.cleanup)
+        cls.real_ws = Path(temp.name).resolve() / 'real-ws'
+        cls.real_ws.mkdir()
+        cls.fake = {**cls.REAL, 'BRZA_WORKSPACE': str(cls.real_ws), 'BRZA_STUDIO': str(cls.real_ws)}
+        patcher = patch.dict(os.environ, cls.fake)  # o ambiente herdado da sessão, antes de qualquer setUp
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
+        os.environ.pop('MEASURE_DIR', None)
+
+    def test_the_session_environment_does_not_reach_the_test(self):
+        for key in self.REAL:
+            self.assertNotIn(key, os.environ)
+
+    def test_commit_writes_the_task_event_only_inside_the_test_workspace(self):
+        tree = self.tree
+        rel = 'work/worklogs/2026-11-09-isolada.md'
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text('---\nscope:\n  - workspace\ncompleted: 2026-11-09\n---\n\n# Isolada\n\nRegistro.\n')
+        code, out = self.run_note('commit', rel, '-m', 'docs: isolada', '--no-push')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(self.real_ws.iterdir()), [])
+        events = [json.loads(line) for line in (self.ws / '.measurements' / 'measurements.jsonl').read_text().splitlines()]
+        self.assertEqual([e['event'] for e in events], ['task'])
+        self.assertIsNone(events[0]['session_id'])
 
 
 if __name__ == '__main__':

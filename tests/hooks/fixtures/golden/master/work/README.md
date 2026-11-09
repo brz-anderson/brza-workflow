@@ -192,7 +192,7 @@ por um formatador que junta linhas.
 `work/`, `plans/` e `wiki/` são deste repositório, mas **não moram na `master`**: cada nota mora na branch do
 workstream dela, `workstream/<nome>`, no worktree `.worktrees/<nome>`, como diz o `AGENTS.md`. **A nota nasce no
 workstream da sessão que a escreve.** **O commit é pelo `brza note commit`**, que extrai e atualiza o `refs:` dos
-worklogs pedidos — e o `sessions:` e a `## Medida`, como diz a seção `work/worklogs/` —, roda o checador, commita só os
+worklogs pedidos — e o `sessions:` e a `## Custo da tarefa`, como diz a seção `work/worklogs/` —, roda o checador, commita só os
 caminhos dados e dá o push na branch do workstream, sem PR, e recusa a `master`. O commit é com a identidade do
 `brz-anderson`, que vem do `env` da sessão, e o push vai pela chave `personal` do `origin`
 (`git@personal:brz-anderson/brza-workspace.git`).
@@ -311,8 +311,8 @@ transcrição.
   não usa `date:` (`date-on-worklog`) e guarda `scope`, `tags` (quando houver), `refs:` (extraído automaticamente pelo
   `brza note commit` a partir de `PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>` e links relativos do corpo) e
   `sessions:` (as sessões que o commitaram, carimbadas pelo mesmo comando). Não ganha `opened` nem hora em
-  `completed`: a hora do fim está na `## Medida`.
-- **A `## Medida` é a última seção**, escrita pelo `brza note commit` e não à mão. Traz a medida acumulada da tarefa,
+  `completed`: a hora do fim está na `## Custo da tarefa`.
+- **A `## Custo da tarefa` é a última seção**, escrita pelo `brza note commit` e não à mão. Traz a medida acumulada da tarefa,
   todas as sessões e todos os trechos até o commit, com o turno em curso: o corrido, com o tempo do agente, o de
   Anderson e a pausa; o custo de API dos turnos e dos subagentes; a CPU e o RSS; os turnos e as sessões; e
   a hora do fim, no "até". Cada commit do worklog a reescreve. Sem sessão, a seção não é escrita. O

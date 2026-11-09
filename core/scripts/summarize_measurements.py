@@ -554,7 +554,7 @@ def to_json_facts(facts):
 # A tarefa é o worklog: o `brza note commit` grava um evento `task` por commit com worklog (D1), e cada um é um marco da
 # sessão. O segmento k de uma sessão são os turnos dela cujo começo (`timestamp − duration_s`) cai em
 # [marco k−1, marco k); depois do último marco, os turnos ficam "sem tarefa". O `brza-note` usa `task_segments` e
-# `task_measure` por `runpy`, para a `## Medida` do worklog e esta tabela darem o mesmo número.
+# `task_measure` por `runpy`, para a `## Custo da tarefa` do worklog e esta tabela darem o mesmo número.
 
 PAUSE_S = 1800  # a espera acima disto é pausa, e não tempo de quem pediu (PLN-012/R2.3)
 STALE_S = 2 * 3600  # a outra sessão do workstream parada há mais disto entra no aviso do --pending (R3.3)
@@ -864,7 +864,7 @@ def hm(seconds):
 
 
 def human_duration(seconds):
-    """Segundos abaixo de 1 min, minutos inteiros até 60 min, "1 h 12 min" acima (a forma da `## Medida`, D3)."""
+    """Segundos abaixo de 1 min, minutos inteiros até 60 min, "1 h 12 min" acima (a forma da `## Custo da tarefa`, D3)."""
     seconds = float(seconds or 0)
     if seconds < 59.5:
         return f"{round(seconds)} s"

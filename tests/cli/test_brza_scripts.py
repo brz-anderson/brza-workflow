@@ -469,7 +469,9 @@ class BrzaRunTest(unittest.TestCase):
         got = []
         argv = ['brza-run', '--chat', 'claude_x', '--', 'git', 'commit', '-m', 'a b']
         # o runpy devolve uma cópia dos globais: o main procura o run_in_chat nos dele
-        with patch.dict(RUN['main'].__globals__, {'run_in_chat': lambda command, chat: got.append((command, chat)) or 0}), \
+        # sem a BRZA_WORKSPACE: se o stub não pegar, o comando de verdade não grava `run` no log real (A1 do P7)
+        with no_workspace(), \
+                patch.dict(RUN['main'].__globals__, {'run_in_chat': lambda command, chat: got.append((command, chat)) or 0}), \
                 patch.object(sys, 'argv', argv), self.assertRaises(SystemExit) as done:
             RUN['main']()
         self.assertEqual((done.exception.code, got), (0, [("git commit -m 'a b'", 'claude_x')]))

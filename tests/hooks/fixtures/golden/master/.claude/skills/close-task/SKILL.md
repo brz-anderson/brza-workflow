@@ -45,7 +45,7 @@ não se aplica: o commit sai sem carimbo de sessão.
 
 ## 3. O worklog de hoje
 
-- **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois, acima da `## Medida` quando ela existe: o
+- **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois, acima da `## Custo da tarefa` quando ela existe: o
   que ficar abaixo dela se perde no commit seguinte.
 - **Não tem:** crie `work/worklogs/AAAA-MM-DD-assunto-em-kebab.md`, com `scope` no frontmatter e sem `status` nem `date`,
   na forma da seção `work/worklogs/` do `work/README.md`. Mudou o assunto, virou o dia ou houve decisão: é arquivo novo.
@@ -53,7 +53,7 @@ não se aplica: o commit sai sem carimbo de sessão.
   rodada), o que ficou aberto, e `## Fora do workspace` quando algo mudou fora dos dois repositórios. Cite no corpo os
   IDs (`PLN-NNN`, `REV-NNN`, `MIG-NNN`, `issue:<slug>`) ou links relativos das notas tocadas: o `brza note commit`
   extrai e preenche `refs:` no frontmatter do worklog automaticamente. Questão aberta não fica no worklog: vai ao passo 4.
-- **A `## Medida` não se escreve à mão:** o `brza note commit` a põe como última seção do worklog e a reescreve a cada
+- **A `## Custo da tarefa` não se escreve à mão:** o `brza note commit` a põe como última seção do worklog e a reescreve a cada
   commit dele.
 - **Depois de uma compactação**, escreva a partir do resumo que ela deixou no contexto, sem inventar o que ele não diz.
 
@@ -78,7 +78,7 @@ brza note commit <caminhos> -m "docs: <o que a tarefa fechou>"
 ```
 
 Os caminhos são o worklog, o plano ou a issue, e a memória. O comando atualiza o `refs:` dos worklogs pedidos, carimba
-neles o `sessions:` com a sessão, escreve a `## Medida` e grava o marco da tarefa na medição; recusa a
+neles o `sessions:` com a sessão, escreve a `## Custo da tarefa` e grava o marco da tarefa na medição; recusa a
 `master`, roda o checador antes e dá o push. Se o checador barrar, corrija e rode de novo; o
 `notes-checker` explica o erro.
 
