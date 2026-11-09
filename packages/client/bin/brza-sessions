@@ -10,11 +10,13 @@ Uso:
   brza sessions <nome> [--agent claude|codex|grok|antigravity|agy] [--checkout CAMINHO]
                 [--prompt TEXTO | --prompt-file ARQUIVO] [--model MODELO [--effort ESFORÇO]]
                 [--title TÍTULO] [--rename] [--wait] [--dry-run]
-  brza sessions list [--json]
+  brza sessions list [--prefix PREFIXO] [--json]
   brza sessions send <nome> <texto> [--json]
   brza sessions send [nomes...] [--prefix PREFIXO] (--text TEXTO | --file ARQUIVO) [--operation ID] [--json]
   brza sessions wait [nomes...] [--prefix PREFIXO] [--marker ARQUIVO:REGEX] [--any] [--timeout SEGUNDOS] [--json]
   brza sessions read <nome> --last [--json]
+  brza sessions model <nome> <modelo> [--effort ESFORÇO] [--json]
+  brza sessions usage [nomes...] [--prefix PREFIXO] [--json]
   brza sessions title <nome> <título> [--json]
   brza sessions close [nome] [--prefix PREFIXO] [--force | --keep-open] [--json]
 
@@ -24,7 +26,8 @@ recupera também mensagens já entregues ao chat e devolve events sem descartar 
 Sessão antiga sem Dispatch usa estado, updatedAt posterior ao envio e saída da fila como fallback.
 close de worker ativo pede worker_done e retorna closing; --force exige parada guardada confirmada e
 settlement antes de liberar. retained e resultados incertos jamais significam closed. O close legado
-mantém seus dois RPCs; --keep-open requer Dispatch. O --checkout relativo parte da raiz do workspace.
+mantém seus dois RPCs; --keep-open requer Dispatch. Claude é medido pelo hook, Codex pelo rollout só em
+tokens, Grok/Antigravity como unmeasured. O --checkout relativo parte da raiz do workspace.
 Saídas: 0 feito ou closing; 1 erro/recusa; 75 pending/unknown/timeout. O --wait de abertura conserva o
 contrato legado: erro 1 se o id do provedor ou o nome não aparecer no prazo.
 """
@@ -48,7 +51,7 @@ from brza_runtime import (WORKSPACE, BrzaError, NoWorkspace, brza, brza_root, ca
                           require_workspace, rpc, send_to_chat, user_data, mutation, new_operation)
 
 CHAT_COMMAND = 'claude-brza'
-VERBS = ('open', 'list', 'send', 'title', 'close', 'wait', 'read')
+VERBS = ('open', 'list', 'send', 'title', 'close', 'wait', 'read', 'model', 'usage')
 SESSION_MAP = WORKSPACE / '.sessions' / 'sessions.jsonl' if WORKSPACE else None  # sem workspace, sem mapa
 WAIT_SECONDS = 60.0
 
@@ -307,7 +310,7 @@ def chats() -> list[dict]:
 
 
 def public(chat: dict) -> dict:
-    return {k:v for k,v in chat.items() if k not in ('tab','agent','model','effort','dispatch','updated_at','last_latency_s','last_turn_at','auto_release_at')}
+    return {k: v for k, v in chat.items() if k != 'tab'}
 
 
 def find(name: str) -> dict:
@@ -323,14 +326,23 @@ def emit(as_json: bool, data: dict, line: str):
     print(json.dumps(data, ensure_ascii=False) if as_json else line)
 
 
-def list_command(args):
-    found=chats()
+def list_command(args) -> int:
+    found = [c for c in chats() if args.prefix is None or (c['name'] or '').startswith(args.prefix)]
+    for chat in found:
+        if chat.get('dispatch'):
+            try:
+                data=brza('orchestration','worker-show','--dispatch',chat['dispatch'],'--full')
+                chat['auto_release_at']=data.get('autoReleaseAt')
+            except BrzaError as error:
+                chat.update(auto_release_at=None,lifecycle_error=str(error))
     if args.json:
-        print(json.dumps({'sessions':[public(chat) for chat in found]},ensure_ascii=False))
-    else:
-        for chat in found:
-            print(f'{chat["name"] or "-":<24} {chat["state"] or "-":<9} {chat["chat"]}  {chat["worktree"]}  {chat["title"]}')
+        print(json.dumps({'sessions': [public(chat) for chat in found]}, ensure_ascii=False))
+        return 0
+    for chat in found:
+        print(f'{chat["name"] or "-":<24} {chat["state"] or "-":<9} {chat["chat"]}  {chat["worktree"]}  '
+              f'{chat["title"]}')
     return 0
+
 
 
 def title_command(args) -> int:
@@ -809,15 +821,59 @@ def codex_usage(sid):
             'turns': durations, 'error': error, 'error_at': error_at}
 
 
+def usage_command(args):
+    rows=[]
+    for chat in selected(args, include_released=True):
+        agent=chat.get('agent')
+        if agent == 'codex':
+            usage=codex_usage(chat.get('provider_session') or provider_session(chat['chat']))
+        elif agent == 'claude':
+            sid=chat.get('claude_session');turns=[]
+            if sid:
+                turns=[r for r in jsonl_rows(workspace_root()/'.measurements'/'measurements.jsonl')
+                       if r.get('event')=='turn' and r.get('session_id')==sid]
+            if not turns:
+                usage={'measured':False,'reason':'hook_turns_missing'}
+            else:
+                costs=[r.get('estimated_cost_usd') for r in turns]
+                tokens={}
+                for row in turns:
+                    for key,value in (row.get('tokens') or {}).items():
+                        if isinstance(value,(int,float)):
+                            tokens[key]=tokens.get(key,0)+value
+                usage={'measured':True,'cost_usd':None if None in costs else round(sum(costs),8),
+                       'tokens':tokens,'turns':len(turns),'duration_s':sum(r.get('duration_s') or 0 for r in turns)}
+        else:
+            usage={'measured':False,'reason':'unmeasured'}
+        rows.append({'name':chat['name'],'agent':agent,**usage})
+    emit(args.json,{'sessions':rows},'\n'.join(f'{r["name"]}: '+(str(r.get('cost_usd',r.get('tokens'))) if r['measured'] else r['reason']) for r in rows))
+    return 0
 
 
+def model_command(args):
+    chat=find(args.name)
+    for key,value in [('model',args.model),('effort',args.effort)]:
+        if value is None:
+            continue
+        page=rpc('agentSession.history',{'sessionId':chat['chat'],'direction':'tail','limit':1})['page']
+        result=rpc('agentSession.setOption',mutation('agentSession.setOption',chat['chat'],
+                   {'key':key,'value':value},page['fence'],new_operation()))
+        if result.get('ok') is not True:
+            emit(args.json,{'name':chat['name'],'changed':False,'key':key,'receipt':result},
+                 f'recusado: {chat["name"]} {key}: {json.dumps(result,ensure_ascii=False)}')
+            return 1
+        # Se effort for recusado, a troca de model já ocorreu: o mapa deve refletir essa mudança parcial.
+        record('model',chat=chat['chat'],name=chat['name'],**{key:value})
+    emit(args.json,{'name':chat['name'],'changed':True,'model':args.model,'effort':args.effort},
+         f'model: {chat["name"]} {args.model}')
+    return 0
 
 
 def by_name(argv):
     ap=argparse.ArgumentParser(prog='brza sessions')
     verbs=ap.add_subparsers(dest='verb',required=True)
-    listing=verbs.add_parser('list')
-    for verb in ('send','wait'):
+    listing=verbs.add_parser('list');listing.add_argument('--prefix')
+    for verb in ('send','wait','usage'):
         parser=verbs.add_parser(verb);parser.add_argument('names',nargs='*');parser.add_argument('--prefix')
         if verb=='send':
             group=parser.add_mutually_exclusive_group();group.add_argument('--text');group.add_argument('--file',type=Path)
@@ -826,6 +882,7 @@ def by_name(argv):
             parser.add_argument('--marker',action='append',default=[]);parser.add_argument('--any',action='store_true')
             parser.add_argument('--timeout',type=float,default=300)
     parser=verbs.add_parser('read');parser.add_argument('name');parser.add_argument('--last',action='store_true',required=True)
+    parser=verbs.add_parser('model');parser.add_argument('name');parser.add_argument('model');parser.add_argument('--effort')
     parser=verbs.add_parser('title');parser.add_argument('name');parser.add_argument('title')
     parser=verbs.add_parser('close');parser.add_argument('name',nargs='?');parser.add_argument('--prefix')
     flags=parser.add_mutually_exclusive_group();flags.add_argument('--force',action='store_true');flags.add_argument('--keep-open',action='store_true')
@@ -835,7 +892,7 @@ def by_name(argv):
         if args.verb=='wait' and (args.timeout<0 or not __import__('math').isfinite(args.timeout)):
             raise BrzaError('--timeout exige segundos finitos não negativos')
         return {'list':list_command,'send':send_command,'title':title_command,'close':close_command,
-                'wait':wait_command,'read':read_command}[args.verb](args)
+                'wait':wait_command,'read':read_command,'model':model_command,'usage':usage_command}[args.verb](args)
     except (BrzaError,OSError,ValueError) as error:
         emit(args.json,{'error':str(error)},f'CHECK:    {error}')
         return 1

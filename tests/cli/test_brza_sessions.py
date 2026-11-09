@@ -567,7 +567,8 @@ class CommandTest(unittest.TestCase):
                     'name': 'correcao', 'title': 'Correção', 'chat': chat, 'claude_session': None,
                     'provider_session': f'provider-{agent}',
                     'worktree': '/Users/x/brza-workspace', 'state': 'done', 'source': 'map',
-                    'opened': '2026-10-29T12:00:00-03:00',
+                    'opened': '2026-10-29T12:00:00-03:00', 'agent':agent,'model':None,'effort':None,
+                    'dispatch':None,'updated_at':None,'last_latency_s':None,'last_turn_at':None,
                 }]})
                 self.assertEqual(self.run_main('correcao', '--agent', agent), (0, 'running:  correcao\n'))
                 self.assertEqual({k:v for k,v in json.loads(self.run_main('send', 'correcao', 'oi', '--json')[1]).items() if k in ('sent','name','chat')},
@@ -973,11 +974,66 @@ class MeetingCommandsTest(unittest.TestCase):
         self.assertEqual(code,1,out);self.assertEqual(len(json.loads(out)['closed']),1)
         self.assertEqual(len(json.loads(out)['refused']),1)
 
+    def test_list_adds_metadata_without_removing_legacy_keys(self):
+        chat=self.mapped(model='gpt-6.1-sol',effort='high');self.sent(chat)
+        self.write_map({'event':'turn','chat':chat,'latency_s':3.25,'ended_at':'2026-01-01T12:00:04Z'})
+        code,out=self.run_main('list','--prefix','per','--json');self.assertEqual(code,0,out)
+        row=json.loads(out)['sessions'][0]
+        self.assertEqual((row['agent'],row['model'],row['effort'],row['last_latency_s']),('codex','gpt-6.1-sol','high',3.25))
+        self.assertIn('updated_at',row);self.assertIn('claude_session',row)
 
+    def test_model_sets_model_then_effort_with_host_fingerprint(self):
+        self.mapped()
+        with patch.object(sys.modules['brza_runtime'],'rpc',self.app.rpc):
+            code,out=self.run_main('model','persona','novo','--effort','high','--json')
+        self.assertEqual(code,0,out)
+        calls=self.calls('agentSession.setOption')
+        self.assertEqual([(c['key'],c['value']) for c in calls],[('model','novo'),('effort','high')])
+        for c in calls:
+            fields={'key':c['key'],'value':c['value']}
+            expected=GLOBALS['canonicalize']({'method':'agentSession.setOption','sessionId':'codex_persona','fields':fields})
+            self.assertEqual(c['envelope']['payloadFingerprint'],hashlib.sha256(expected.encode()).hexdigest())
+        self.assertEqual(self.read_map()[-1]['event'],'model')
 
+    def test_refused_model_records_nothing(self):
+        self.mapped();before=self.read_map()
+        base=self.app.rpc
+        def rpc(method,params=None):
+            return {'ok':False,'refusal':{'code':'unsupported'}} if method=='agentSession.setOption' else base(method,params)
+        with patch.dict(GLOBALS,{'rpc':rpc}):code,out=self.run_main('model','persona','novo','--json')
+        self.assertEqual(code,1,out);self.assertEqual(self.read_map(),before)
 
+    def test_usage_codex_ignores_info_null_and_returns_last_totals(self):
+        chat=self.mapped();self.write_map({'event':'session','chat':chat,'provider_session':'provider-1'})
+        home=self.config/'codex';home.mkdir()
+        rollout=home/'sessions'/'2026';rollout.mkdir(parents=True)
+        rows=[{'type':'event_msg','payload':{'type':'token_count','info':{'total_token_usage':{'input_tokens':10}}}},
+              {'type':'event_msg','payload':{'type':'token_count','info':None}},
+              {'type':'event_msg','payload':{'type':'token_count','info':{'total_token_usage':{'input_tokens':25,'cached_input_tokens':7,'output_tokens':4,'reasoning_output_tokens':2}}}}]
+        (rollout/'rollout-test-provider-1.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+        with patch.dict(os.environ,{'CODEX_HOME':str(home)}):code,out=self.run_main('usage','persona','--json')
+        self.assertEqual(code,0,out);r=json.loads(out)['sessions'][0]
+        self.assertEqual(r['tokens']['input_tokens'],25);self.assertNotIn('cost_usd',r)
 
+    def test_usage_claude_sums_only_hook_turns_of_the_session(self):
+        chat=self.mapped(agent='claude');self.app.providers[chat]='uuid-provider'
+        f=self.workspace/'.measurements'/'measurements.jsonl';f.parent.mkdir()
+        rows=[{'event':'turn','session_id':'uuid-provider','estimated_cost_usd':0.3,'tokens':{'input':10,'output':2}},
+              {'event':'run','session_id':'uuid-provider','estimated_cost_usd':9},
+              {'event':'turn','session_id':'other','estimated_cost_usd':9},
+              {'event':'turn','session_id':'uuid-provider','estimated_cost_usd':0.2,'tokens':{'input':4,'output':1}}]
+        f.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+        with patch.dict(GLOBALS,{'workspace_root':lambda *a:self.workspace}):
+            code,out=self.run_main('usage','persona','--json')
+        self.assertEqual(code,0,out)
+        row=json.loads(out)['sessions'][0];self.assertAlmostEqual(row['cost_usd'],0.5)
+        self.assertEqual(row['tokens']['input'],14)
 
+    def test_usage_grok_and_antigravity_are_unmeasured(self):
+        for agent in ['grok','antigravity']:
+            self.app.tabs=[];self.map.unlink(missing_ok=True);self.mapped(agent=agent)
+            code,out=self.run_main('usage','persona','--json');self.assertEqual(code,0,out)
+            row=json.loads(out)['sessions'][0];self.assertFalse(row['measured']);self.assertEqual(row['reason'],'unmeasured')
 
     def test_close_force_confirms_stop_and_settlement_before_release(self):
         self.mapped(dispatch='ctx_probe',state='working');self.orch_calls=[];stopped=False
@@ -1044,7 +1100,19 @@ class MeetingCommandsTest(unittest.TestCase):
             code,out=self.run_main('wait','persona','--timeout','0','--json')
         self.assertEqual(code,1,out);self.assertEqual(self.orch_calls,[])
 
+    def test_model_effort_refusal_preserves_the_model_that_was_applied(self):
+        chat=self.mapped();base=self.app.rpc
+        def rpc(method,params=None):
+            if method=='agentSession.setOption':return {'ok':params['key']=='model','refusal':{'code':'unsupported'}}
+            return base(method,params)
+        with patch.dict(GLOBALS,{'rpc':rpc}):code,out=self.run_main('model','persona','novo','--effort','bad','--json')
+        self.assertEqual(code,1,out);self.assertEqual(GLOBALS['session_map']()[chat]['model'],'novo')
+        self.assertIsNone(GLOBALS['session_map']()[chat]['effort'])
 
+    def test_usage_still_reads_the_worker_after_automatic_tab_release(self):
+        chat=self.mapped(agent='grok',dispatch='ctx_probe');self.app.tabs=[]
+        code,out=self.run_main('usage','persona','--json')
+        self.assertEqual(code,0,out);self.assertEqual(json.loads(out)['sessions'][0]['reason'],'unmeasured')
 
     def test_send_timeout_does_not_claim_rejection_or_success(self):
         self.mapped()
@@ -1124,6 +1192,12 @@ class MeetingCommandsTest(unittest.TestCase):
         self.assertEqual(code,1,out);self.assertEqual(json.loads(out)['done'][0]['outcome'],'failed')
         self.assertEqual(GLOBALS['session_map']()[chat]['provider_session'],'quota-provider')
 
+    def test_list_preserves_other_personas_when_a_dispatch_cannot_be_read(self):
+        self.mapped(dispatch='ctx_probe')
+        with patch.dict(GLOBALS,{'brza':lambda *a:(_ for _ in ()).throw(GLOBALS['BrzaError']('dispatch_not_found'))}):
+            code,out=self.run_main('list','--json')
+        self.assertEqual(code,0,out)
+        row=json.loads(out)['sessions'][0];self.assertIsNone(row['auto_release_at']);self.assertIn('dispatch_not_found',row['lifecycle_error'])
 
     def test_close_prefix_reports_the_first_success_and_the_second_refusal(self):
         self.app.tabs=[tab('codex_a','a'),tab('codex_b','b')]
@@ -1157,6 +1231,26 @@ class MeetingCommandsTest(unittest.TestCase):
         with patch.dict(GLOBALS,{'brza':brza}):code,out=self.run_main('close','persona','--json')
         self.assertEqual(code,75,out);self.assertFalse(json.loads(out)['closed'])
 
+    def test_open_without_wait_preserves_measured_provider_for_after_release(self):
+        for agent in ['claude','codex']:
+            self.map.unlink(missing_ok=True);self.app.tabs=[];self.app.providers={'codex_new':'persist-provider'}
+            home=self.config/('codex-'+agent);rollout=home/'sessions';rollout.mkdir(parents=True)
+            (rollout/'rollout-fixture-persist-provider.jsonl').write_text(json.dumps({'type':'event_msg','payload':{'type':'token_count',
+                'info':{'total_token_usage':{'input_tokens':123}}}})+'\n')
+            hook=self.workspace/'.measurements'/'measurements.jsonl';hook.parent.mkdir(exist_ok=True)
+            hook.write_text(json.dumps({'event':'turn','session_id':'persist-provider','estimated_cost_usd':0.3,
+                                       'tokens':{'input':123},'duration_s':1})+'\n')
+            with self.orchestration(),patch.dict(GLOBALS,{'running':lambda _:False}):
+                code,out=self.run_main('persist-'+agent,'--agent',agent)
+            self.assertEqual(code,0,out)
+            self.assertEqual(self.read_map()[0]['provider_session'],'persist-provider')
+            self.assertEqual(len([r for r in self.read_map() if r['event']=='session']),0)
+            def no_history(method,params=None):
+                if method=='agentSession.history':raise GLOBALS['BrzaError']('chat liberado')
+                return self.app.rpc(method,params)
+            with patch.dict(GLOBALS,{'rpc':no_history,'workspace_root':lambda *a:self.workspace}),patch.dict(os.environ,{'CODEX_HOME':str(home)}):
+                code,out=self.run_main('usage','persist-'+agent,'--json')
+            self.assertEqual(code,0,out);self.assertTrue(json.loads(out)['sessions'][0]['measured'])
 
     def test_open_rechecks_the_name_under_the_launch_lock(self):
         answers=iter([False,True])
