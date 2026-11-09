@@ -8,6 +8,7 @@ import io
 import json
 import os
 import runpy
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -260,6 +261,26 @@ def quiet_terminal(temp):
         os.close(devnull)
 
 
+@contextlib.contextmanager
+def no_workspace():
+    """Sem a BRZA_WORKSPACE de quem roda o teste: a linha `run` não vai ao workspace real."""
+    with patch.dict(os.environ):
+        os.environ.pop('BRZA_WORKSPACE', None)
+        yield
+
+
+def fake_workspace(base: Path) -> Path:
+    """Um workspace mínimo, com o manifesto, para a BRZA_WORKSPACE apontar."""
+    (base / '.brza').mkdir(parents=True)
+    (base / '.brza' / 'workspace.toml').write_text('schema = 1\n')
+    return base
+
+
+def measured(workspace: Path) -> list[dict]:
+    log = workspace / '.measurements' / 'measurements.jsonl'
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
 class BrzaRunTest(unittest.TestCase):
     def test_clean_strips_color_and_rewritten_lines(self):
         raw = b'\x1b[32mok\x1b[0m\r\n10%\r50%\r100%\r\n\x1b]0;titulo\x07\x1b>\x1b(Bfim\r\n'
@@ -305,8 +326,9 @@ class BrzaRunTest(unittest.TestCase):
             calls.append((method, params))
             return {'page': {'fence': 7}} if method == 'agentSession.history' else {}
 
-        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp), \
-                patch.object(RUN['runtime'], 'rpc', rpc), contextlib.redirect_stdout(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, no_workspace(), quiet_terminal(temp), \
+                patch.object(RUN['runtime'], 'rpc', rpc), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
             code = RUN['run_in_chat']("printf 'um\\ndois\\n'; exit 3", 'claude_x')
         self.assertEqual(code, 3)
         method, params = calls[1]
@@ -314,20 +336,34 @@ class BrzaRunTest(unittest.TestCase):
         self.assertEqual(params['body']['blocks'][0]['text'],
                          "Rodei pelo ▶:\n\n```bash\nprintf 'um\\ndois\\n'; exit 3\n```\n```\num\ndois\n```\nSaiu com 3.")
 
-    def tab_run(self, command):
+    def tab_run(self, command, env=None, result=None, cwd=HERE):
+        """O `brza run -- <comando>` com a aba de mentira: ela roda o --command na hora, ou, com `result`, só grava o
+        result.json e o output.log de fixture. O ambiente vem sem a BRZA_WORKSPACE, a menos que `env` a traga, para
+        nada gravar no workspace de quem roda o teste."""
         calls = []
 
         def brza(*args):
             calls.append(args)
             if args[:2] == ('terminal', 'create'):
-                # a aba do app digita o --command num shell: aqui ele roda na hora
-                subprocess.run(['/bin/sh', '-c', args[args.index('--command') + 1]], capture_output=True)
+                inner = args[args.index('--command') + 1]
+                if result is None:
+                    # a aba do app digita o --command num shell: aqui ele roda na hora
+                    subprocess.run(['/bin/sh', '-c', inner], capture_output=True)
+                else:
+                    words = shlex.split(inner)
+                    path = Path(words[words.index('--result') + 1])
+                    (path.parent / 'output.log').write_text(result.pop('output', ''))
+                    path.write_text(json.dumps(result))
             return {'terminal': {'handle': 'term-1'}} if args[1] == 'create' else {'terminals': []}
 
-        out = io.StringIO()
-        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp), \
-                patch.object(RUN['runtime'], 'brza', brza), contextlib.redirect_stdout(out):
-            code = RUN['run_in_tab'](command, HERE, poll=0)
+        out, err = io.StringIO(), io.StringIO()
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ('BRZA_WORKSPACE', 'CLAUDE_CODE_SESSION_ID', 'ORCA_AGENT_SESSION_ID')}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {**clean, **(env or {})}, clear=True), \
+                quiet_terminal(temp), patch.object(RUN['runtime'], 'brza', brza), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = RUN['run_in_tab'](command, cwd, poll=0)
+        self.last_stderr = err.getvalue()
         return code, calls, out.getvalue()
 
     def test_tab_mode_prints_blocks_and_closes_on_success(self):
@@ -345,6 +381,184 @@ class BrzaRunTest(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertTrue(out.endswith('Saiu com 4.\n'))
         self.assertNotIn('close', [c[1] for c in calls])
+
+    # D5 — o brza run mede
+
+    def test_run_here_measures_the_duration_the_cpu_and_the_peak_of_the_command(self):
+        burn = (f"{shlex.quote(sys.executable)} -c 'x = bytearray(80 * 2**20); "
+                "import time; t = time.process_time()\nwhile time.process_time() - t < 0.3: pass'")
+        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp):
+            code, output, metrics = RUN['run_here'](burn, Path(temp))
+        self.assertEqual((code, output.strip()), (0, ''))
+        self.assertEqual(set(metrics), {'duration_s', 'cpu_s', 'max_rss_mb'})
+        self.assertGreater(metrics['duration_s'], 0.3)
+        self.assertGreaterEqual(metrics['cpu_s'], 0.25)
+        self.assertGreaterEqual(metrics['max_rss_mb'], 80)  # o ru_maxrss é bytes no macOS, KB no Linux
+        self.assertLess(metrics['max_rss_mb'], 4096)
+
+    def test_run_for_result_keeps_the_code_and_adds_the_metrics(self):
+        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp):
+            result = Path(temp) / 'result.json'
+            code = RUN['run_for_result']('exit 5', result)
+            saved = json.loads(result.read_text())
+        self.assertEqual((code, saved['code']), (5, 5))
+        self.assertEqual(list(saved), ['code', 'duration_s', 'cpu_s', 'max_rss_mb'])
+        self.assertGreater(saved['duration_s'], 0)
+
+    def test_tab_mode_writes_the_run_line_with_the_session_of_the_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp) / 'ws')
+            long = ['pnpm', 'test', 'x' * 300]
+            code, calls, out = self.tab_run(long, env={'BRZA_WORKSPACE': str(ws), 'CLAUDE_CODE_SESSION_ID': 'sess-1'},
+                                            result={'code': 0, 'duration_s': 312.4, 'cpu_s': 845.2, 'max_rss_mb': 1840,
+                                                    'output': 'ok\n'})
+            lines = measured(ws)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"```bash\n{' '.join(long)}\n```\n```\nok\n```\nSaiu com 0.\n")
+        self.assertEqual(calls[-1], ('terminal', 'close', '--terminal', 'term-1'))
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        self.assertEqual(list(line), ['event', 'timestamp', 'session_id', 'chat_id', 'mode', 'cwd', 'workstream',
+                                      'command', 'code', 'duration_s', 'cpu_s', 'max_rss_mb'])
+        self.assertEqual({k: line[k] for k in ('event', 'session_id', 'chat_id', 'mode', 'cwd', 'code', 'duration_s',
+                                               'cpu_s', 'max_rss_mb')},
+                         {'event': 'run', 'session_id': 'sess-1', 'chat_id': None, 'mode': 'tab', 'cwd': str(HERE),
+                          'code': 0, 'duration_s': 312.4, 'cpu_s': 845.2, 'max_rss_mb': 1840})
+        self.assertEqual(line['command'], ' '.join(long)[:200])
+        self.assertRegex(line['timestamp'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$')
+
+    def test_tab_mode_measures_the_real_command_and_keeps_the_tab_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp) / 'ws')
+            code, calls, out = self.tab_run(['exit 4'], env={'BRZA_WORKSPACE': str(ws)})
+            lines = measured(ws)
+        self.assertEqual(code, 4)
+        self.assertTrue(out.endswith('Saiu com 4.\n'))
+        self.assertNotIn('close', [c[1] for c in calls])
+        self.assertEqual([(l['code'], l['session_id'], l['mode']) for l in lines], [(4, None, 'tab')])
+        self.assertGreater(lines[0]['duration_s'], 0)
+
+    def test_the_line_carries_the_workstream_of_the_cwd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp).resolve() / 'ws')
+            git('-C', str(ws), 'init', '-q', '-b', 'workstream/demo')
+            git('-C', str(ws), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x')
+            self.tab_run(['true'], env={'BRZA_WORKSPACE': str(ws)}, cwd=ws)
+            lines = measured(ws)
+        self.assertEqual([(l['workstream'], l['cwd']) for l in lines], [('demo', str(ws))])
+        self.assertGreater(lines[0]['duration_s'], 0)
+        for key in ('cpu_s', 'max_rss_mb'):
+            self.assertIsInstance(lines[0][key], (int, float))
+            self.assertGreaterEqual(lines[0][key], 0)
+
+    def test_without_a_workspace_there_is_no_line_and_a_warning_on_stderr(self):
+        code, calls, out = self.tab_run(['echo', 'oi'], env={'CLAUDE_CODE_SESSION_ID': 'sess-1'})
+        self.assertEqual(code, 0)
+        self.assertEqual(out, '```bash\necho oi\n```\n```\noi\n```\nSaiu com 0.\n')
+        self.assertEqual(calls[-1], ('terminal', 'close', '--terminal', 'term-1'))
+        self.assertIn('brza-run: sem workspace', self.last_stderr)
+
+    def test_an_unwritable_log_warns_and_changes_nothing_else(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp) / 'ws')
+            (ws / '.measurements').write_text('não é pasta')
+            code, calls, out = self.tab_run(['echo', 'oi'], env={'BRZA_WORKSPACE': str(ws)})
+        self.assertEqual((code, out), (0, '```bash\necho oi\n```\n```\noi\n```\nSaiu com 0.\n'))
+        self.assertEqual(calls[-1], ('terminal', 'close', '--terminal', 'term-1'))
+        self.assertIn('brza-run: não gravei a medida', self.last_stderr)
+
+    def chat_run(self, provider):
+        calls = []
+
+        def rpc(method, params):
+            calls.append((method, params))
+            if method == 'agentSession.history':
+                if provider is None and any(c[0] == 'agentSession.send' for c in calls):
+                    return None
+                if provider is OSError:
+                    raise RUN['runtime'].BrzaError('o runtime não respondeu')
+                return {'page': {'fence': 7}, 'providerSession': provider}
+            return {}
+
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp) / 'ws')
+            with patch.dict(os.environ, {'BRZA_WORKSPACE': str(ws)}), quiet_terminal(temp), \
+                    patch.object(RUN['runtime'], 'rpc', rpc), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = RUN['run_in_chat']('exit 2', 'claude_x')
+            return code, measured(ws)
+
+    def test_chat_mode_writes_the_line_with_the_chat_and_its_provider_session(self):
+        code, lines = self.chat_run({'id': 'sess-9'})
+        self.assertEqual(code, 2)
+        self.assertEqual([(l['event'], l['mode'], l['chat_id'], l['session_id'], l['code']) for l in lines],
+                         [('run', 'chat', 'claude_x', 'sess-9', 2)])
+        self.assertEqual(set(lines[0]) >= {'duration_s', 'cpu_s', 'max_rss_mb'}, True)
+
+    def test_chat_mode_without_the_app_writes_a_null_session(self):
+        code, lines = self.chat_run(OSError)
+        self.assertEqual(code, 2)
+        self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
+
+    def test_chat_mode_with_a_null_rpc_result_still_writes_the_line_and_returns_the_code(self):
+        code, lines = self.chat_run(None)
+        self.assertEqual(code, 2)
+        self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
+
+    def test_chat_mode_without_a_workspace_warns_and_writes_nothing(self):
+        def rpc(method, params):
+            return {'page': {'fence': 7}, 'providerSession': {'id': 'sess-9'}} if method == 'agentSession.history' else {}
+
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp:
+            before = os.getcwd()
+            os.chdir(temp)
+            self.addCleanup(os.chdir, before)
+            with no_workspace(), quiet_terminal(temp), patch.object(RUN['runtime'], 'rpc', rpc), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = RUN['run_in_chat']('exit 2', 'claude_x')
+            os.chdir(before)
+            self.assertEqual(code, 2)
+            self.assertIn('brza-run: sem workspace', err.getvalue())
+            self.assertEqual(list(Path(temp).rglob('.measurements')), [])
+
+    def test_chat_mode_keeps_the_line_when_the_command_removes_its_own_cwd(self):
+        before = os.getcwd()
+        self.addCleanup(os.chdir, before)
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp).resolve() / 'ws')
+            gone = Path(temp).resolve() / 'gone'
+            gone.mkdir()
+            os.chdir(gone)
+            with patch.dict(os.environ, {'BRZA_WORKSPACE': str(ws)}), quiet_terminal(temp), \
+                    patch.object(RUN['runtime'], 'rpc', lambda method, params: {'page': {'fence': 7}}), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = RUN['run_in_chat'](f'rmdir {shlex.quote(str(gone))}; exit 3', 'claude_x')
+            os.chdir(before)
+            lines = measured(ws)
+        self.assertEqual(code, 3)
+        self.assertEqual([l['code'] for l in lines], [3])
+
+    def test_chat_mode_survives_an_rpc_that_raises_key_error(self):
+        def rpc(method, params):
+            raise KeyError('authToken')
+
+        with tempfile.TemporaryDirectory() as temp:
+            ws = fake_workspace(Path(temp) / 'ws')
+            with patch.dict(os.environ, {'BRZA_WORKSPACE': str(ws)}), quiet_terminal(temp), \
+                    patch.object(RUN['runtime'], 'rpc', rpc), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = RUN['run_in_chat']('exit 2', 'claude_x')
+            lines = measured(ws)
+        self.assertEqual(code, 2)
+        self.assertEqual([(l['chat_id'], l['session_id']) for l in lines], [('claude_x', None)])
+
+    def test_the_cpu_is_the_difference_around_the_command(self):
+        subprocess.run([sys.executable, '-c', 'import time\nwhile time.process_time() < 1.0: pass'], check=True)
+        with tempfile.TemporaryDirectory() as temp, quiet_terminal(temp):
+            code, _, metrics = RUN['run_here']('true', Path(temp))
+        self.assertEqual(code, 0)
+        self.assertLess(metrics['cpu_s'], 0.5)
 
 
 if __name__ == '__main__':

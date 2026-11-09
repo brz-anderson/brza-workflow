@@ -75,6 +75,7 @@ def main():
         fails += check_workstream_links()
         fails += check_pln008_p1()
         fails += check_pln008_p8()
+        fails += check_pln012_p5()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(1 if fails else 0)
@@ -846,6 +847,87 @@ def check_pln008_p8():
                not any(r == "unknown-ref-mention" for r, _ in warnings), sorted(warnings))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    return fails
+
+
+def read_core(*parts):
+    with open(os.path.join(os.path.dirname(SCRIPTS_DIR), "..", "..", "..", *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+def check_pln012_p5():
+    """P5 do PLN-012: o worklog com `sessions:` e a `## Medida`, que o `brza note commit` escreve, passa sem aviso (D3);
+    a norma, a skill `close-task` e o adaptador do Claude Code dizem o carimbo, a seção, o aviso e os eventos (D3, D6)."""
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    fails = 0
+
+    def expect(label, ok, detail=""):
+        nonlocal fails
+        print(("  ok  " if ok else "FALHA ") + label + ("" if ok else f": {detail}"))
+        fails += not ok
+
+    worklog = "work/worklogs/2026-11-03-medida.md"
+    antigo = "work/worklogs/2026-11-02-sem-medida.md"
+    notes = {
+        "work/README.md": "# Norma\n",
+        "work/issues/medida-alvo.md": "---\nstatus: open\nopened: 2026-11-03\ndescription: A medida.\n---\n"
+                                      "# A medida\n",
+        worklog: "---\nscope:\n  - workspace\nrefs:\n  - issue:medida-alvo\nsessions:\n"
+                 "  - 08e6c812-8bb3-42fc-a47f-403fdb472ccd\n  - 4a578e01-1c2d-4e5f-8a9b-0c1d2e3f4a5b\n---\n\n"
+                 "# A medida\n\nFechou a [medida](../issues/medida-alvo.md).\n\n## Medida\n\n"
+                 "Corrido 18 min — agente 7 min, Anderson 10 min, pausa 0 · US$ 2,35 (turnos 2,35, subagentes 0,00) · "
+                 "CPU 0,8 s do\n`claude` e 6,1 s dos comandos, RSS até 357 MB · 1 turno, 1 sessão · `brza run`: 2 "
+                 "comandos, CPU 14 min, pico 1,8 GB · até 22:16 de 2026-11-03, pelo `brza note commit`\n",
+        antigo: "---\nscope:\n  - workspace\nrefs:\n  - issue:medida-alvo\n---\n\n# Sem medida\n\nA [medida](../issues/medida-alvo.md) antes do carimbo.\n",
+    }
+    try:
+        write_notes(tmp, notes)
+        exit_code, stdout = run_checker("--root", tmp, "--json")
+        out = json.loads(stdout)
+        found = [(r, w, t) for r, w, t in out["errors"] + out["warnings"] if w in (worklog, antigo)]
+        expect("o worklog com sessions: e ## Medida passa sem erro nem aviso", not found and exit_code == 0,
+               (exit_code, found))
+        expect("o worklog antigo, sem sessions: nem ## Medida, também passa", not any(w == antigo for _, w, _ in found))
+        full = os.path.join(tmp, worklog)
+        refs_out, unk_out = cn.extract_worklog_refs(open(full, encoding="utf-8").read(), full, tmp)
+        expect("a ## Medida não põe nada no refs nem gera aviso de ID", refs_out == ["issue:medida-alvo"] and unk_out == [],
+               (refs_out, unk_out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # A norma (D3): a linha sessions na tabela, e o sessions: e a ## Medida na seção work/worklogs/
+    norm = read_core("work", "README.md")
+    table = [line for line in norm.splitlines() if line.startswith("| `sessions` |")]
+    expect("a tabela de propriedades tem a linha sessions, mantida pelo brza note commit",
+           len(table) == 1 and "`brza note commit`" in table[0] and "sessões" in table[0], table)
+    worklogs = norm.split("### `work/worklogs/`", 1)[-1].split("\n### ", 1)[0]
+    expect("a seção work/worklogs/ diz o sessions: no frontmatter", "`sessions:`" in worklogs)
+    expect("a seção work/worklogs/ diz a ## Medida como última seção, escrita pelo comando e não à mão",
+           "`## Medida`" in worklogs and "última seção" in worklogs and "não à mão" in worklogs)
+    expect("a seção work/worklogs/ diz que o worklog não ganha opened nem hora em completed (R3.2)",
+           "`opened`" in worklogs and "`completed`" in worklogs)
+
+    # A skill (D6): o passo 2 novo, os seguintes renumerados de 3 a 7, e o --until no Commitar
+    skill = read_core(".claude", "skills", "close-task", "SKILL.md")
+    heads = re.findall(r"^## (\d+)\. (.+)$", skill, re.M)
+    expect("o close-task tem os passos 1 a 7, com o 2 'O que o commit vai fechar'",
+           [n for n, _ in heads] == [str(i) for i in range(1, 8)] and heads[1][1] == "O que o commit vai fechar"
+           and heads[2][1] == "O worklog de hoje", heads)
+    pending = skill.split("## 2. O que o commit vai fechar", 1)[-1].split("\n## 3.", 1)[0]
+    expect("o passo 2 roda o --by-task --pending --session da sessão",
+           'summarize_measurements.py --by-task --pending --session "$CLAUDE_CODE_SESSION_ID"' in pending)
+    expect("o passo 2 manda fechar a tarefa mais antiga com --until", "--until" in pending)
+    commit = skill.split("## 6. Commitar", 1)[-1].split("\n## 7.", 1)[0]
+    expect("o Commitar cita o --until", "--until" in commit and "`sessions:`" in commit, commit[:200])
+    expect("as referências internas aos passos seguem a renumeração",
+           "vai ao passo 4" in skill and "do passo 1" in skill and "vai ao passo 3" not in skill)
+
+    # O adaptador do Claude Code: os eventos task e run e o --by-task
+    claude = read_core("CLAUDE.md")
+    hook = claude.split("## O hook de medição", 1)[-1].split("\n## ", 1)[0]
+    expect("a tabela do hook de medição tem os eventos task e run",
+           re.search(r"^\| `task` +\|", hook, re.M) is not None and re.search(r"^\| `run` +\|", hook, re.M) is not None)
+    expect("o resumo cita o --by-task e o --pending", "--by-task" in hook and "--pending" in hook)
     return fails
 
 

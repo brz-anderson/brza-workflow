@@ -10,7 +10,11 @@ Um modo por evento do Claude Code, no primeiro argumento:
 - `skill` (PostToolUse, matcher Skill): a skill que o modelo invocou e o momento — o começo da janela.
 - `command` (UserPromptExpansion): a skill ou o comando digitado como `/nome`, que não passa pela ferramenta Skill.
 - `turn` (Stop): o turno da sessão principal, medido como o subagente, com as skills e os agentes que rodaram nele. É
-  o que fecha a janela da skill na sessão principal.
+  o que fecha a janela da skill na sessão principal. Leva também `waits_s` (as esperas de quem pediu dentro do turno: a
+  de cada pergunta com opções e a do pedido que segue um turno interrompido), `prompt_head` (os 80 primeiros
+  caracteres do pedido) e `machine` (a CPU do `claude` e dos filhos colhidos desde o último turno do mesmo pid, e o RSS,
+  pelo `proc_pid_rusage`; null fora do macOS ou quando a leitura falha). A marca da CPU fica no `state.json`, em
+  `machine:<pid>`.
 - `failure` (StopFailure): o turno que acabou em erro de API, como o limite de uso (`rate_limit`, o 429).
 - `mcp` (PostToolUse e PostToolUseFailure, matcher mcp__.*): a duração e o servidor de cada chamada MCP.
 - `memory` (junto do `Stop` e do `SubagentStop`, sem modo próprio): um evento por arquivo de memória criado, editado ou
@@ -312,6 +316,54 @@ def count_rounds(asked, entry_answers):
     return counts
 
 
+def seconds_between(earlier, later):
+    """Os segundos entre dois `timestamp` do transcript, ou None se um falta ou não se lê."""
+    try:
+        t0 = datetime.fromisoformat(earlier.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(later.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return (t1 - t0).total_seconds()
+
+
+# O que chega como mensagem do usuário sem ser pedido de quem pediu: a saída de um comando local, a marca da interrupção,
+# o aviso de tarefa em segundo plano, que o Claude Code entrega como prompt, o `<system-reminder>` e a saída do modo `!`
+# (`<bash-stdout>`, `<bash-stderr>`). O `<bash-input>` é ação de quem pediu e fica como pedido.
+NOT_A_REQUEST = ("<local-command-stdout>", "<local-command-stderr>", "[Request interrupted by user",
+                 "<task-notification>", "<system-reminder>", "<bash-stdout>", "<bash-stderr>")
+COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.S)
+COMMAND_LINE = re.compile(r"\s*(?:<command-message>.*?</command-message>\s*)?<command-name>", re.S)
+BASH_INPUT = re.compile(r"\s*<bash-input>(.*?)</bash-input>", re.S)
+COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+HEAD_CHARS = 80
+
+
+def request_text(e, kind, msg):
+    """O texto do pedido de quem pediu nesta linha, ou None se ela não é um: a linha `isMeta` (o aviso do comando local,
+    a expansão da skill), o resumo da compactação, o resultado de ferramenta, a saída de comando, a interrupção e o
+    aviso de tarefa."""
+    if kind != "user" or e.get("isMeta") or e.get("isCompactSummary") or only_tool_results(msg.get("content")):
+        return None
+    origin = e.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
+        return None
+    text = text_of(msg.get("content")).strip()
+    return None if text.startswith(NOT_A_REQUEST) else text
+
+
+def head_of(text):
+    """Os primeiros 80 caracteres do pedido, numa linha só. O comando digitado (`/rename x`) sai pelo nome e os
+    argumentos, e não pelas marcas `<command-name>` que o transcript grava; o do modo `!`, como `! comando`."""
+    bash = BASH_INPUT.match(text)
+    if bash:
+        text = f"! {bash.group(1).strip()}"
+    name = COMMAND_NAME.search(text) if COMMAND_LINE.match(text) else None
+    if name:
+        args = COMMAND_ARGS.search(text)
+        text = f"{name.group(1).strip()} {args.group(1).strip() if args else ''}"
+    return re.sub(r"\s*[\r\n]+\s*", " ", text.strip())[:HEAD_CHARS]
+
+
 def measure(lines):
     usage = {}  # requestId → maior valor visto de cada campo (a mensagem chega em pedaços)
     # requestId → modelo que atendeu o pedido. O turno pode trocar de modelo no meio (o /model, ou a troca automática
@@ -326,6 +378,11 @@ def measure(lines):
     # tool_result que fechou a execução anterior e registros de sistema com o horário dela; contá-los poria a espera
     # entre as duas na duração.
     opened = False
+    # As esperas de quem pediu dentro do trecho (D2 do PLN-012): a de cada pergunta com opções, do `tool_use` ao
+    # `tool_result`, e a de cada pedido depois do primeiro, desde a linha anterior da conversa. Só `user` e `assistant`
+    # contam como linha anterior: a fila (`queue-operation`) e o hook do pedido têm o horário do próprio pedido.
+    waits, asked_at, requests, last_talk = [], {}, 0, None
+    head = command_head = None
     for raw in lines:
         try:
             e = json.loads(raw)
@@ -341,6 +398,25 @@ def measure(lines):
         if ts and opened:
             start = start or ts
             end = ts
+        text = request_text(e, kind, msg)
+        if text is not None:
+            requests += 1
+            if requests > 1 and last_talk and ts:
+                # A espera não começa antes do relógio do trecho: o caveat e o `<bash-input>` vêm com data fora de ordem.
+                begin = last_talk
+                if start and (seconds_between(last_talk, start) or 0) > 0:
+                    begin = start
+                waits.append(seconds_between(begin, ts))
+            if COMMAND_LINE.match(text) or BASH_INPUT.match(text):
+                command_head = command_head or head_of(text)
+            elif head is None and text:
+                head = head_of(text)
+        if kind == "user":
+            for b in msg.get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in asked_at:
+                    waits.append(seconds_between(asked_at.pop(b["tool_use_id"]), ts))
+        if kind in ("user", "assistant") and ts and not e.get("isMeta"):
+            last_talk = ts  # o caveat `isMeta` vem com a data do comando que ele antecede, e não é fala
         if kind == "assistant":
             if msg.get("model") != "<synthetic>":  # a mensagem de erro que o próprio Claude Code escreve
                 model = msg.get("model") or model
@@ -370,6 +446,7 @@ def measure(lines):
                         agents.append(entry.get("subagent_type") or "general-purpose")
                     elif b.get("name") == "AskUserQuestion":
                         asked[b.get("id")] = entry
+                        asked_at[b.get("id")] = ts
         elif kind == "user":
             blocks = [b for b in msg.get("content") or [] if isinstance(b, dict) and b.get("type") == "tool_result"]
             for b in blocks:
@@ -424,7 +501,10 @@ def measure(lines):
                        for m, v in by_model.items()}} if len(by_model) > 1 else {}),
         "denials": len(denials),
         "denial_reasons": denials,
-    }, {"prompts": prompts, "skills": skills, "agents": agents, "rounds": rounds}
+    }, {"prompts": prompts, "skills": skills, "agents": agents, "rounds": rounds,
+        # A espera que arredonda a zero (o pedido colado no `/rename` que o abriu) não é espera.
+        "waits_s": [round(w) for w in waits if w is not None and round(w) > 0],
+        "prompt_head": head or command_head}
 
 
 def effort_of(p):
@@ -503,10 +583,101 @@ def command(p):
            "expansion_type": p.get("expansion_type"), "plugin_version": plugin_version(name, p.get("cwd"))})
 
 
+CLAUDE_EXECUTABLE = "claude"
+PARENT_LEVELS = 6
+
+
+def ps_entry(pid):
+    """(ppid, executável) do processo, pelo `ps`. Levanta se o `ps` falha ou não acha o processo."""
+    done = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
+    ppid, _, comm = done.stdout.strip().partition(" ")
+    if done.returncode != 0 or not ppid.isdigit():
+        raise OSError(f"ps sem o processo {pid}")
+    return int(ppid), comm.strip()
+
+
+def claude_pid():
+    """(pid, origem) do `claude` da sessão: a `CLAUDE_PID` (`env`) e, sem ela, o primeiro processo acima do hook cujo
+    executável se chama `claude`, subindo os `ppid` no máximo 6 níveis (`ppid`). (None, None) se não acha ou o `ps`
+    falha: o hook mede, e nunca quebra por causa da máquina."""
+    try:
+        env = (os.environ.get("CLAUDE_PID") or "").strip()
+        if env.isdigit() and int(env) > 1:
+            return int(env), "env"
+        pid = os.getppid()
+        for _ in range(PARENT_LEVELS):
+            if pid <= 1:
+                break
+            ppid, comm = ps_entry(pid)
+            if os.path.basename(comm) == CLAUDE_EXECUTABLE:
+                return pid, "ppid"
+            pid = ppid
+    except Exception:
+        pass
+    return None, None
+
+
+RUSAGE_INFO_V4 = 4
+
+
+def proc_pid_rusage(pid):
+    """A CPU (a do processo e a dos filhos e netos já colhidos, em segundos), o RSS e o footprint (em bytes) e o começo
+    do processo (em unidade da máquina, só para comparar), pelo `proc_pid_rusage(pid, RUSAGE_INFO_V4)` da `libproc`.
+    Os tempos vêm em unidade do `mach_timebase_info`. Levanta fora do macOS e quando a leitura falha."""
+    import ctypes
+
+    class Timebase(ctypes.Structure):
+        _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+    class RusageInfoV4(ctypes.Structure):  # o começo do `struct rusage_info_v4` de <sys/resource.h>
+        _fields_ = [("ri_uuid", ctypes.c_uint8 * 16)] + [(name, ctypes.c_uint64) for name in (
+            "ri_user_time", "ri_system_time", "ri_pkg_idle_wkups", "ri_interrupt_wkups", "ri_pageins",
+            "ri_wired_size", "ri_resident_size", "ri_phys_footprint", "ri_proc_start_abstime",
+            "ri_proc_exit_abstime", "ri_child_user_time", "ri_child_system_time")] + [
+            ("_rest", ctypes.c_uint64 * 64)]  # o resto do struct, com folga: a chamada escreve o tamanho inteiro
+
+    if sys.platform != "darwin":
+        raise OSError("proc_pid_rusage só existe no macOS")
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    timebase = Timebase()
+    if libc.mach_timebase_info(ctypes.byref(timebase)) != 0 or not timebase.denom:
+        raise OSError("mach_timebase_info falhou")
+    info = RusageInfoV4()
+    libc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    if libc.proc_pid_rusage(int(pid), RUSAGE_INFO_V4, ctypes.byref(info)) != 0:
+        raise OSError(ctypes.get_errno(), f"proc_pid_rusage({pid}) falhou")
+    scale = timebase.numer / timebase.denom / 1e9
+    return {"cpu_self_s": (info.ri_user_time + info.ri_system_time) * scale,
+            "cpu_children_s": (info.ri_child_user_time + info.ri_child_system_time) * scale,
+            "rss_bytes": info.ri_resident_size, "footprint_bytes": info.ri_phys_footprint,
+            "start": info.ri_proc_start_abstime}
+
+
+def machine_of(pid, origin, last):
+    """(machine, marca) do turno: a CPU do `claude` desde `last` — a marca `machine:<pid>` do `state.json` —, e o RSS e
+    o footprint no fim do turno. Sem marca, ou com a de outro processo que teve o mesmo pid, mede desde o começo do
+    processo. A marca nova guarda o começo e a CPU acumulada. Levanta quando a leitura falha; o `brza note commit` a
+    chama para o turno em curso sem gravar a marca."""
+    r = proc_pid_rusage(pid)
+    base = last if isinstance(last, dict) and last.get("start") == r["start"] else {}
+
+    def delta(key):
+        d = r[key] - (base.get(key) or 0)
+        return round(max(d, 0.0), 2)  # o mesmo processo não gasta CPU negativa: é só a folga do float
+
+    machine = {"pid": pid, "from": origin, "cpu_self_s": delta("cpu_self_s"),
+               "cpu_children_s": delta("cpu_children_s"),
+               "rss_mb": round(r["rss_bytes"] / 2 ** 20), "footprint_mb": round(r["footprint_bytes"] / 2 ** 20)}
+    return machine, {"start": r["start"], "cpu_self_s": r["cpu_self_s"],
+                     "cpu_children_s": r["cpu_children_s"]}
+
+
 def turn(p):
     path = p.get("transcript_path")
     if not path or not os.path.exists(path):
         return
+    pid, origin = claude_pid()  # fora da trava: o `ps` pode subir até 6 níveis
+    machine = None
     with State() as state:
         offset = state.data.get(path, 0)
         lines, end = read_from(path, offset)
@@ -514,6 +685,11 @@ def turn(p):
         if not measured["api_calls"]:
             return  # turno sem chamada ao modelo (comando local, /clear): fica para o próximo, sem avançar a leitura
         state.data[path] = end
+        if pid:
+            try:  # a leitura que falha deixa a máquina nula, e a linha sai como antes
+                machine, state.data[f"machine:{pid}"] = machine_of(pid, origin, state.data.get(f"machine:{pid}"))
+            except Exception:
+                machine = None
         state.save()
     line = {"event": "turn", "timestamp": now(), "session_id": p.get("session_id"),
             "bridge_session_id": bridge_session(), "cwd": p.get("cwd"), "workstream": workstream_of(p.get("cwd")),
@@ -531,6 +707,9 @@ def turn(p):
     line["rounds"] = seen["rounds"]
     line["plugin_versions"] = {n.split(":", 1)[0]: plugin_version(n, p.get("cwd"))
                                for n in seen["skills"] + seen["agents"] if n and ":" in n}
+    line["waits_s"] = seen["waits_s"]
+    line["prompt_head"] = seen["prompt_head"]
+    line["machine"] = machine
     write(line)
 
 
