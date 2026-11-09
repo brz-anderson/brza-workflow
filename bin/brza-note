@@ -5,7 +5,7 @@
       cria work/worklogs/AAAA-MM-DD-<assunto>.md com o esqueleto do worklog e imprime o caminho; recusa se existe.
   brza-note new issue <assunto> [--scope …] [--priority low|medium|high] [--workstream <nome>]
       cria work/issues/<assunto>.md, com status: open e opened de hoje.
-  brza-note commit <caminho>… -m <mensagem> [--no-push] [--workstream <nome>]
+  brza-note commit <caminho>… -m <mensagem> [--no-push] [--workstream <nome>] [--until HH:MM|ISO]
       roda o check_notes.py (sai se há erro), git add dos caminhos, commit só deles, git fetch e push na branch do
       workstream, com o git pull --rebase --autostash antes só quando a origin andou; --no-push para no commit. Sem
       upstream, o push é o git push -u <remote> workstream/<nome>. A memória (memory/ e .claude/agent-memory/) vai ao
@@ -17,7 +17,9 @@
       rode brza note index --rebuild`, com saída 0. Com --no-push, nenhuma linha. Antes do commit, e só com push,
       recusa a issue ou a decisão nova cujo id (`issue:<slug>`, `decision:<slug>`) já é, no índice, de outro
       workstream que ainda tem a nota: o nome repetido entre workstreams viraria um id só, e a primeira nota sumiria
-      do estado vigente.
+      do estado vigente. Worklog recebe sessions: e ## Medida quando há CLAUDE_CODE_SESSION_ID; cada commit com worklog
+      grava um evento task antes do push, inclusive com --no-push e sem sessão (session_id null). --until HH:MM ou ISO
+      fecha no começo do primeiro turno da tarefa seguinte, entre o marco anterior da sessão e agora.
   brza-note plan-open <slug> --title <H1> --description <frase> [--workstream <nome>]
       reserva o número do plano novo no índice da norma: git fetch, o maior PLN de .brza/index.jsonl na
       <remote>/<branch> + 1, e a linha `created` (status open, phase interview) acrescentada ali, sem checkout. Push recusado por
@@ -406,12 +408,12 @@ def as_list(val) -> list[str]:
     return [str(val)] if val else []
 
 
-def set_frontmatter_refs(text: str, refs: list[str], remove_date: bool = False) -> str:
-    """Atualiza de forma idempotente o campo refs: no frontmatter do worklog (e opcionalmente remove date:)."""
+def set_frontmatter_list(text: str, field: str, refs: list[str], remove_date: bool = False) -> str:
+    """Atualiza uma lista do frontmatter sem repetir o campo; opcionalmente remove date:."""
     if not text.startswith('---\n') or (end := text.find('\n---', 4)) < 0:
         if not refs:
             return text
-        ref_lines = '\n'.join(['refs:', *(f'  - {r}' for r in refs)])
+        ref_lines = '\n'.join([f'{field}:', *(f'  - {r}' for r in dict.fromkeys(refs))])
         return f'---\n{ref_lines}\n---\n\n' + text.lstrip('\n')
     fm_lines = text[4:end].split('\n')
     blocks: list[tuple[str | None, list[str]]] = []
@@ -424,11 +426,11 @@ def set_frontmatter_refs(text: str, refs: list[str], remove_date: bool = False) 
             blocks.append((None, [line]))
     out_lines: list[str] = []
     placed_refs = False
-    ref_block = ['refs:', *(f'  - {r}' for r in refs)] if refs else []
+    ref_block = [f'{field}:', *(f'  - {r}' for r in dict.fromkeys(refs))] if refs else []
     for key, blines in blocks:
         if remove_date and key == 'date':
             continue
-        if key == 'refs':
+        if key == field:
             if ref_block and not placed_refs:
                 out_lines.extend(ref_block)
                 placed_refs = True
@@ -437,6 +439,10 @@ def set_frontmatter_refs(text: str, refs: list[str], remove_date: bool = False) 
     if ref_block and not placed_refs:
         out_lines.extend(ref_block)
     return '---\n' + '\n'.join(out_lines) + text[end:]
+
+
+def set_frontmatter_refs(text: str, refs: list[str], remove_date: bool = False) -> str:
+    return set_frontmatter_list(text, 'refs', refs, remove_date=remove_date)
 
 
 def _index_issue_ids(root: Path) -> dict[str, str]:
@@ -632,9 +638,10 @@ def requested_worklogs(root: Path, paths: list[str]) -> list[str]:
     return sorted(found)
 
 
-def prepare_worklog_refs(root: Path, paths: list[str], remove_date: bool = False) -> bool:
+def prepare_worklog_refs(root: Path, paths: list[str], remove_date: bool = False,
+                         worklogs: list[str] | None = None) -> bool:
     """Valida refs explícitos atuais dos worklogs pedidos antes de reescrever; se válidos, extrai e atualiza só eles."""
-    worklogs = requested_worklogs(root, paths)
+    worklogs = requested_worklogs(root, paths) if worklogs is None else worklogs
     if not worklogs:
         return True
     catalog = build_target_catalog(root)
@@ -655,7 +662,7 @@ def prepare_worklog_refs(root: Path, paths: list[str], remove_date: bool = False
         refs, unknown = extract_worklog_refs(text, root / w, root, catalog)
         for lineno, ref_id in unknown:
             print(f'aviso: unknown-ref-mention: {w}:{lineno} — {ref_id}')
-        updated = set_frontmatter_refs(text, refs, remove_date=remove_date)
+        updated = set_frontmatter_list(text, 'refs', refs, remove_date=remove_date)
         if updated != text:
             (root / w).write_text(updated, encoding='utf-8')
     return True
@@ -685,12 +692,181 @@ def warn_missing_priority(root: Path, paths: list[str]):
                 print(f'aviso: sem priority: {rel}')
 
 
-def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
+def measurement_dir(root: Path) -> Path:
+    """O log pertence ao workspace, inclusive quando a nota mora num worktree."""
+    override = os.environ.get('MEASURE_DIR') or os.environ.get('BRZA_WORKSPACE')
+    if override:
+        return Path(override) / '.measurements'
+    found = runtime.brza_root.find(root)
+    workspace = Path(found.root) if found else runtime.require_workspace()
+    return workspace / '.measurements'
+
+
+def measurement_modules() -> tuple[dict, dict]:
+    core = HERE.parent / 'core'
+    return (runpy.run_path(str(core / 'scripts' / 'summarize_measurements.py')),
+            runpy.run_path(str(core / '.claude' / 'hooks' / 'measure.py')))
+
+
+def task_context(root: Path, branch: str, worklogs: list[str], until: str | None) -> tuple[dict, list[dict], dict, Path]:
+    """Valida o corte antes de tocar os arquivos e mantém o mesmo instante para a prévia e o evento."""
+    summary, _ = measurement_modules()
+    directory = measurement_dir(root)
+    rows, bad, _ = summary['read_log'](str(directory / 'measurements.jsonl'), '')
+    if bad:
+        print(f'aviso: {bad} linha(s) inválida(s) na medição; ignoradas')
+    stamp = now()
+    sid = os.environ.get('CLAUDE_CODE_SESSION_ID') or None
+    event = {'event': 'task', 'timestamp': stamp, 'session_id': sid,
+             'bridge_session_id': os.environ.get('CLAUDE_CODE_BRIDGE_SESSION_ID') or None,
+             'chat_id': os.environ.get('ORCA_AGENT_SESSION_ID') or None, 'session_name': session_name(),
+             'pid': os.getpid(), 'cwd': str(Path.cwd()), 'workstream': branch.removeprefix(WORKSTREAM_PREFIX),
+             'worklogs': worklogs, 'commit': None, 'until': None}
+    if until is not None:
+        if not sid or not worklogs:
+            raise Refused('--until exige uma sessão Claude e um worklog nos caminhos dados')
+        end = summary['parse_time'](stamp)
+        if re.fullmatch(r'\d{1,2}:\d{2}', until):
+            hour, minute = map(int, until.split(':'))
+            try:
+                cut = end.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            except ValueError:
+                raise Refused('--until inválido; use HH:MM de hoje ou uma hora ISO') from None
+        else:
+            cut = summary['parse_time'](until) if re.match(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}', until) else None
+        if cut is None:
+            raise Refused('--until inválido; use HH:MM de hoje ou uma hora ISO')
+        marks = [summary['task_mark'](r) for r in rows
+                 if r.get('event') == 'task' and r.get('session_id') == sid and summary['row_end'](r)]
+        previous = max(marks, default=None)
+        if cut > end or (previous is not None and cut < previous):
+            raise Refused('--until fora da janela entre o marco anterior da sessão e agora')
+        event['until'] = cut.isoformat()
+    return event, rows, summary, directory
+
+
+def current_turn(event: dict, directory: Path) -> dict | None:
+    """Prévia do trecho ainda não lido pelo hook; não grava offsets nem a marca de CPU."""
+    sid = event['session_id']
+    config = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
+    try:
+        paths = list((config / 'projects').glob(f'*/{sid}.jsonl'))
+        if not paths:
+            return None
+        path = max(paths, key=lambda p: p.stat().st_mtime)
+    except OSError as exc:
+        print(f'aviso: transcript ilegível: {exc}; sem o turno do commit')
+        return None
+    state_path = directory / 'state.json'
+    try:
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if not isinstance(state, dict):
+            raise ValueError('estado não é um objeto JSON')
+    except (OSError, ValueError) as exc:
+        print(f'aviso: estado da medição ilegível: {exc}; sem o turno do commit')
+        return None
+    _, hook = measurement_modules()
+    try:
+        offset = state.get(str(path), 0)
+        if not isinstance(offset, int) or offset < 0:
+            raise ValueError('offset inválido')
+        lines, _ = hook['read_from'](str(path), offset)
+    except (OSError, ValueError) as exc:
+        print(f'aviso: transcript ilegível: {exc}; sem o turno do commit')
+        return None
+    # O último registro costuma ser a chamada que dispara este commit. Estende o relógio até o marco,
+    # sem cobrar tokens que ainda não chegaram ao transcript.
+    lines.append(json.dumps({'type': 'system', 'timestamp': event['timestamp']}))
+    measured, seen = hook['measure'](lines)
+    if measured['duration_s'] is None:
+        return None
+    machine = None
+    pid, origin = hook['claude_pid']()
+    if pid:
+        try:
+            machine, _ = hook['machine_of'](pid, origin, state.get(f'machine:{pid}'))
+        except (OSError, ValueError, RuntimeError):
+            pass  # a leitura de máquina pode faltar, como no hook; o turno continua medido
+    return {**measured, 'event': 'turn', 'timestamp': event['timestamp'], 'session_id': sid,
+            'workstream': event['workstream'], 'waits_s': seen['waits_s'], 'prompt_head': seen['prompt_head'],
+            'machine': machine}
+
+
+def measure_line(measure: dict | None, event: dict, summary: dict, partial: bool) -> str:
+    duration = summary['human_duration']
+    def decimal(value):
+        return f'{value:.2f}'.replace('.', ',')
+    def memory(value):
+        return (f'{value / 1024:.1f} GB' if value >= 1024 else f'{value:.0f} MB').replace('.', ',')
+    if measure is None:
+        line = 'Não medida — sessão sem turno medido'
+    else:
+        m = measure
+        cost = m['cost_turns'] + m['cost_subagents']
+        cost_label = 'custo parcial' if m['no_cost_turns'] or m['no_cost_subagents'] else 'turnos'
+        line = (f"Corrido {duration(m['elapsed_s'])} — agente {duration(m['agent_s'])}, "
+                f"quem pediu {duration(m['requester_s'])}, pausa {duration(m['pause_s'])} · "
+                f"US$ {decimal(cost)} ({cost_label} {decimal(m['cost_turns'])}, "
+                f"subagentes {decimal(m['cost_subagents'])})")
+        if m['machine_turns']:
+            line += (f" · CPU {decimal(m['cpu_self_s'])} s do `claude` e "
+                     f"{decimal(m['cpu_children_s'])} s dos comandos, RSS até {memory(m['rss_max_mb'])}"
+                     if m['rss_max_mb'] is not None else
+                     f" · CPU {decimal(m['cpu_self_s'])} s do `claude` e {decimal(m['cpu_children_s'])} s dos comandos")
+        else:
+            line += ' · máquina não medida'
+        line += (f" · {m['turns']} turno{'s' if m['turns'] != 1 else ''}, "
+                 f"{m['sessions']} {'sessão' if m['sessions'] == 1 else 'sessões'}")
+        if m['runs']:
+            line += (f" · `brza run`: {m['runs']} comando{'s' if m['runs'] != 1 else ''}, CPU {duration(m['run_cpu_s'])}, "
+                     f"pico {memory(m['run_max_rss_mb'])}" if m['run_max_rss_mb'] is not None else
+                     f" · `brza run`: {m['runs']} comando{'s' if m['runs'] != 1 else ''}, CPU {duration(m['run_cpu_s'])}")
+        if m['shared_with']:
+            n = m['shared_with']
+            line += f" · dividida com {n} outro{'s' if n != 1 else ''} worklog{'s' if n != 1 else ''} do commit"
+    end = summary['task_mark'](event).astimezone()
+    line += f" · até {end:%H:%M} de {end:%Y-%m-%d}, pelo `brza note commit`"
+    if partial:
+        line += ' · sem o turno do commit'
+    return line + '\n'
+
+
+def prepare_worklog_measure(root: Path, event: dict, rows: list[dict], summary: dict, directory: Path):
+    if not event['session_id']:
+        return
+    preview = current_turn(event, directory)
+    combined = [*rows, *([preview] if preview else []), event]
+    measures = {m['worklog']: m for m in summary['aggregate_by_task'](combined)['tasks']}
+    for rel in event['worklogs']:
+        path = root / rel
+        text = path.read_text(encoding='utf-8')
+        sessions = as_list(parse_frontmatter(text).get('sessions'))
+        text = set_frontmatter_list(text, 'sessions', [*sessions, event['session_id']])
+        text = re.split(r'^## Medida\s*$', text, maxsplit=1, flags=re.MULTILINE)[0].rstrip()
+        path.write_text(text + '\n\n## Medida\n\n' +
+                        measure_line(measures.get(rel), event, summary, preview is None), encoding='utf-8')
+
+
+def write_task_event(event: dict, directory: Path, root: Path):
+    event['commit'] = event.get('commit') or runtime.git('rev-parse', 'HEAD', cwd=root).strip()
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / 'measurements.jsonl').open('a', encoding='utf-8') as out:
+        out.write(json.dumps(event, ensure_ascii=False) + '\n')
+
+
+def commit(root: Path, paths: list[str], message: str, do_push: bool, until: str | None = None) -> int:
     branch = branch_of(root)
     if not branch or not branch.startswith(WORKSTREAM_PREFIX):
         print(f'recusado: {root} está em {branch or "detached"}, e a nota só se commita numa branch workstream/*')
         return 1
-    if not prepare_worklog_refs(root, paths):
+    worklogs = requested_worklogs(root, paths)
+    if worklogs:
+        changed = set(runtime.git('diff', '--name-only', '-z', 'HEAD', '--', *worklogs, cwd=root).split('\0'))
+        changed.update(runtime.git('ls-files', '--others', '--exclude-standard', '-z', '--', *worklogs,
+                                   cwd=root).split('\0'))
+        worklogs = [w for w in worklogs if w in changed]
+    context = task_context(root, branch, worklogs, until) if worklogs or until is not None else None
+    if not prepare_worklog_refs(root, paths, worklogs=worklogs):
         print('recusado: o checador achou erro; nada foi commitado')
         return 1
     if check(root) != 0:
@@ -709,17 +885,34 @@ def commit(root: Path, paths: list[str], message: str, do_push: bool) -> int:
     if not runtime.git('diff', '--cached', '--name-only', '--', *paths, cwd=root).strip():
         print('recusado: nada a commitar nos caminhos dados')
         return 1
+    if context and worklogs:
+        context[0]['timestamp'] = now()
+        prepare_worklog_measure(root, *context)
+        runtime.git('add', '--', *worklogs, cwd=root)
     # Com caminhos, o commit leva só eles e deixa o resto do índice como está.
     runtime.git('commit', '-q', '-m', message, '--', *paths, cwd=root)
+    if context and worklogs:
+        context[0]['commit'] = runtime.git('rev-parse', 'HEAD', cwd=root).strip()
     print(runtime.git('log', '-1', '--format=%h %s', cwd=root).strip())
     warn_missing_priority(root, present)
     if dirty := dirty_memory(root, paths):
         print(f'aviso: memória suja fora do commit: {", ".join(dirty)}')
     if not do_push:
+        if context and worklogs:
+            write_task_event(context[0], context[3], root)
         return 0
-    runtime.git('fetch', '-q', cwd=root)
-    if upstream(root) and runtime.git('rev-list', '--count', 'HEAD..@{upstream}', cwd=root).strip() != '0':
-        runtime.git('pull', '-q', '--rebase', '--autostash', cwd=root)
+    try:
+        runtime.git('fetch', '-q', cwd=root)
+        if upstream(root) and runtime.git('rev-list', '--count', 'HEAD..@{upstream}', cwd=root).strip() != '0':
+            runtime.git('pull', '-q', '--rebase', '--autostash', cwd=root)
+    except runtime.BrzaError:
+        # O commit local já aconteceu: conserva o marco mesmo quando a rede ou o rebase falham.
+        if context and worklogs:
+            write_task_event(context[0], context[3], root)
+        raise
+    if context and worklogs:
+        context[0]['commit'] = runtime.git('rev-parse', 'HEAD', cwd=root).strip()
+        write_task_event(context[0], context[3], root)
     push(root, branch)
     remote = remote_and_branch()[0]
     print(f'enviado:  {runtime.git("log", "-1", "--format=%h", cwd=root).strip()} na {remote} ({branch})')
@@ -1405,6 +1598,7 @@ def main(argv: list[str] | None = None) -> int:
     ap_commit.add_argument('-m', dest='message', required=True, help='a mensagem do commit')
     ap_commit.add_argument('--no-push', action='store_true', help='para no commit, sem pull nem push')
     ap_commit.add_argument('--workstream', help=workstream_help)
+    ap_commit.add_argument('--until', metavar='HH:MM|ISO', help='fecha a tarefa no começo do primeiro turno da seguinte')
     ap_plan = sub.add_parser('plan-open', help='reserva o PLN-NNN seguinte no índice da master')
     ap_plan.add_argument('slug', help='em kebab-case, o assunto da pasta do plano')
     ap_plan.add_argument('--title', required=True, help='o H1 do plano, com ou sem o `PLN-NNN: `')
@@ -1481,7 +1675,7 @@ def main(argv: list[str] | None = None) -> int:
             if not scope:
                 ap_new.error('--scope vazio')
             return new(root, args.kind, args.subject, scope, args.priority)
-        return commit(root, [relative(ap_commit, root, p) for p in args.paths], args.message, not args.no_push)
+        return commit(root, [relative(ap_commit, root, p) for p in args.paths], args.message, not args.no_push, args.until)
     except Refused as e:
         print(f'recusado: {e}')
         return 1
