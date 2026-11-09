@@ -12,10 +12,12 @@ com o código de saída e o caminho do arquivo da saída inteira:
                                       imprime os blocos para o agente colar na resposta e sai com o código do comando;
                                       a aba fecha quando dá 0 e fica aberta quando falha
 
-Os argumentos depois de `--` se juntam com espaço, como no ssh, e rodam no zsh interativo (`$SHELL -ic`), com as
-funções do ~/.zshrc, como se digitados no terminal: comando com `|`, `&&` ou `;` vai entre aspas simples para que o
-shell não o parta antes do brza-run. O comando roda num pseudo-terminal, então cor, barra de progresso e prompt
-interativo funcionam na aba; os blocos levam a saída sem as sequências de cor. O pager fica desligado (PAGER e
+O comando roda no zsh interativo (`$SHELL -ic`), com as funções do ~/.zshrc, como se digitado no terminal. Um argumento
+só depois de `--` é a linha de shell inteira: comando com `|`, `&&` ou `;` vai entre aspas simples, para que o shell de
+quem chama não o parta antes do brza-run. Com mais de um, cada argumento chega inteiro ao comando, citado como no sh e
+também quando começa com `=`, que o zsh expandiria: `brza run -- git commit -m 'a b'` e `brza run -- bash -c 'x && y'`
+fazem o mesmo que no terminal. O comando roda num pseudo-terminal, então cor, barra de progresso e prompt interativo
+funcionam na aba; os blocos levam a saída sem as sequências de cor. O pager fica desligado (PAGER e
 GIT_PAGER são cat), para a saída inteira passar pelo brza-run.
 
 A mensagem entra no chat pelo `agentSession.send` do runtime do app, pelo `rpc` do brza_runtime, com
@@ -200,15 +202,26 @@ def terminal_alive(handle: str) -> bool:
     return any(t.get('handle') == handle for t in runtime.brza('terminal', 'list')['terminals'])
 
 
+def quote(word: str) -> str:
+    """O `shlex.quote`, que segue o sh, mais o `=` do começo: o zsh troca `=cmd` pelo caminho do comando (EQUALS)."""
+    quoted = shlex.quote(word)
+    return "'" + word + "'" if quoted == word and word.startswith('=') else quoted
+
+
+def command_of(args: list[str]) -> str:
+    """A linha de shell dos argumentos: um só é a linha inteira; mais de um, cada um citado, para chegar inteiro."""
+    return args[0] if len(args) == 1 else ' '.join(quote(a) for a in args)
+
+
 def run_in_tab(args: list[str], cwd: Path, poll: float = 0.5) -> int:
-    command = ' '.join(args)
+    command = command_of(args)
     top = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
     if top.returncode:
         sys.exit(f'brza-run: {cwd} não está num checkout git que o app conheça')
     run = new_run()
     result = run / 'result.json'
     inner = (f'cd {shlex.quote(str(cwd))} && {shlex.quote(str(SELF))} --result {shlex.quote(str(result))} -- '
-             + ' '.join(shlex.quote(a) for a in args))
+             + ' '.join(quote(a) for a in args))
     created = runtime.brza('terminal', 'create', '--worktree', f'path:{top.stdout.strip()}',
                    '--title', f'brza-run: {command}'[:40], '--command', inner)
     handle = (created.get('terminal') or created).get('handle')
@@ -239,9 +252,9 @@ def main():
     if not args:
         ap.error('falta o comando depois de --')
     if a.result:
-        sys.exit(run_for_result(' '.join(args), a.result))
+        sys.exit(run_for_result(command_of(args), a.result))
     if a.chat:
-        sys.exit(run_in_chat(' '.join(args), a.chat))
+        sys.exit(run_in_chat(command_of(args), a.chat))
     sys.exit(run_in_tab(args, Path.cwd()))
 
 
