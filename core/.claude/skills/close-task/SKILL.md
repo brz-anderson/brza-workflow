@@ -29,7 +29,8 @@ ls work/worklogs/ | grep "^$(date +%F)-"
 ## 2. O que o commit vai fechar
 
 ```bash
-python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE_CODE_SESSION_ID"
+python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE_CODE_SESSION_ID" \
+  --workstream "$(git branch --show-current | sed 's|^workstream/||')"
 ```
 
 A saída lista os turnos desde o último worklog que esta sessão commitou — a hora e o começo do pedido de cada um — e

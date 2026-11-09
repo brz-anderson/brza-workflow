@@ -280,3 +280,11 @@ checkout. O commit é com a identidade do"""),
                """| Nota, plano ou decisão do workspace de origem | No workspace de origem; daqui se cita em crase, com o caminho, e não se linka |
 """, ""),
 ]
+
+# PLN-012/P5.6: o aviso também alcança outras sessões quando o turno atual ainda não terminou.
+DIFFERENCES.append(Difference(
+    ".claude/skills/close-task/SKILL.md", "norma-comum",
+    'python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE_CODE_SESSION_ID"',
+    'python3 scripts/summarize_measurements.py --by-task --pending --session "$CLAUDE_CODE_SESSION_ID" \\\n'
+    '  --workstream "$(git branch --show-current | sed \'s|^workstream/||\')"',
+))

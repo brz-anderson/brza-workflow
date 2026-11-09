@@ -1068,5 +1068,327 @@ class NoteOutsideTheWorkspaceTest(NoteFixture):
         self.assertEqual(list((home / 'Projects' / 'brza-workspace').iterdir()), [])
 
 
+
+
+
+class TaskCommitTest(NoteFixture):
+    """PLN-012/P3: marco real em repositório temporário e medida sem consumir o transcript."""
+
+    def setUp(self):
+        self.environment = patch.dict(os.environ)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        for key in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_NAME', 'ORCA_AGENT_SESSION_ID'):
+            os.environ.pop(key, None)
+        super().setUp()
+        os.environ['MEASURE_DIR'] = str(self.ws)
+        os.environ['CLAUDE_CONFIG_DIR'] = str(self.base / 'claude')
+        self.clock = patch.dict(GLOBALS, {'now': lambda: '2026-11-09T12:10:00+00:00'})
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+        self.rel = 'work/worklogs/2026-11-09-tarefa.md'
+        self.path = self.tree / self.rel
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.original = '---\nscope:\n  - workspace\ncompleted: 2026-11-09\n---\n\n# Tarefa\n\nRegistro.\n'
+        self.path.write_text(self.original)
+        self.log = self.ws / '.measurements' / 'measurements.jsonl'
+        self.log.parent.mkdir(exist_ok=True)
+
+    def events(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def seed(self, *rows):
+        self.log.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+
+    def close(self, *extra, env=None):
+        return self.run_note('commit', self.rel, '-m', 'docs: tarefa', '--no-push', *extra, env=env)
+
+    def transcript(self):
+        transcript = self.base / 'claude' / 'projects' / '-workspace' / 'sid.jsonl'
+        transcript.parent.mkdir(parents=True)
+        prefix = json.dumps({'type': 'user', 'timestamp': '2026-11-09T11:00:00Z',
+                             'message': {'content': 'turno anterior'}}) + '\n'
+        rows = [{'type': 'user', 'timestamp': '2026-11-09T12:00:00Z', 'message': {'content': 'faça a tarefa'}},
+                {'type': 'assistant', 'timestamp': '2026-11-09T12:05:00Z', 'requestId': 'r',
+                 'message': {'id': 'r', 'model': 'claude-haiku-4-5', 'content': [],
+                             'usage': {'input_tokens': 3000000, 'output_tokens': 0}}}]
+        transcript.write_text(prefix + ''.join(json.dumps(r) + '\n' for r in rows))
+        state = self.ws / '.measurements' / 'state.json'
+        state.write_text(json.dumps({str(transcript): len(prefix.encode()), 'machine:99': {'cpu_self_s': 5}}))
+        return transcript, state
+
+    def test_stamps_session_and_writes_task_after_commit_even_without_push(self):
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid', 'ORCA_AGENT_SESSION_ID': 'chat',
+                                    'CLAUDE_SESSION_NAME': 'sessao'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertIn('sessions:\n  - sid', text)
+        self.assertNotIn('opened:', text)
+        self.assertIn('completed: 2026-11-09', text)
+        event, = self.events()
+        self.assertEqual(event['event'], 'task')
+        self.assertEqual(event['worklogs'], [self.rel])
+        self.assertEqual(event['session_id'], 'sid')
+        self.assertEqual(event['chat_id'], 'chat')
+        self.assertEqual(event['workstream'], 'studio')
+        self.assertEqual(event['commit'], git('rev-parse', 'HEAD', cwd=self.tree))
+        self.assertIsNone(event['until'])
+        self.assertEqual(git('show', f'HEAD:{self.rel}', cwd=self.tree), text.strip())
+
+    def test_without_session_preserves_worklog_bytes_and_writes_null_session(self):
+        code, out = self.close(env={'ORCA_AGENT_SESSION_ID': 'codex_chat'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.path.read_text(), self.original)
+        event, = self.events()
+        self.assertIsNone(event['session_id'])
+        self.assertEqual(event['chat_id'], 'codex_chat')
+
+    def test_current_turn_uses_offset_until_commit_and_preserves_state(self):
+        _, state = self.transcript()
+        before = state.read_bytes()
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertIn('Corrido 10 min', text)
+        self.assertIn('agente 10 min', text)
+        self.assertIn('US$ 3,00', text)
+        self.assertIn('1 turno', text)
+        self.assertNotIn('sem o turno do commit', text)
+        self.assertEqual(state.read_bytes(), before)
+        self.assertEqual([r['event'] for r in self.events()], ['task'])
+
+    def test_recommit_accumulates_sessions_and_replaces_measure_section(self):
+        transcript, state = self.transcript()
+        self.assertEqual(self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})[0], 0)
+        state.write_text(json.dumps({str(transcript): transcript.stat().st_size}))
+        event = self.events()[0]
+        self.seed({'event': 'turn', 'timestamp': event['timestamp'], 'duration_s': 600, 'session_id': 'sid',
+                   'estimated_cost_usd': 3, 'workstream': 'studio'}, event)
+        self.path.write_text(self.path.read_text().replace('Registro.', 'Registro ampliado.'))
+        with patch.dict(GLOBALS, {'now': lambda: '2026-11-09T13:00:00+00:00'}):
+            code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertEqual(text.count('  - sid'), 1)
+        self.assertEqual(text.count('## Medida'), 1)
+        self.assertIn('Corrido 10 min', text)
+        self.assertEqual(len(self.events()), 3)
+
+    def test_missing_transcript_marks_partial_and_uses_closed_turns(self):
+        self.seed({'event': 'task', 'timestamp': '2026-11-09T11:00:00Z', 'session_id': 'other',
+                   'worklogs': ['work/worklogs/outra.md']},
+                  {'event': 'turn', 'timestamp': '2026-11-09T12:05:00Z', 'duration_s': 300,
+                   'session_id': 'sid', 'workstream': 'studio', 'estimated_cost_usd': 2.35})
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('Corrido 5 min', self.path.read_text())
+        self.assertIn('sem o turno do commit', self.path.read_text())
+
+    def test_until_outside_window_is_rejected_before_any_worklog_mutation(self):
+        self.seed({'event': 'task', 'timestamp': '2026-11-09T12:05:00Z', 'session_id': 'sid',
+                   'worklogs': ['work/worklogs/antes.md']})
+        before = self.log.read_bytes()
+        for until in ('2026-11-09T12:04:00Z', '2026-11-09T12:11:00Z', '25:00', 'ontem'):
+            with self.subTest(until=until):
+                code, out = self.close('--until', until, env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+                self.assertEqual(code, 1, out)
+                self.assertEqual(self.path.read_text(), self.original)
+                self.assertEqual(self.log.read_bytes(), before)
+
+    def test_until_requires_session_and_worklog(self):
+        code, out = self.close('--until', '12:05')
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.path.read_text(), self.original)
+        self.assertFalse(self.log.exists())
+        code, out = self.run_note('commit', 'README.md', '-m', 'docs: nada', '--no-push', '--until', '12:05',
+                                  env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 1, out)
+        self.assertFalse(self.log.exists())
+
+    def test_until_is_stored_as_iso_and_excludes_turn_starting_on_boundary(self):
+        self.seed({'event': 'task', 'timestamp': '2026-11-09T11:00:00Z', 'session_id': 'other',
+                   'worklogs': ['work/worklogs/outra.md']},
+                  {'event': 'turn', 'timestamp': '2026-11-09T12:03:00Z', 'duration_s': 180,
+                   'session_id': 'sid', 'estimated_cost_usd': 1},
+                  {'event': 'turn', 'timestamp': '2026-11-09T12:09:00Z', 'duration_s': 240,
+                   'session_id': 'sid', 'estimated_cost_usd': 4})
+        code, out = self.close('--until', '2026-11-09T12:05:00Z', env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.events()[-1]['until'], '2026-11-09T12:05:00+00:00')
+        self.assertIn('Corrido 3 min', self.path.read_text())
+        self.assertIn('US$ 1,00', self.path.read_text())
+
+    def test_checker_rejection_writes_no_task_event(self):
+        self.checker_exit(1, self.tree)
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 1, out)
+        self.assertFalse(self.log.exists())
+
+    def test_no_change_writes_no_task_and_does_not_create_change_from_measure_alone(self):
+        self.assertEqual(self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})[0], 0)
+        before = self.path.read_bytes(), self.log.read_bytes()
+        with patch.dict(GLOBALS, {'now': lambda: '2026-11-09T13:00:00+00:00'}):
+            code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 1, out)
+        self.assertEqual((self.path.read_bytes(), self.log.read_bytes()), before)
+
+    def test_failed_git_commit_writes_no_task(self):
+        hook = Path(git('rev-parse', '--git-common-dir', cwd=self.tree)) / 'hooks' / 'pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertNotEqual(code, 0, out)
+        self.assertFalse(self.log.exists())
+
+    def test_multiple_worklogs_share_measure_using_aggregate(self):
+        self.transcript()
+        other = 'work/worklogs/2026-11-09-outra.md'
+        (self.tree / other).write_text(self.original.replace('# Tarefa', '# Outra'))
+        code, out = self.run_note('commit', self.rel, other, '-m', 'docs: duas', '--no-push',
+                                  env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        for rel in (self.rel, other):
+            text = (self.tree / rel).read_text()
+            self.assertIn('Corrido 5 min', text)
+            self.assertIn('US$ 1,50', text)
+            self.assertIn('dividida com 1 outro worklog', text)
+        self.assertEqual(self.events()[-1]['worklogs'], sorted([self.rel, other]))
+
+    def test_push_observes_task_already_written_with_successful_commit_hash(self):
+        original_push = GLOBALS['push']
+        seen = []
+        def checked_push(root, branch):
+            seen.extend(self.events())
+            self.assertEqual(seen[-1]['commit'], git('rev-parse', 'HEAD', cwd=root))
+            return original_push(root, branch)
+        with patch.dict(GLOBALS, {'push': checked_push}):
+            code, out = self.run_note('commit', self.rel, '-m', 'docs: tarefa',
+                                      env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(self.origin_log()[0], 'docs: tarefa')
+
+    def test_missing_state_reads_whole_transcript_without_creating_state(self):
+        _, state = self.transcript()
+        state.unlink()
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('Corrido 1 h 10 min', self.path.read_text())
+        self.assertFalse(state.exists())
+
+    def test_unreadable_transcript_falls_back_without_blocking_commit(self):
+        self.transcript()
+        summary, hook = GLOBALS['measurement_modules']()
+        hook['read_from'] = lambda *args: (_ for _ in ()).throw(PermissionError('sem acesso'))
+        with patch.dict(GLOBALS, {'measurement_modules': lambda: (summary, hook)}):
+            code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('transcript ilegível', out)
+        self.assertIn('sem o turno do commit', self.path.read_text())
+        self.assertEqual(len(self.events()), 1)
+
+    def test_current_machine_uses_saved_baseline_without_writing_it(self):
+        _, state = self.transcript()
+        before = state.read_bytes()
+        summary, hook = GLOBALS['measurement_modules']()
+        called = []
+        def machine(pid, origin, last):
+            called.append((pid, origin, last))
+            return {'cpu_self_s': .8, 'cpu_children_s': 6.1, 'rss_mb': 357}, {'changed': True}
+        hook.update({'claude_pid': lambda: (99, 'env'), 'machine_of': machine})
+        with patch.dict(GLOBALS, {'measurement_modules': lambda: (summary, hook)}):
+            code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(called, [(99, 'env', {'cpu_self_s': 5})])
+        self.assertIn('CPU 0,80 s', self.path.read_text())
+        self.assertIn('6,10 s', self.path.read_text())
+        self.assertIn('RSS até 357 MB', self.path.read_text())
+        self.assertEqual(state.read_bytes(), before)
+
+    def test_accumulation_across_sessions_includes_runs_and_subagent_cost(self):
+        self.seed({'event': 'task', 'timestamp': '2026-11-09T10:00:00Z', 'session_id': 'seed', 'worklogs': []},
+                  {'event': 'turn', 'timestamp': '2026-11-09T11:00:00Z', 'duration_s': 120,
+                   'session_id': 'before', 'estimated_cost_usd': 1, 'waits_s': [30]},
+                  {'event': 'subagent', 'timestamp': '2026-11-09T10:59:30Z', 'duration_s': 30,
+                   'session_id': 'before', 'estimated_cost_usd': .5},
+                  {'event': 'run', 'timestamp': '2026-11-09T10:59:50Z', 'duration_s': 10,
+                   'session_id': 'before', 'cpu_s': 120, 'max_rss_mb': 2048},
+                  {'event': 'task', 'timestamp': '2026-11-09T11:00:00Z', 'session_id': 'before',
+                   'worklogs': [self.rel], 'commit': 'earlier'})
+        self.path.write_text(self.original.replace('completed:', 'sessions:\n  - before\ncompleted:'))
+        self.transcript()
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertIn('Corrido 12 min', text)
+        self.assertIn('quem pediu 30 s', text)
+        self.assertIn('US$ 4,50', text)
+        self.assertIn('2 sessões', text)
+        self.assertIn('`brza run`: 1 comando, CPU 2 min, pico 2,0 GB', text)
+        self.assertIn('sessions:\n  - before\n  - sid', text)
+
+    def test_directory_commit_does_not_reopen_or_rewrite_unchanged_worklog(self):
+        old_rel = 'work/worklogs/2026-11-08-antiga.md'
+        old = self.tree / old_rel
+        old.write_text(self.original.replace('# Tarefa', '# Antiga'))
+        git('add', old_rel, cwd=self.tree)
+        git('commit', '-q', '-m', 'docs: antiga', '--', old_rel, cwd=self.tree)
+        old_bytes = old.read_bytes()
+        self.transcript()
+        code, out = self.run_note('commit', 'work/worklogs', '-m', 'docs: tarefa', '--no-push',
+                                  env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(old.read_bytes(), old_bytes)
+        self.assertEqual(self.events()[-1]['worklogs'], [self.rel])
+        self.assertEqual(self.committed_files(), [self.rel])
+        self.assertIn('Corrido 10 min', self.path.read_text())
+
+    def test_task_hash_matches_rebased_commit_before_push(self):
+        subprocess.run(['git', 'clone', '-q', '-b', 'workstream/studio', str(self.origin), str(self.other)],
+                       check=True, capture_output=True)
+        (self.other / 'work').mkdir(exist_ok=True)
+        (self.other / 'work' / 'outra.md').write_text('outra sessão\n')
+        git('add', '.', cwd=self.other)
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'docs: outra', cwd=self.other)
+        git('push', '-q', 'origin', 'HEAD:workstream/studio', cwd=self.other)
+        original_push = GLOBALS['push']
+        def check_push(root, branch):
+            self.assertEqual(self.events()[-1]['commit'], git('rev-parse', 'HEAD', cwd=root))
+            return original_push(root, branch)
+        with patch.dict(GLOBALS, {'push': check_push}):
+            code, out = self.run_note('commit', self.rel, '-m', 'docs: tarefa',
+                                      env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.events()[-1]['commit'], git('rev-parse', 'workstream/studio', cwd=self.origin))
+
+    def test_failed_fetch_keeps_event_for_successful_local_commit(self):
+        real = runtime.git
+        def fail_fetch(*args, **kwargs):
+            if args[0] == 'fetch':
+                raise runtime.BrzaError('fetch falhou')
+            return real(*args, **kwargs)
+        with patch.object(runtime, 'git', fail_fetch):
+            code, out = self.run_note('commit', self.rel, '-m', 'docs: tarefa',
+                                      env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertNotEqual(code, 0, out)
+        self.assertEqual(self.events()[-1]['commit'], git('rev-parse', 'HEAD', cwd=self.tree))
+
+
+    def test_hhmm_cut_uses_the_local_day_of_commit(self):
+        code, out = self.close('--until', '12:05', env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.events()[-1]['until'], '2026-11-09T12:05:00+00:00')
+
+    def test_push_failure_keeps_exactly_one_event_for_local_commit(self):
+        def fail_push(*args):
+            raise runtime.BrzaError('push falhou')
+        with patch.dict(GLOBALS, {'push': fail_push}):
+            code, out = self.run_note('commit', self.rel, '-m', 'docs: tarefa',
+                                      env={'CLAUDE_CODE_SESSION_ID': 'sid'})
+        self.assertNotEqual(code, 0, out)
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(self.events()[-1]['commit'], git('rev-parse', 'HEAD', cwd=self.tree))
+
+
 if __name__ == '__main__':
     unittest.main()
