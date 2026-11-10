@@ -17,9 +17,10 @@
       rode brza note index --rebuild`, com saída 0. Com --no-push, nenhuma linha. Antes do commit, e só com push,
       recusa a issue ou a decisão nova cujo id (`issue:<slug>`, `decision:<slug>`) já é, no índice, de outro
       workstream que ainda tem a nota: o nome repetido entre workstreams viraria um id só, e a primeira nota sumiria
-      do estado vigente. Worklog recebe sessions: e ## Custo da tarefa quando há CLAUDE_CODE_SESSION_ID; cada commit com worklog
-      grava um evento task antes do push, inclusive com --no-push e sem sessão (session_id null). --until HH:MM ou ISO
-      fecha no começo do primeiro turno da tarefa seguinte, entre o marco anterior da sessão e agora.
+      do estado vigente. Worklog recebe sessions: e ## Custo da tarefa quando há CLAUDE_CODE_SESSION_ID ou, na ausência,
+      GROK_SESSION_ID; cada commit com worklog grava um evento task antes do push, inclusive com --no-push e sem sessão
+      (session_id null). --until HH:MM ou ISO fecha no começo do primeiro turno da tarefa seguinte, entre o marco
+      anterior da sessão e agora, e continua a exigir a sessão Claude.
   brza-note plan-open <slug> --title <H1> --description <frase> [--workstream <nome>]
       reserva o número do plano novo no índice da norma: git fetch, o maior PLN de .brza/index.jsonl na
       <remote>/<branch> + 1, e a linha `created` (status open, phase interview) acrescentada ali, sem checkout. Push recusado por
@@ -716,14 +717,17 @@ def task_context(root: Path, branch: str, worklogs: list[str], until: str | None
     if bad:
         print(f'aviso: {bad} linha(s) inválida(s) na medição; ignoradas')
     stamp = now()
-    sid = os.environ.get('CLAUDE_CODE_SESSION_ID') or None
+    # O carimbo da nota aceita a sessão do Grok quando a do Claude não está. O --until não: ele continua a exigir
+    # CLAUDE_CODE_SESSION_ID, e o id do Grok não entra nessa checagem nem na janela.
+    claude_sid = os.environ.get('CLAUDE_CODE_SESSION_ID') or None
+    sid = claude_sid or os.environ.get('GROK_SESSION_ID') or None
     event = {'event': 'task', 'timestamp': stamp, 'session_id': sid,
              'bridge_session_id': os.environ.get('CLAUDE_CODE_BRIDGE_SESSION_ID') or None,
              'chat_id': os.environ.get('ORCA_AGENT_SESSION_ID') or None, 'session_name': session_name(),
              'pid': os.getpid(), 'cwd': str(Path.cwd()), 'workstream': branch.removeprefix(WORKSTREAM_PREFIX),
              'worklogs': worklogs, 'commit': None, 'until': None}
     if until is not None:
-        if not sid or not worklogs:
+        if not claude_sid or not worklogs:
             raise Refused('--until exige uma sessão Claude e um worklog nos caminhos dados')
         end = summary['parse_time'](stamp)
         if re.fullmatch(r'\d{1,2}:\d{2}', until):
@@ -737,7 +741,7 @@ def task_context(root: Path, branch: str, worklogs: list[str], until: str | None
         if cut is None:
             raise Refused('--until inválido; use HH:MM de hoje ou uma hora ISO')
         marks = [summary['task_mark'](r) for r in rows
-                 if r.get('event') == 'task' and r.get('session_id') == sid and summary['row_end'](r)]
+                 if r.get('event') == 'task' and r.get('session_id') == claude_sid and summary['row_end'](r)]
         previous = max(marks, default=None)
         if cut > end or (previous is not None and cut < previous):
             raise Refused('--until fora da janela entre o marco anterior da sessão e agora')

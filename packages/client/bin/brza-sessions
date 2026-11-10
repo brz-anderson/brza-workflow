@@ -27,13 +27,15 @@ Sessão antiga sem Dispatch usa estado, updatedAt posterior ao envio e saída da
 close de worker ativo pede worker_done e retorna closing; --force exige parada guardada confirmada e
 settlement antes de liberar. retained e resultados incertos jamais significam closed. O close legado
 mantém seus dois RPCs; --keep-open requer Dispatch. Claude é medido pelo hook, Codex pelo rollout só em
-tokens, Grok/Antigravity como unmeasured. O --checkout relativo parte da raiz do workspace.
+tokens. O Grok lê o usage.json quando o arquivo existe; sem ele, sai unmeasured, como o Antigravity. O
+--checkout relativo parte da raiz do workspace.
 Saídas: 0 feito ou closing; 1 erro/recusa; 75 pending/unknown/timeout. O --wait de abertura conserva o
 contrato legado: erro 1 se o id do provedor ou o nome não aparecer no prazo.
 """
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import io
 import re
 import shlex
@@ -789,6 +791,56 @@ def jsonl_rows(path):
         return
 
 
+def grok_sessions_root() -> Path:
+    """A raiz das sessões do Grok: um nível de cwd codificado e, dentro, `<session_id>/usage.json`."""
+    return Path.home() / '.grok' / 'sessions'
+
+
+_RUNTIME_TURN = {'module': None, 'loaded': False}
+
+
+def runtime_turn():
+    """O escritor da linha `turn`, ou None se o script não está no checkout. De `packages/client/bin`, o arquivo é
+    `parents[3] / core / .claude / hooks / runtime_turn.py`."""
+    if _RUNTIME_TURN['loaded']:
+        return _RUNTIME_TURN['module']
+    _RUNTIME_TURN['loaded'] = True
+    path = Path(__file__).resolve().parents[3] / 'core' / '.claude' / 'hooks' / 'runtime_turn.py'
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location('brza_runtime_turn', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _RUNTIME_TURN['module'] = module
+    return module
+
+
+def grok_usage(sid):
+    """Soma os turnos do `usage.json`. Sem `provider_session`, sem arquivo ou sem o script: unmeasured. O objeto
+    `session` não entra: o custo null de um turno anula a soma, e os tokens somam o que os turnos têm."""
+    if not sid:
+        return {'measured': False, 'reason': 'unmeasured'}
+    module = runtime_turn()
+    if module is None:
+        return {'measured': False, 'reason': 'unmeasured'}
+    path = module.find_grok_usage(sid, grok_sessions_root())
+    if path is None:
+        return {'measured': False, 'reason': 'unmeasured'}
+    try:
+        parsed = module.read_grok_usage(path)
+    except (OSError, ValueError):
+        return {'measured': False, 'reason': 'unmeasured'}
+    turns = parsed.get('turns') or []
+    costs = [turn.get('cost_usd') for turn in turns]
+    tokens = {'input': 0, 'cache_read': 0, 'cache_write': 0, 'output': 0}
+    for turn in turns:
+        for key in tokens:
+            value = turn.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                tokens[key] += value
+    return {'measured': True, 'cost_usd': None if None in costs else sum(costs), 'tokens': tokens, 'turns': len(turns)}
+
+
 def codex_usage(sid):
     """Totais cumulativos: pega o último contador válido, nunca soma snapshots."""
     if not sid or not re.fullmatch(r'[A-Za-z0-9_-]+', sid):
@@ -843,6 +895,8 @@ def usage_command(args):
                             tokens[key]=tokens.get(key,0)+value
                 usage={'measured':True,'cost_usd':None if None in costs else round(sum(costs),8),
                        'tokens':tokens,'turns':len(turns),'duration_s':sum(r.get('duration_s') or 0 for r in turns)}
+        elif agent == 'grok':
+            usage=grok_usage(chat.get('provider_session') or provider_session(chat['chat']))
         else:
             usage={'measured':False,'reason':'unmeasured'}
         rows.append({'name':chat['name'],'agent':agent,**usage})

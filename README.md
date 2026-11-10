@@ -149,8 +149,9 @@ e saída da fila. `blocked`, `failed` e `ended_without_marker` aparecem explicit
 `read <nome> --last` traz a última resposta ou pergunta pendente, sem cursor. `list --prefix` acrescenta `agent`,
 `model`, `effort`, `updated_at`, `last_latency_s`, `last_turn_at`, `dispatch` e `auto_release_at` ao contrato anterior.
 `model <nome> <modelo> --effort <esforço>` aplica modelo antes de esforço e registra cada mudança aceita.
-`usage` soma o Claude pelo hook da sessão e lê os últimos totais do Codex no rollout, somente em tokens;
-Grok e Antigravity devolvem `unmeasured`. A medição pode ser consultada após o fechamento automático da aba.
+`usage` soma o Claude pelo hook da sessão e lê os últimos totais do Codex no rollout, somente em tokens.
+O Grok lê o `usage.json` quando o arquivo existe; sem ele, sai `unmeasured`, como o Antigravity. A medição pode ser
+consultada após o fechamento automático da aba.
 
 `close` e `close --prefix` pedem `worker_done` a workers ativos e devolvem `closing`, sem declarar fechamento.
 Em workers encerrados, usam `worker-release`; `--force` solicita parada guardada e só libera após `stopped` e

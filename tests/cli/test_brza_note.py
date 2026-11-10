@@ -52,7 +52,7 @@ class NoteFixture(unittest.TestCase):
 
     # O ambiente da sessão que roda a suíte, que o `brza note commit` leria e gravaria no log do workspace real (X9)
     SESSION_ENV = ('BRZA_WORKSPACE', 'BRZA_STUDIO', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_BRIDGE_SESSION_ID',
-                   'ORCA_AGENT_SESSION_ID', 'CLAUDE_SESSION_NAME', 'MEASURE_DIR')
+                   'ORCA_AGENT_SESSION_ID', 'CLAUDE_SESSION_NAME', 'GROK_SESSION_ID', 'MEASURE_DIR')
 
     def setUp(self):
         environment = patch.dict(os.environ)
@@ -1087,7 +1087,7 @@ class TaskCommitTest(NoteFixture):
         self.environment = patch.dict(os.environ)
         self.environment.start()
         self.addCleanup(self.environment.stop)
-        for key in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_NAME', 'ORCA_AGENT_SESSION_ID'):
+        for key in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_NAME', 'ORCA_AGENT_SESSION_ID', 'GROK_SESSION_ID'):
             os.environ.pop(key, None)
         super().setUp()
         os.environ['MEASURE_DIR'] = str(self.ws)
@@ -1151,6 +1151,28 @@ class TaskCommitTest(NoteFixture):
         event, = self.events()
         self.assertIsNone(event['session_id'])
         self.assertEqual(event['chat_id'], 'codex_chat')
+
+    def test_grok_session_id_alone_is_stamped_on_the_worklog_and_the_task(self):
+        code, out = self.close(env={'GROK_SESSION_ID': 'grok-sid'})
+        self.assertEqual(code, 0, out)
+        self.assertIn('sessions:\n  - grok-sid', self.path.read_text())
+        event, = self.events()
+        self.assertEqual(event['session_id'], 'grok-sid')
+
+    def test_claude_session_id_wins_over_grok_session_id(self):
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid', 'GROK_SESSION_ID': 'grok-sid'})
+        self.assertEqual(code, 0, out)
+        text = self.path.read_text()
+        self.assertIn('sessions:\n  - sid', text)
+        self.assertNotIn('grok-sid', text)
+        self.assertEqual(self.events()[-1]['session_id'], 'sid')
+
+    def test_until_with_only_grok_session_id_is_refused(self):
+        code, out = self.close('--until', '12:05', env={'GROK_SESSION_ID': 'grok-sid'})
+        self.assertEqual(code, 1, out)
+        self.assertIn('sessão Claude', out)
+        self.assertEqual(self.path.read_text(), self.original)
+        self.assertFalse(self.log.exists())
 
     def test_current_turn_uses_offset_until_commit_and_preserves_state(self):
         _, state = self.transcript()
@@ -1453,7 +1475,7 @@ class NoteEnvironmentIsolationTest(NoteFixture):
     `brza note commit` dos testes, e o evento `task` não vai ao log do workspace real."""
 
     REAL = {'BRZA_WORKSPACE': None, 'CLAUDE_CODE_SESSION_ID': 'sessao-real', 'ORCA_AGENT_SESSION_ID': 'chat-real',
-            'CLAUDE_SESSION_NAME': 'nome-real', 'BRZA_STUDIO': None}
+            'CLAUDE_SESSION_NAME': 'nome-real', 'GROK_SESSION_ID': 'grok-real', 'BRZA_STUDIO': None}
 
     @classmethod
     def setUpClass(cls):

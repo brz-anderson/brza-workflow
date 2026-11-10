@@ -1035,6 +1035,83 @@ class MeetingCommandsTest(unittest.TestCase):
             code,out=self.run_main('usage','persona','--json');self.assertEqual(code,0,out)
             row=json.loads(out)['sessions'][0];self.assertFalse(row['measured']);self.assertEqual(row['reason'],'unmeasured')
 
+    def grok_home(self):
+        home = self.config / 'home'
+        (home / '.grok' / 'sessions').mkdir(parents=True)
+        return home
+
+    def test_usage_grok_sums_turns_from_usage_json_and_not_the_session_object(self):
+        chat = self.mapped(agent='grok')
+        sid = 'grok-provider-1'
+        self.write_map({'event': 'session', 'chat': chat, 'provider_session': sid})
+        home = self.grok_home()
+        root = home / '.grok' / 'sessions'
+        real = root / 'encoded-cwd' / sid
+        real.mkdir(parents=True)
+        decoy = root / 'other-cwd' / sid
+        decoy.mkdir(parents=True)
+        child = real / 'subagents' / 'kid'
+        child.mkdir(parents=True)
+        def turn(number, inp, cached, write, output, ticks):
+            return {'turnNumber': number, 'inputTokens': inp, 'cachedReadTokens': cached,
+                    'cacheCreationTokens': write, 'outputTokens': output, 'costUsdTicks': ticks}
+        (real / 'usage.json').write_text(json.dumps({
+            'sessionId': sid,
+            'session': {'inputTokens': 999999, 'cachedReadTokens': 1, 'outputTokens': 1, 'costUsdTicks': 99900000000000},
+            'turns': [turn(1, 1000, 400, 10, 5, 15000000000), turn(2, 200, 50, 0, 7, 25000000000),
+                      {'inputTokens': 1, 'costUsdTicks': 10000000000}],
+        }))
+        (decoy / 'usage.json').write_text(json.dumps({
+            'sessionId': 'not-the-session', 'turns': [turn(1, 1, 0, 0, 1, 50000000000000)],
+        }))
+        (child / 'usage.json').write_text(json.dumps({
+            'sessionId': 'kid', 'turns': [turn(9, 5000, 0, 0, 0, 80000000000000)],
+        }))
+        with patch.object(Path, 'home', return_value=home):
+            code, out = self.run_main('usage', 'persona', '--json')
+        self.assertEqual(code, 0, out)
+        row = json.loads(out)['sessions'][0]
+        self.assertTrue(row['measured'])
+        self.assertEqual(row['turns'], 2)
+        self.assertEqual(row['cost_usd'], 1.5 + 2.5)
+        self.assertEqual(row['tokens'], {'input': (1000 - 400) + (200 - 50), 'cache_read': 450,
+                                         'cache_write': 10, 'output': 12})
+        self.assertNotIn('reason', row)
+
+    def test_usage_grok_without_usage_json_stays_unmeasured(self):
+        chat = self.mapped(agent='grok')
+        self.write_map({'event': 'session', 'chat': chat, 'provider_session': 'missing-provider'})
+        home = self.grok_home()
+        with patch.object(Path, 'home', return_value=home):
+            code, out = self.run_main('usage', 'persona', '--json')
+        self.assertEqual(code, 0, out)
+        row = json.loads(out)['sessions'][0]
+        self.assertFalse(row['measured'])
+        self.assertEqual(row['reason'], 'unmeasured')
+
+    def test_usage_grok_cost_is_null_when_a_turn_has_no_cost(self):
+        chat = self.mapped(agent='grok')
+        sid = 'grok-provider-null'
+        self.write_map({'event': 'session', 'chat': chat, 'provider_session': sid})
+        home = self.grok_home()
+        folder = home / '.grok' / 'sessions' / 'encoded' / sid
+        folder.mkdir(parents=True)
+        (folder / 'usage.json').write_text(json.dumps({
+            'sessionId': sid,
+            'session': {'costUsdTicks': 100000000000},
+            'turns': [{'turnNumber': 1, 'inputTokens': 10, 'cachedReadTokens': 4, 'cacheCreationTokens': 1,
+                       'outputTokens': 2, 'costUsdTicks': 10000000000},
+                      {'turnNumber': 2, 'inputTokens': 6, 'cachedReadTokens': 1, 'outputTokens': 1}],
+        }))
+        with patch.object(Path, 'home', return_value=home):
+            code, out = self.run_main('usage', 'persona', '--json')
+        self.assertEqual(code, 0, out)
+        row = json.loads(out)['sessions'][0]
+        self.assertTrue(row['measured'])
+        self.assertIsNone(row['cost_usd'])
+        self.assertEqual(row['turns'], 2)
+        self.assertEqual(row['tokens'], {'input': 11, 'cache_read': 5, 'cache_write': 1, 'output': 3})
+
     def test_close_force_confirms_stop_and_settlement_before_release(self):
         self.mapped(dispatch='ctx_probe',state='working');self.orch_calls=[];stopped=False
         def brza(*args):
