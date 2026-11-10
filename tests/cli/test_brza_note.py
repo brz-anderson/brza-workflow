@@ -52,7 +52,8 @@ class NoteFixture(unittest.TestCase):
 
     # O ambiente da sessão que roda a suíte, que o `brza note commit` leria e gravaria no log do workspace real (X9)
     SESSION_ENV = ('BRZA_WORKSPACE', 'BRZA_STUDIO', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_BRIDGE_SESSION_ID',
-                   'ORCA_AGENT_SESSION_ID', 'CLAUDE_SESSION_NAME', 'GROK_SESSION_ID', 'MEASURE_DIR')
+                   'ORCA_AGENT_SESSION_ID', 'CLAUDE_SESSION_NAME', 'GROK_SESSION_ID', 'MEASURE_DIR',
+                   'CLAUDE_PID')
 
     def setUp(self):
         environment = patch.dict(os.environ)
@@ -1206,6 +1207,22 @@ class TaskCommitTest(NoteFixture):
         self.assertNotIn('velho', text)
         self.assertIn('Registro.', text)
 
+    def test_the_task_event_carries_the_pid_of_the_session_claude(self):  # D1; A2 da revisão da entrega
+        code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid', 'CLAUDE_PID': '4242'})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.events()[-1]['pid'], 4242)
+
+    def test_the_cpu_follows_the_number_rule_of_the_section(self):  # D3; A3 da revisão da entrega
+        cut = runpy.run_path(str(BIN / 'brza-note'), run_name='brza_note')
+        summary, _ = cut['measurement_modules']()
+        measure = {'elapsed_s': 600, 'agent_s': 500, 'requester_s': 100, 'pause_s': 0, 'cost_turns': 1,
+                   'cost_subagents': 0, 'no_cost_turns': 0, 'no_cost_subagents': 0, 'machine_turns': 1,
+                   'cpu_self_s': 27.94, 'cpu_children_s': 1089.43, 'rss_max_mb': 459, 'turns': 1, 'sessions': 1,
+                   'runs': 0, 'shared_with': 0}
+        event = {'event': 'task', 'timestamp': '2026-11-09T19:48:08-03:00', 'until': None}
+        line = cut['measure_line'](measure, event, summary, False)
+        self.assertIn('CPU 28 s do `claude` e 18 min dos comandos, RSS até 459 MB', line)
+
     def test_the_title_inside_a_fenced_block_is_not_the_section(self):  # A2 da revisão do P7
         fenced = '\n```markdown\n## Custo da tarefa\n\nexemplo\n```\n\nDepois da cerca.\n'
         self.path.write_text(self.original + fenced)
@@ -1379,8 +1396,7 @@ class TaskCommitTest(NoteFixture):
             code, out = self.close(env={'CLAUDE_CODE_SESSION_ID': 'sid'})
         self.assertEqual(code, 0, out)
         self.assertEqual(called, [(99, 'env', {'cpu_self_s': 5})])
-        self.assertIn('CPU 0,80 s', self.path.read_text())
-        self.assertIn('6,10 s', self.path.read_text())
+        self.assertIn('CPU 1 s do `claude` e 6 s dos comandos', self.path.read_text())  # A3 da revisão da entrega
         self.assertIn('RSS até 357 MB', self.path.read_text())
         self.assertEqual(state.read_bytes(), before)
 

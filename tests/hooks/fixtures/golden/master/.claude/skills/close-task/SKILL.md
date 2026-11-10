@@ -45,8 +45,8 @@ não se aplica: o commit sai sem carimbo de sessão.
 
 ## 3. O worklog de hoje
 
-- **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois, acima da `## Custo da tarefa` quando ela existe: o
-  que ficar abaixo dela se perde no commit seguinte.
+- **A tarefa já tem worklog de hoje:** acrescente a ele o que veio depois, acima da `## Custo da tarefa` quando ela existe —
+  ou da `## Medida`, o título dela até 2026-11-09: o que ficar abaixo dela se perde no commit seguinte.
 - **Não tem:** crie `work/worklogs/AAAA-MM-DD-assunto-em-kebab.md`, com `scope` no frontmatter e sem `status` nem `date`,
   na forma da seção `work/worklogs/` do `work/README.md`. Mudou o assunto, virou o dia ou houve decisão: é arquivo novo.
 - **O conteúdo** é o registro escrito, não a transcrição: o que se fez, o que se decidiu (com a resposta literal da

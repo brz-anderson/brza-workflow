@@ -711,7 +711,7 @@ def measurement_modules() -> tuple[dict, dict]:
 
 def task_context(root: Path, branch: str, worklogs: list[str], until: str | None) -> tuple[dict, list[dict], dict, Path]:
     """Valida o corte antes de tocar os arquivos e mantém o mesmo instante para a prévia e o evento."""
-    summary, _ = measurement_modules()
+    summary, hook = measurement_modules()
     directory = measurement_dir(root)
     rows, bad, _ = summary['read_log'](str(directory / 'measurements.jsonl'), '')
     if bad:
@@ -724,7 +724,7 @@ def task_context(root: Path, branch: str, worklogs: list[str], until: str | None
     event = {'event': 'task', 'timestamp': stamp, 'session_id': sid,
              'bridge_session_id': os.environ.get('CLAUDE_CODE_BRIDGE_SESSION_ID') or None,
              'chat_id': os.environ.get('ORCA_AGENT_SESSION_ID') or None, 'session_name': session_name(),
-             'pid': os.getpid(), 'cwd': str(Path.cwd()), 'workstream': branch.removeprefix(WORKSTREAM_PREFIX),
+             'pid': hook['claude_pid']()[0], 'cwd': str(Path.cwd()), 'workstream': branch.removeprefix(WORKSTREAM_PREFIX),
              'worklogs': worklogs, 'commit': None, 'until': None}
     if until is not None:
         if not claude_sid or not worklogs:
@@ -813,10 +813,8 @@ def measure_line(measure: dict | None, event: dict, summary: dict, partial: bool
                 f"US$ {decimal(cost)} ({cost_label} {decimal(m['cost_turns'])}, "
                 f"subagentes {decimal(m['cost_subagents'])})")
         if m['machine_turns']:
-            line += (f" · CPU {decimal(m['cpu_self_s'])} s do `claude` e "
-                     f"{decimal(m['cpu_children_s'])} s dos comandos, RSS até {memory(m['rss_max_mb'])}"
-                     if m['rss_max_mb'] is not None else
-                     f" · CPU {decimal(m['cpu_self_s'])} s do `claude` e {decimal(m['cpu_children_s'])} s dos comandos")
+            cpu = f" · CPU {duration(m['cpu_self_s'])} do `claude` e {duration(m['cpu_children_s'])} dos comandos"
+            line += cpu + (f", RSS até {memory(m['rss_max_mb'])}" if m['rss_max_mb'] is not None else '')
         else:
             line += ' · máquina não medida'
         line += (f" · {m['turns']} turno{'s' if m['turns'] != 1 else ''}, "
