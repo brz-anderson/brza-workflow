@@ -9,6 +9,10 @@ delegação a _subagente_. Identificador, comando, caminho e chave de configura�
 agente, de _subagente por papel_ e de skill nasce em inglês**, em kebab-case, como `plan-runner` e `collector`; a
 descrição e o corpo seguem em português.
 
+**Todo código do ecossistema BrzA é em inglês** — nome de arquivo, módulo, função, método, classe, variável e chave de
+dado, no `brza-workspace`, no `brza-studio`, no `brza-workflow` e nas skills. O pt-BR fica só nas docstrings e no texto
+que volta ao usuário, como a mensagem de erro ou a saída de um comando.
+
 **Comando para quem pediu rodar vai em bloco cercado com a linguagem de shell** — ` ```bash `, um comando por bloco
 quando cada um roda sozinho —, nunca em cerca sem linguagem. O chat do {{workspace.title}} só mostra o ▶, que roda o bloco
 num terminal do worktree do chat, nas cercas `sh`, `bash`, `zsh`, `shell` e `console`. **Caminho e expansão (`$(…)`,
