@@ -897,6 +897,15 @@ class CloudPortTest(unittest.TestCase):
         self.assertEqual(self.app.calls, [])
         self.assertFalse(self.map.exists())
 
+    def test_diag_cloud_dry_run_prints_ask_mode(self):
+        with self.block_process_start(), self.cloud_env():
+            code, out = self.run_main(
+                'diag-cloud', '--agent', 'cursor', '--dry-run', '--mode', 'ask', '--model', 'grok-4.7')
+        self.assertEqual(code, 0, out)
+        self.assertIn('--mode ask', out)
+        self.assertIn('abriria', out)
+        self.assertEqual(self.launches, [])
+
     def test_diag_cloud_without_dry_run_names_the_cloud_runtime_and_open(self):
         def forbidden(*args, **kwargs):
             self.fail(f'diag-cloud executou: {args}')
@@ -972,6 +981,59 @@ class CloudPortTest(unittest.TestCase):
         self.assertIn('sess-1', resumed)
         self.assertNotIn('brza-test-key-not-real', resumed)
         self.assertNotIn('brza-test-key-not-real', out)
+
+    def test_two_cloud_sends_keep_the_persona_and_drop_chats_and_credentials(self):
+        sentinel = 'brza-test-key-not-real'
+        cloud_runtime, root, capture, env = self.cloud_agent()
+        agent = Path(env['PATH'].split(os.pathsep)[0]) / 'agent'
+        agent.write_text(
+            '#!/usr/bin/env python3\n'
+            'import json, os, sys\n'
+            'from pathlib import Path\n'
+            'key = os.environ["CURSOR_API_KEY"]\n'
+            'if key in sys.argv or "BRZA_CURSOR_API_KEY" in os.environ:\n'
+            '    raise SystemExit("vazou")\n'
+            'home = Path(os.environ["HOME"])\n'
+            'chats = home / ".cursor" / "chats"\n'
+            'chats.mkdir(parents=True, exist_ok=True)\n'
+            '(chats / "store.db").write_text("conversa")\n'
+            'auth = home / ".config" / "cursor" / "auth.json"\n'
+            'auth.parent.mkdir(parents=True, exist_ok=True)\n'
+            'auth.write_text("credencial-local")\n'
+            '(home / ".cursor" / "auth.json").write_text("credencial-local")\n'
+            'path = Path(os.environ["BRZA_CAPTURE"])\n'
+            'seen = json.loads(path.read_text())\n'
+            'seen.append(sys.argv)\n'
+            'path.write_text(json.dumps(seen))\n'
+            'if os.environ.get("BRZA_FAKE_FAIL") == "1":\n'
+            '    print(json.dumps({"is_error": True, "result": "falhou", "session_id": "sess-1"}))\n'
+            '    raise SystemExit(1)\n'
+            'print(json.dumps({"session_id": "sess-1", "result": "ok"}))\n'
+        )
+        agent.chmod(0o755)
+        persona = Path(env['HOME']) / '.local' / 'share' / 'brza' / 'cloud-runtime' / 'p7'
+        with self.cloud_env(**env):
+            opened = cloud_runtime.CloudRuntime(keep_home=True).open({
+                'persona': 'p7', 'model': 'grok-4.7-low', 'workspace': str(root),
+                'mode': 'ask', 'prompt': 'abre',
+            })
+            first, out = self.run_main('--runtime', 'cloud', 'send', opened.session_id, 'um')
+            second, out2 = self.run_main('--runtime', 'cloud', 'send', opened.session_id, 'dois')
+            with patch.dict(os.environ, {'BRZA_FAKE_FAIL': '1'}):
+                failed, out3 = self.run_main('--runtime', 'cloud', 'send', opened.session_id, 'falha')
+        self.assertEqual(first, 0, out)
+        self.assertEqual(second, 0, out2)
+        self.assertEqual(json.loads(out2)['session_id'], opened.session_id)
+        self.assertNotEqual(failed, 0)
+        for text in (out, out2, out3):
+            self.assertNotIn(sentinel, text)
+        self.assertTrue((persona / 'persona.json').is_file())
+        self.assertFalse((persona / '.cursor' / 'chats').exists())
+        self.assertFalse((persona / '.cursor' / 'auth.json').exists())
+        self.assertFalse((persona / '.config' / 'cursor' / 'auth.json').exists())
+        resumed = json.loads(capture.read_text())[-1]
+        self.assertIn('--resume', resumed)
+        self.assertIn(opened.session_id, resumed)
 
     def test_diag_cloud_refuses_an_agent_other_than_cursor(self):
         code, out = self.run_main('diag-cloud', '--agent', 'grok', '--dry-run')

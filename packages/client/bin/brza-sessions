@@ -11,7 +11,7 @@ Uso:
                 [--prompt TEXTO | --prompt-file ARQUIVO] [--model MODELO [--effort ESFORÇO]]
                 [--title TÍTULO] [--rename] [--wait] [--dry-run]
   brza sessions list [--prefix PREFIXO] [--json] [--runtime studio|cloud]
-  brza sessions diag-cloud --agent cursor [--dry-run] [--model ID] [--workspace DIR]
+  brza sessions diag-cloud --agent cursor [--dry-run] [--model ID] [--workspace DIR] [--mode MODO]
   brza sessions send <nome> <texto> [--json]
   brza sessions send [nomes...] [--prefix PREFIXO] (--text TEXTO | --file ARQUIVO) [--operation ID] [--json]
   brza sessions wait [nomes...] [--prefix PREFIXO] [--marker ARQUIVO:REGEX] [--any] [--timeout SEGUNDOS] [--json]
@@ -1088,12 +1088,13 @@ def diag_cloud(argv):
     ap.add_argument('--model')
     ap.add_argument('--workspace')
     ap.add_argument('--resume')
+    ap.add_argument('--mode')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
     if args.agent != 'cursor':
         print(f'CHECK:    diag-cloud: --agent {args.agent} não é cursor; nada foi aberto')
         return 1
-    planned = open_argv(args.model, args.workspace, args.resume)
+    planned = open_argv(args.model, args.workspace, args.resume, args.mode)
     if args.dry_run:
         print('abriria: ' + shlex.join(planned))
         return 0

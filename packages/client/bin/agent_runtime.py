@@ -122,10 +122,10 @@ def select_runtime(forced=None, env=None):
         return StudioRuntime()
     if forced == 'cloud':
         from cloud_runtime import CloudRuntime
-        return CloudRuntime(env)
+        return CloudRuntime(env, keep_home=True)
     if socket_present():
         return StudioRuntime()
     if conversation_id(env):
         from cloud_runtime import CloudRuntime
-        return CloudRuntime(env)
+        return CloudRuntime(env, keep_home=True)
     return StudioRuntime()

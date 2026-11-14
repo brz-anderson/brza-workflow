@@ -446,14 +446,17 @@ class CloudRuntime:
                     touched=lambda path: _touched(path, before))
 
 
-def open_argv(model=None, workspace=None, chat_id=None):
+def open_argv(model=None, workspace=None, chat_id=None, mode=None):
     """O argv que o dry-run imprime. Sem `--force` e sem `create-chat`.
 
     Sem `chat_id`, é o primeiro turno: o processo imprime um JSON e o id é o `session_id`.
-    Com `chat_id`, o turno seguinte acrescenta `--resume`.
+    Com `chat_id`, o turno seguinte acrescenta `--resume`. `--mode` só quando não é `agent`,
+    como no argv que o turno executa.
     """
     argv = ['agent', '-p', '--output-format', 'json', '--model', model or '<id>',
             '--workspace', str(workspace) if workspace else '<dir>', '--trust']
+    if mode not in (None, '', 'agent'):
+        argv += ['--mode', mode]
     if chat_id:
         argv += ['--resume', chat_id]
     return argv
@@ -708,7 +711,8 @@ def main(argv=None):
     open_cmd.add_argument('--prompt', required=True)
     open_cmd.add_argument('--timeout', **shared)
     open_cmd.add_argument('--log')
-    open_cmd.add_argument('--keep-home', action='store_true')
+    open_cmd.add_argument('--keep-home', action='store_true',
+                          help='aceito; o open da CLI conserva o home da persona')
     send_cmd = sub.add_parser('send')
     send_cmd.add_argument('--session', required=True)
     send_cmd.add_argument('--prompt', required=True)
@@ -716,9 +720,10 @@ def main(argv=None):
     send_cmd.add_argument('--mode')
     send_cmd.add_argument('--timeout', **shared)
     send_cmd.add_argument('--log')
-    send_cmd.add_argument('--keep-home', action='store_true')
+    send_cmd.add_argument('--keep-home', action='store_true',
+                          help='aceito; o send da CLI conserva o home da persona')
     args = parser.parse_args(argv)
-    runtime = CloudRuntime(timeout_s=args.timeout, log_path=args.log, keep_home=args.keep_home)
+    runtime = CloudRuntime(timeout_s=args.timeout, log_path=args.log, keep_home=True)
     try:
         if args.command == 'open':
             turn = runtime.open({
