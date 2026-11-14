@@ -145,6 +145,10 @@ class CommandTest(unittest.TestCase):
 
     def setUp(self):
         self.workspace = fake_workspace(self)
+        # O pod de cloud traz CURSOR_CONVERSATION_ID. Sem isto, o list destes testes cairia no CloudRuntime.
+        conversation = patch.dict(os.environ, {'CURSOR_CONVERSATION_ID': ''})
+        conversation.start()
+        self.addCleanup(conversation.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.config = Path(temp.name)
@@ -764,6 +768,151 @@ class CommandTest(unittest.TestCase):
         self.map.write_text('{quebrada\n' + json.dumps({'event': 'open', 'at': 'a', 'name': 'pln-coord', 'title': 't',
                                                          'chat': 'claude_c', 'checkout': '/x', 'renamed': False}) + '\n')
         self.assertEqual(list(SESSIONS['session_map']()), ['claude_c'])
+
+
+class CloudPortTest(unittest.TestCase):
+    """O degrau 1 da porta: list da run cloud, dry-run, e falha que nomeia runtime e capacidade."""
+
+    setUp = CommandTest.setUp
+    transcript = CommandTest.transcript
+    write_map = CommandTest.write_map
+    read_map = CommandTest.read_map
+    calls = CommandTest.calls
+    run_main = CommandTest.run_main
+    launch = CommandTest.launch
+
+    def empty_user_data(self) -> str:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return temp.name
+
+    def cloud_env(self, **extra):
+        values = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': ''}
+        values.update(extra)
+        return patch.dict(os.environ, values)
+
+    def test_list_json_without_the_socket_returns_the_cloud_run_and_writes_nothing(self):
+        data = self.empty_user_data()
+        sentinel = Path(data) / 'tabs.json'
+        sentinel.write_text('{"tabs":[]}')
+        with self.cloud_env(ORCA_USER_DATA_PATH=data):
+            before = {key: os.environ[key] for key in os.environ if key.startswith('ORCA_')}
+            code, out = self.run_main('list', '--json')
+            during = {key: os.environ[key] for key in os.environ if key.startswith('ORCA_')}
+        self.assertEqual(code, 0, out)
+        sessions = json.loads(out)['sessions']
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['id'], 'bc-teste')
+        self.assertEqual(sessions[0]['source'], 'cloud')
+        self.assertEqual(sessions[0]['agent'], 'cursor')
+        self.assertEqual(sessions[0]['status'], 'running')
+        self.assertEqual(sessions[0]['metrics']['cost_usd'], {'value': 'ausente', 'origin': 'ausente'})
+        self.assertEqual(sessions[0]['metrics']['tokens'], {'value': 'ausente', 'origin': 'ausente'})
+        self.assertNotEqual(sessions[0]['metrics']['cost_usd']['value'], 0)
+        self.assertNotEqual(sessions[0]['metrics']['tokens']['value'], 0)
+        self.assertEqual(sentinel.read_text(), '{"tabs":[]}')
+        self.assertFalse(self.map.exists())
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.app.calls, [])
+        self.assertEqual({key: value for key, value in during.items() if key != 'ORCA_USER_DATA_PATH'},
+                         {key: value for key, value in before.items() if key != 'ORCA_USER_DATA_PATH'})
+        self.assertNotIn('ORCA_AGENT_SESSION_ID', during)
+
+    def test_a_present_socket_keeps_the_studio_tab_json_free_of_cloud_records(self):
+        data = self.empty_user_data()
+        (Path(data) / 'orca-runtime.json').write_text('{}')
+        with self.cloud_env(ORCA_USER_DATA_PATH=data):
+            code, out = self.run_main('list', '--json')
+        self.assertEqual(code, 0, out)
+        sessions = json.loads(out)['sessions']
+        self.assertEqual([item['name'] for item in sessions], ['pln-002-p7', 'pln-003', None])
+        self.assertTrue(all(item.get('source') != 'cloud' for item in sessions))
+        self.assertNotIn('bc-teste', out)
+
+    def test_runtime_cloud_lists_only_the_cloud_run_even_when_the_socket_exists(self):
+        data = self.empty_user_data()
+        (Path(data) / 'orca-runtime.json').write_text('{}')
+        with self.cloud_env(ORCA_USER_DATA_PATH=data):
+            code, out = self.run_main('list', '--json', '--runtime', 'cloud')
+        self.assertEqual(code, 0, out)
+        sessions = json.loads(out)['sessions']
+        self.assertEqual([item['id'] for item in sessions], ['bc-teste'])
+        self.assertEqual(sessions[0]['source'], 'cloud')
+        self.assertEqual(self.app.calls, [])
+
+    def test_diag_cloud_dry_run_prints_abriria_and_does_not_start_a_worker(self):
+        def forbidden(*args, **kwargs):
+            self.fail(f'diag-cloud executou: {args}')
+
+        with patch('subprocess.run', forbidden), self.cloud_env():
+            code, out = self.run_main('diag-cloud', '--agent', 'cursor', '--dry-run', '--model', 'grok-4.7',
+                                      '--workspace', '/tmp/reuniao')
+        self.assertEqual(code, 0, out)
+        self.assertIn('abriria', out)
+        self.assertIn('--trust', out)
+        self.assertIn('--model grok-4.7', out)
+        self.assertIn('--workspace /tmp/reuniao', out)
+        self.assertNotIn('--force', out)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.app.calls, [])
+        self.assertFalse(self.map.exists())
+
+    def test_diag_cloud_without_dry_run_names_the_cloud_runtime_and_open(self):
+        def forbidden(*args, **kwargs):
+            self.fail(f'diag-cloud executou: {args}')
+
+        with patch('subprocess.run', forbidden), self.cloud_env():
+            code, out = self.run_main('diag-cloud', '--agent', 'cursor')
+        self.assertNotEqual(code, 0)
+        self.assertIn('cloud', out)
+        self.assertIn('open', out)
+        self.assertNotIn('abriria', out)
+        self.assertEqual(self.launches, [])
+
+    def test_diag_cloud_refuses_an_agent_other_than_cursor(self):
+        code, out = self.run_main('diag-cloud', '--agent', 'grok', '--dry-run')
+        self.assertNotEqual(code, 0)
+        self.assertNotIn('abriria', out)
+        self.assertEqual(self.launches, [])
+
+    def test_undeclared_cloud_capabilities_name_the_runtime_and_the_capability(self):
+        data = self.empty_user_data()
+        cases = (('usage',), ('send', 'nome', 'oi'), ('open', 'nome'), ('persona',))
+        with self.cloud_env(ORCA_USER_DATA_PATH=data):
+            for argv in cases:
+                with self.subTest(argv=argv):
+                    code, out = self.run_main('--runtime', 'cloud', *argv)
+                    capability = 'open' if argv[0] not in ('usage', 'send') else argv[0]
+                    self.assertNotEqual(code, 0, out)
+                    self.assertIn('cloud', out)
+                    self.assertIn(capability, out)
+                    self.assertEqual(self.launches, [])
+
+    def test_cloud_read_exits_zero_and_marks_the_transcript_ausente(self):
+        data = self.empty_user_data()
+        with self.cloud_env(ORCA_USER_DATA_PATH=data):
+            code, out = self.run_main('--runtime', 'cloud', 'read', 'nome', '--last', '--json')
+        self.assertEqual(code, 0, out)
+        payload = json.loads(out)
+        self.assertEqual(payload['transcript'], 'ausente')
+        self.assertEqual(payload['id'], 'nome')
+        self.assertEqual(payload['source'], 'cloud')
+        self.assertNotEqual(payload['transcript'], 0)
+        self.assertEqual(self.app.calls, [])
+        self.assertEqual(self.launches, [])
+        self.assertFalse(self.map.exists())
+
+    def test_runtime_studio_still_refuses_cursor_before_any_side_effect(self):
+        data = self.empty_user_data()
+        with self.cloud_env(ORCA_USER_DATA_PATH=data):
+            code, out = self.run_main('correcao', '--agent', 'cursor', '--runtime', 'studio')
+        self.assertEqual(code, 1)
+        self.assertIn(
+            'CHECK:    correcao: --agent cursor não é claude, codex, grok nem antigravity (agy); nada foi aberto',
+            out)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(self.app.calls, [])
+        self.assertEqual(self.read_map(), [])
 
 
 if __name__ == '__main__':
