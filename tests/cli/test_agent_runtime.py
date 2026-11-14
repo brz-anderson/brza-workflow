@@ -86,6 +86,12 @@ class ContractTest(unittest.TestCase):
         self.assertNotEqual(record.metrics['cost_usd']['value'], 0)
         self.assertNotEqual(record.metrics['tokens']['value'], 0)
 
+    def test_studio_list_without_a_client_fails_instead_of_returning_empty(self):
+        with self.assertRaises(agent_runtime.BrzaError) as caught:
+            agent_runtime.StudioRuntime().list()
+        self.assertIn('list', str(caught.exception))
+        self.assertIn('cliente', str(caught.exception))
+
     def test_studio_list_never_emits_a_cloud_record(self):
         (record,) = agent_runtime.StudioRuntime(lister=lambda: [{
             'chat': 'claude_1', 'id': 'bc-nao', 'source': 'cloud', 'agent': 'claude', 'title': 'Aba',

@@ -76,7 +76,9 @@ class StudioRuntime:
 
     def list(self):
         require_capability(self, 'list')
-        return [session_from_studio_row(row) for row in (self.lister() if self.lister else [])]
+        if self.lister is None:
+            raise BrzaError('studio: list sem cliente')
+        return [session_from_studio_row(row) for row in self.lister()]
 
     def read(self, session_id):
         require_capability(self, 'read')
