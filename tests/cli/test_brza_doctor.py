@@ -415,6 +415,51 @@ class DoctorTest(unittest.TestCase):
         self.assertIn('sem git', self.line(out, 'identidade'))
         self.assertTrue(self.line(out, 'app').startswith('ok'))
 
+    def test_env_cloud_without_socket_exits_zero_and_warns(self):
+        self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
+        data = self.base / 'user-data-cloud'
+        data.mkdir()
+        missing_app = self.base / 'sem-app'
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env), patch.dict(GLOBALS, {'APP': missing_app}):
+            code, out = self.run_doctor('--env')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('ERRO', out)
+        self.assertTrue(self.line(out, 'socket').startswith('AVISO'), out)
+        self.assertIn('cloud', self.line(out, 'socket'))
+        self.assertTrue(self.line(out, 'app').startswith('AVISO'), out)
+        self.assertTrue(self.line(out, 'identidade').startswith('AVISO'), out)
+        self.assertTrue(self.line(out, 'chave').startswith('AVISO'), out)
+        self.assertIn('ausente', self.line(out, 'chave'))
+
+    def test_env_without_cloud_and_without_socket_is_an_error(self):
+        data = self.base / 'user-data-mac'
+        data.mkdir()
+        env = {'CURSOR_CONVERSATION_ID': '', 'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertNotEqual(code, 0)
+        line = self.line(out, 'socket')
+        self.assertTrue(line.startswith('ERRO'), out)
+        self.assertIn('ausente', line)
+
+    def test_env_cloud_with_socket_does_not_warn_about_the_socket(self):
+        data = self.base / 'user-data-socket'
+        data.mkdir()
+        (data / 'orca-runtime.json').write_text('{}')
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.line(out, 'socket').startswith('ok'), out)
+
+    def test_conversation_id_does_not_soften_the_doctor_without_env(self):
+        self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
+        with patch.dict(os.environ, {'CURSOR_CONVERSATION_ID': 'bc-teste'}):
+            code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertTrue(self.line(out, 'identidade').startswith('ERRO'))
+
 
 if __name__ == '__main__':
     unittest.main()
