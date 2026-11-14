@@ -140,7 +140,7 @@ class CloudRuntime:
         return meta
 
     def close(self):
-        """Apaga o home da persona. Com `keep_home`, só tira a chave para um send de outro processo."""
+        """Apaga o home da persona. Com `keep_home`, tira chat e credencial e deixa o `persona.json`."""
         homes = [self._persona_path(_safe_name(label)) for label in list(self._homes)]
         key = self._key()
         for home in homes:
