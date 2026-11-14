@@ -76,6 +76,7 @@ def main():
         fails += check_pln008_p1()
         fails += check_pln008_p8()
         fails += check_pln012_p5()
+        fails += check_feedback()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(1 if fails else 0)
@@ -928,6 +929,77 @@ def check_pln012_p5():
     expect("a tabela do hook de medição tem os eventos task e run",
            re.search(r"^\| `task` +\|", hook, re.M) is not None and re.search(r"^\| `run` +\|", hook, re.M) is not None)
     expect("o resumo cita o --by-task e o --pending", "--by-task" in hook and "--pending" in hook)
+    return fails
+
+
+def check_feedback():
+    """D2: work/feedbacks/ exige as cinco seções, nesta ordem, e model, effort e result válidos."""
+    sections = ("## Pedido", "## Escolha", "## Erro", "## Esforço", "## Próxima vez")
+
+    def body(*titles):
+        return "\n".join(f"{title}\n\ntexto\n" for title in titles)
+
+    front = (
+        "---\n"
+        "scope:\n"
+        "  - workspace\n"
+        "builder: bob\n"
+        "task_type: code\n"
+        "model: grok-4.7\n"
+        "effort: medium\n"
+        "result: done\n"
+        "---\n\n"
+        "# Feedback\n\n"
+    )
+    valid = "work/feedbacks/2026-11-14-valido.md"
+    missing = "work/feedbacks/2026-11-14-sem-secao.md"
+    fields = "work/feedbacks/2026-11-14-campos.md"
+    order = "work/feedbacks/2026-11-14-ordem.md"
+    fence = "work/feedbacks/2026-11-14-cerca.md"
+    status = "work/feedbacks/2026-11-14-com-status.md"
+    refused = "work/feedbacks/2026-11-14-recusado.md"
+    notes = {
+        valid: front + body(*sections),
+        refused: front.replace("result: done", "result: refused") + body(*sections),
+        missing: front + body("## Pedido", "## Escolha", "## Erro", "## Próxima vez"),
+        fields: '---\nmodel: ""\nresult: no\n---\n\n# Feedback\n\n' + body(*sections),
+        order: front + body("## Pedido", "## Erro", "## Escolha", "## Esforço", "## Próxima vez"),
+        fence: front + "## Pedido\n\np\n\n## Escolha\n\ne\n\n```\n## Erro\n```\n\n## Esforço\n\ne\n\n## Próxima vez\n\np\n",
+        status: front.replace("result: done", "result: partial").replace("---\n", "---\nstatus: open\n", 1) + body(*sections),
+    }
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    fails = total = 0
+    try:
+        write_notes(tmp, notes)
+        _, stdout = run_checker("--root", tmp, "--json")
+        out = json.loads(stdout)
+        errors = {(r, w, t) for r, w, t in out["errors"]}
+        warnings = {(r, w) for r, w, _ in out["warnings"]}
+
+        def expect(label, ok):
+            nonlocal fails, total
+            total += 1
+            print(("  ok  " if ok else "FALHA ") + label)
+            fails += not ok
+
+        expect("feedback válido não gera erro nem aviso",
+               not any(w == valid for _, w, _ in out["errors"]) and not any(w == valid for _, w in warnings))
+        expect("result refused é válido", not any(w == refused for _, w, _ in out["errors"]))
+        expect("seção ausente é erro", ("feedback-section-missing", missing, "## Esforço") in errors)
+        expect("a seção que está na nota não é acusada",
+               not any(r == "feedback-section-missing" and w == missing and t != "## Esforço" for r, w, t in errors))
+        expect("model vazio é erro", ("feedback-model-invalid", fields, "") in errors)
+        expect("effort ausente é erro", ("feedback-effort-invalid", fields, "") in errors)
+        expect("result fora dos três é erro", ("feedback-result-invalid", fields, "no") in errors)
+        expect("seções fora de ordem é erro", any(r == "feedback-section-order" and w == order for r, w, _ in errors))
+        expect("seção só dentro de cerca não conta", ("feedback-section-missing", fence, "## Erro") in errors)
+        expect("result partial é válido", not any(r == "feedback-result-invalid" and w == status for r, w, _ in errors))
+        expect("status em feedback é aviso, não erro de vocabulário",
+               ("status-on-stateless-genre", status) in warnings
+               and not any(r == "status-out-of-vocabulary" and w == status for r, w, _ in errors))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"\n{total - fails} de {total} casos de feedback passaram." if fails else f"\n{total} casos de feedback, todos passaram.")
     return fails
 
 

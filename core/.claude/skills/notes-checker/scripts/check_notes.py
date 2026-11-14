@@ -8,7 +8,9 @@ Confere a forma das notas contra a norma do work/README.md e do plans/README.md.
          status fora do vocabulário; campo obrigatório ausente em nota datada de CUTOFF em diante;
          plano aberto fora do molde do plans/README.md — o frontmatter, o Retomar e as seções (plan_findings);
          plano, issue ou decisão aberta de DESCRIPTION_FROM em diante sem o campo `description`, que o índice da master
-         (`.brza/index.jsonl`) guarda; a nota anterior entra no índice com o H1 e não é cobrada
+         (`.brza/index.jsonl`) guarda; a nota anterior entra no índice com o H1 e não é cobrada;
+         nota de work/feedbacks/ sem uma das cinco seções, fora da ordem, com model ou effort vazio, ou com result
+         fora de done, refused e partial
   aviso  o mesmo campo ausente em nota sem data nenhuma; type redundante; tag fora do vocabulário; achado de um parecer
          de work/reviews/ sem **Evidência:**; nota de work/ que linka um plano aberto e falta na seção de ponteiro dele
 
@@ -35,7 +37,7 @@ from urllib.parse import unquote
 
 # Os vocabulários são do work/README.md e do plans/README.md; mudou lá, muda aqui no mesmo commit.
 STATUSES = {"open", "in_progress", "in_review", "done", "dropped"}
-STATELESS_GENRES = {"guide", "worklog", "note"}
+STATELESS_GENRES = {"guide", "worklog", "note", "feedback"}
 TAGS = {"auth", "chat", "design", "infra", "planning", "release", "tooling"}
 FORBIDDEN_TAG_PREFIXES = ("work/", "repo/", "scope/", "status/")
 # O dia em que o workspace nasceu: toda nota datada daí em diante é cobrada; só a que não tem data nenhuma sai como
@@ -83,8 +85,13 @@ GENRES = {
     "work/worklogs": "worklog",
     "work/reviews": "review",
     "work/decisions": "decision",
+    "work/feedbacks": "feedback",
     "wiki/guides": "guide",
 }
+# D2 do PLN-025: uma nota por execução, sem status. model e effort inválidos são os vazios — a lista de modelos e a
+# escada de esforço mudam por runtime. result só aceita estes três.
+FEEDBACK_SECTIONS = ("## Pedido", "## Escolha", "## Erro", "## Esforço", "## Próxima vez")
+FEEDBACK_RESULTS = {"done", "refused", "partial"}
 # A zona que é o próprio gênero: plans/<arquivo> e plans/<PLN-NNN-assunto>/<arquivo>; o README.md dela é a norma
 FLAT_ZONES = {"plans": "plan"}
 
@@ -636,6 +643,27 @@ def date_of(fm):
     return max(dates) if dates else None
 
 
+def feedback_findings(text, fm):
+    """Seções na ordem do D2, model e effort preenchidos, result no vocabulário. Devolve (regra, detalhe)."""
+    found = []
+    for line in without_code(text).split("\n"):
+        title = line.strip()
+        if title in FEEDBACK_SECTIONS and title not in found:
+            found.append(title)
+    missing = [title for title in FEEDBACK_SECTIONS if title not in found]
+    findings = [("feedback-section-missing", title) for title in missing]
+    if not missing and found != list(FEEDBACK_SECTIONS):
+        findings.append(("feedback-section-order", ", ".join(found)))
+    model, effort, result = fm.get("model"), fm.get("effort"), fm.get("result")
+    if not (isinstance(model, str) and model.strip()):
+        findings.append(("feedback-model-invalid", "" if model is None else str(model)))
+    if not (isinstance(effort, str) and effort.strip()):
+        findings.append(("feedback-effort-invalid", "" if effort is None else str(effort)))
+    if result not in FEEDBACK_RESULTS:
+        findings.append(("feedback-result-invalid", "" if result is None else str(result)))
+    return findings
+
+
 def check(root):
     on_disk = files(root)
     all_files = list(on_disk)
@@ -688,6 +716,9 @@ def check(root):
             for lineno, ref_id in unknown_mentions:
                 warnings.append(("unknown-ref-mention", rel, f"{ref_id} (linha {lineno})"))
         fm = frontmatter(text)
+        if genre == "feedback":
+            for rule, what in feedback_findings(text, fm):
+                errors.append((rule, rel, what))
         # D7, R14.1: a nota fora de número some do índice e do refs; avisa, sem barrar
         if genre == "review" and not REV_NOTE_RE.match(rel) and os.path.basename(rel) != "README.md":
             warnings.append(("review-without-number", rel, "o parecer nasce como work/reviews/REV-NNN-<slug>.md"))

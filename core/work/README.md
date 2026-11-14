@@ -30,6 +30,7 @@ Este é o único arquivo de norma das duas zonas. Norma do código fica no repos
   - [`work/reviews/`](#workreviews)
   - [`work/decisions/`](#workdecisions)
   - [`work/notes/`](#worknotes)
+  - [`work/feedbacks/`](#workfeedbacks)
   - [`wiki/guides/`](#wikiguides)
 - [Como escrever uma nota](#como-escrever-uma-nota)
 - [O que não entra aqui](#o-que-não-entra-aqui)
@@ -66,6 +67,7 @@ plano**; no resto a pasta é plana, e o nome do arquivo carrega o que a subpasta
 | `reviews/` | `review` | Parecer sobre um artefato numa versão, citável por quem foi revisado |
 | `decisions/` | `decision` | A questão e a decisão **no mesmo arquivo**, de `open` a `done` |
 | `notes/` | `note` | Rascunho do dia, de onde o conteúdo é promovido a arquivo próprio |
+| `feedbacks/` | `feedback` | Uma execução de Builder: pedido, escolha, erro e se o esforço regulou |
 
 ### `wiki/`
 
@@ -156,8 +158,9 @@ opened: 2026-10-27
 
 **Um assunto por arquivo**, em Markdown, nome em kebab-case e **único no acervo inteiro** — salvo o `README.md`, que é
 a norma de cada zona, nunca nota, e repete o nome por construção. Prefixo de data `AAAA-MM-DD-` só onde a data é parte
-do assunto — `worklogs/` e `notes/`. Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número
-sequencial reservado no índice da `{{workspace.branch}}` por `brza note plan-open`, `brza note review-open` e
+do assunto — `worklogs/`, `notes/` e `feedbacks/`.
+Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número sequencial reservado no índice da
+`{{workspace.branch}}` por `brza note plan-open`, `brza note review-open` e
 `brza note migration-open`, nunca data.
 
 **A imagem de uma nota fica ao lado dela**, com o nome da nota e um sufixo quando há mais de uma — `<nome>.png`,
@@ -213,13 +216,13 @@ O `{{code.name}}` é outro repositório, com branch `{{workspace.branch}}` e a n
 ## As propriedades
 
 **Identificador em inglês, prosa em português.** Chave de campo, valor de vocabulário fechado (`status`, `type`,
-`priority`, `tags`) e nome de pasta são identificador: inglês, `snake_case`, **sem acento**. Os campos de prosa —
-`blocks`, `trigger`, `owner` — ficam em português, porque são frase, não símbolo.
+`priority`, `tags`, `result`) e nome de pasta são identificador: inglês, `snake_case`, **sem acento**.
+Os campos de prosa — `blocks`, `trigger`, `owner` — ficam em português, porque são frase, não símbolo.
 
 | Propriedade | O que guarda |
 | :---------- | :----------- |
 | `type` | **Ausente**, quer dizer o gênero da pasta. Escrito só quando refina o caminho em `issues/`: `unknown` (investigação) ou `migration` (`MIG-NNN`, conduzida pela skill `migration-runner`) |
-| `status` | `open` existe e ninguém pegou · `in_progress` alguém está fazendo · `in_review` feito, esperando parecer · `done` encerrado **com** desfecho · `dropped` encerrado **sem** desfecho, por escolha. **Omitido** nos gêneros sem ciclo de vida: `guide`, `worklog` e `note` |
+| `status` | `open` existe e ninguém pegou · `in_progress` alguém está fazendo · `in_review` feito, esperando parecer · `done` encerrado **com** desfecho · `dropped` encerrado **sem** desfecho, por escolha. **Omitido** nos gêneros sem ciclo de vida: `guide`, `worklog`, `note` e `feedback` |
 | `scope` | A que a nota se refere. Sempre **lista**: `{{code.name}}`, `workspace`, ou o que mais vier |
 | `description` | Uma frase: o que a nota entrega ou pede. Obrigatória em plano (`-plan.md`), issue e decisão criados a partir de 2026-11-01, e vai ao índice da `{{workspace.branch}}`; nas anteriores, o índice usa o H1. O checador cobra `description-missing` |
 | `priority` | Em `issues/` e `plans/`: `high` · `medium` · `low`. Opcional e sem default; `brza note commit` avisa sem bloquear quando plano ou issue aberta não traz `priority` |
@@ -236,6 +239,12 @@ O `{{code.name}}` é outro repositório, com branch `{{workspace.branch}}` e a n
 | `deadline` | A **data** que encerra a espera, quando existe uma de verdade. Opcional, em `issues/`, `decisions/` e `plans/` |
 | `superseded_by` | A decisão que substitui esta. Supersedência é relação, não estado: a nota fica `done` |
 | `tags` | Assunto transversal, e só ele: `auth` · `chat` · `design` · `infra` · `planning` · `release` · `tooling`. Opcional. É a lista do checador; tag nova entra nele antes de entrar numa nota |
+| `model` | Em `feedbacks/`: o modelo da execução. Vazio é erro |
+| `effort` | Em `feedbacks/`: o esforço da execução. Vazio é erro |
+| `result` | Em `feedbacks/`: `done`, `refused` ou `partial`. Ausente ou outro valor é erro |
+| `builder` | Em `feedbacks/`: o Builder da execução |
+| `task_type` | Em `feedbacks/`: o tipo da tarefa dessa execução |
+| `session` | Em `feedbacks/`: o id da sessão, quando houver |
 
 `blocks` e `trigger` guardam **a primeira frase** do campo correspondente no corpo: a propriedade é resumo para
 varredura. **Tag nunca espelha campo nem caminho** — `work/*`, `scope/*` e `status/*` estão proibidas — e **é atalho,
@@ -275,7 +284,8 @@ facultativos.
 > `reviews/` sem evidência, a nota que linka um plano aberto e falta na seção dele, o parecer de `reviews/` fora de
 > `REV-NNN-<slug>.md`, a nota `MIG-NNN-…` sem `type: migration` e a issue `type: migration` sem o número `MIG-NNN`. Os
 > vocabulários estão no script (`.claude/skills/notes-checker/scripts/check_notes.py`) e nesta norma: mudou um, muda o
-> outro no mesmo commit.
+> outro no mesmo commit. **A nota de `work/feedbacks/`** entra nessa barra: sem uma das cinco seções, com as cinco fora
+> da ordem, com `result` fora de `done`, `refused` e `partial`, ou com `model` ou `effort` vazio.
 >
 > **Quem escreve numa nota existente lê o frontmatter primeiro**, antes de qualquer trecho do corpo: nota `done` ou
 > `dropped` recebe só emenda datada e reescrita de link; conteúdo novo vai à nota aberta que a norma ou o plano
@@ -377,6 +387,19 @@ consequência, dono — nasce na pasta do seu gênero, não aqui.
   ele.
 - **A releitura é no encerramento do dia.**
 
+### `work/feedbacks/`
+
+Nota de **uma execução** de Builder: o que foi pedido, o modelo e o esforço e o porquê, onde o modelo errou, se o
+esforço ficou desregulado e o que fazer na próxima. O worklog continua o diário da tarefa; esta nota existe para o
+relatório filtrar a execução sem ler o diário inteiro. **Não leva `status`**, no mesmo grupo de `worklog` e `note`.
+
+- **Nome `AAAA-MM-DD-<assunto>.md`**, uma nota por execução. A data mora no nome.
+- **Frontmatter:** `scope` (lista), `builder`, `task_type`, `model`, `effort`, `result` e `session` quando houver id.
+  `result` é `done`, `refused` ou `partial`. `model` e `effort` inválidos são os vazios: o valor em si fica livre,
+  porque a lista de modelos e a escada de esforço mudam por runtime.
+- **Cinco seções, nesta ordem:** `## Pedido`, `## Escolha`, `## Erro`, `## Esforço`, `## Próxima vez`. Sem uma delas,
+  ou com as cinco fora dessa ordem, o checador recusa.
+
 ### `wiki/guides/`
 
 Como **nós** usamos uma ferramenta, API ou produto — seleção parcial e opinativa, não cobertura. O nome do arquivo
@@ -391,7 +414,8 @@ carrega a ferramenta.
 
 1. **Escolha a pasta pelos quatro testes** — gênero, nunca assunto.
 2. **Nomeie em kebab-case**, único no acervo; prefixo de data só onde a data é parte do assunto.
-3. **Preencha o frontmatter que o estado pede** — `status` e `scope` quase sempre; `type` só na exceção.
+3. **Preencha o frontmatter que o estado pede** — `status` e `scope` quase sempre; `type` só na exceção. Em
+   `feedbacks/`, `model`, `effort` e `result` no lugar do `status`.
 4. **Diga as três coisas**: o que é, em que pé está, quem decide quando trava.
 5. **Prosa no `wiki/`, enxuto no `work/`.** Tabela e lista só para o que é de fato comparável ou enumerável. Nota
    antiga muda de formato quando alguém mexe nela, nunca em lote.

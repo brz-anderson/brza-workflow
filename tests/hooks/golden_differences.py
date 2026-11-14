@@ -31,6 +31,8 @@ WHY = {
     "exemplo": "o exemplo de workstream do glossário deixa de ser o do brza-workspace",
     "aspas": "a regra dos blocos de shell manda aspas em caminho e expansão, depois do `head $(which brza)` sem aspas de "
              "2026-11-02: o caminho do app tem espaço, e o bloco roda em bash",
+    "feedback": "o gênero `work/feedbacks/`, uma nota por execução e sem `status`, com as cinco seções e model, effort "
+                "e result (PLN-025/P2, D2, R1.1)",
 }
 
 DIFFERENCES = [
@@ -280,6 +282,88 @@ checkout. O commit é com a identidade do"""),
                """| Nota, plano ou decisão do workspace de origem | No workspace de origem; daqui se cita em crase, com o caminho, e não se linka |
 """, ""),
 ]
+
+# PLN-025/P2: o gênero work/feedbacks/ na norma e no catálogo da skill. O `old` é o texto da master de ouro; o `new` é o
+# que o render do núcleo produz, com `{{workspace.branch}}` já trocado.
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "  - [`work/notes/`](#worknotes)\n  - [`wiki/guides/`](#wikiguides)\n",
+    "  - [`work/notes/`](#worknotes)\n  - [`work/feedbacks/`](#workfeedbacks)\n  - [`wiki/guides/`](#wikiguides)\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "| `notes/` | `note` | Rascunho do dia, de onde o conteúdo é promovido a arquivo próprio |\n",
+    "| `notes/` | `note` | Rascunho do dia, de onde o conteúdo é promovido a arquivo próprio |\n"
+    "| `feedbacks/` | `feedback` | Uma execução de Builder: pedido, escolha, erro e se o esforço regulou |\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "do assunto — `worklogs/` e `notes/`. Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número\n"
+    "sequencial reservado no índice da `master` por `brza note plan-open`, `brza note review-open` e\n",
+    "do assunto — `worklogs/`, `notes/` e `feedbacks/`.\n"
+    "Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número sequencial reservado no índice da\n"
+    "`master` por `brza note plan-open`, `brza note review-open` e\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "`priority`, `tags`) e nome de pasta são identificador: inglês, `snake_case`, **sem acento**. Os campos de prosa —\n"
+    "`blocks`, `trigger`, `owner` — ficam em português, porque são frase, não símbolo.\n",
+    "`priority`, `tags`, `result`) e nome de pasta são identificador: inglês, `snake_case`, **sem acento**.\n"
+    "Os campos de prosa — `blocks`, `trigger`, `owner` — ficam em português, porque são frase, não símbolo.\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "`guide`, `worklog` e `note` |",
+    "`guide`, `worklog`, `note` e `feedback` |",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "| `tags` | Assunto transversal, e só ele: `auth` · `chat` · `design` · `infra` · `planning` · `release` · `tooling`. "
+    "Opcional. É a lista do checador; tag nova entra nele antes de entrar numa nota |\n",
+    "| `tags` | Assunto transversal, e só ele: `auth` · `chat` · `design` · `infra` · `planning` · `release` · `tooling`. "
+    "Opcional. É a lista do checador; tag nova entra nele antes de entrar numa nota |\n"
+    "| `model` | Em `feedbacks/`: o modelo da execução. Vazio é erro |\n"
+    "| `effort` | Em `feedbacks/`: o esforço da execução. Vazio é erro |\n"
+    "| `result` | Em `feedbacks/`: `done`, `refused` ou `partial`. Ausente ou outro valor é erro |\n"
+    "| `builder` | Em `feedbacks/`: o Builder da execução |\n"
+    "| `task_type` | Em `feedbacks/`: o tipo da tarefa dessa execução |\n"
+    "| `session` | Em `feedbacks/`: o id da sessão, quando houver |\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "> outro no mesmo commit.\n",
+    "> outro no mesmo commit. **A nota de `work/feedbacks/`** entra nessa barra: sem uma das cinco seções, com as cinco fora\n"
+    "> da ordem, com `result` fora de `done`, `refused` e `partial`, ou com `model` ou `effort` vazio.\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "- **A releitura é no encerramento do dia.**\n\n### `wiki/guides/`\n",
+    "- **A releitura é no encerramento do dia.**\n\n"
+    "### `work/feedbacks/`\n\n"
+    "Nota de **uma execução** de Builder: o que foi pedido, o modelo e o esforço e o porquê, onde o modelo errou, se o\n"
+    "esforço ficou desregulado e o que fazer na próxima. O worklog continua o diário da tarefa; esta nota existe para o\n"
+    "relatório filtrar a execução sem ler o diário inteiro. **Não leva `status`**, no mesmo grupo de `worklog` e `note`.\n\n"
+    "- **Nome `AAAA-MM-DD-<assunto>.md`**, uma nota por execução. A data mora no nome.\n"
+    "- **Frontmatter:** `scope` (lista), `builder`, `task_type`, `model`, `effort`, `result` e `session` quando houver id.\n"
+    "  `result` é `done`, `refused` ou `partial`. `model` e `effort` inválidos são os vazios: o valor em si fica livre,\n"
+    "  porque a lista de modelos e a escada de esforço mudam por runtime.\n"
+    "- **Cinco seções, nesta ordem:** `## Pedido`, `## Escolha`, `## Erro`, `## Esforço`, `## Próxima vez`. Sem uma delas,\n"
+    "  ou com as cinco fora dessa ordem, o checador recusa.\n\n"
+    "### `wiki/guides/`\n",
+))
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "3. **Preencha o frontmatter que o estado pede** — `status` e `scope` quase sempre; `type` só na exceção.\n",
+    "3. **Preencha o frontmatter que o estado pede** — `status` e `scope` quase sempre; `type` só na exceção. Em\n"
+    "   `feedbacks/`, `model`, `effort` e `result` no lugar do `status`.\n",
+))
+DIFFERENCES.append(Difference(
+    ".claude/skills/notes-checker/SKILL.md", "feedback",
+    "  `retomar-not-first`, `plan-without-worklogs` e `worklog-line-without-link` (a linha datada de 2026-10-28 em diante).\n",
+    "  `retomar-not-first`, `plan-without-worklogs` e `worklog-line-without-link` (a linha datada de 2026-10-28 em diante).\n"
+    "  Na nota de `work/feedbacks/`: `feedback-section-missing`, `feedback-section-order`, `feedback-model-invalid`,\n"
+    "  `feedback-effort-invalid` e `feedback-result-invalid`.\n",
+))
 
 # PLN-012/P5.6: o aviso também alcança outras sessões quando o turno atual ainda não terminou.
 DIFFERENCES.append(Difference(
