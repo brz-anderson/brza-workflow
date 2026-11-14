@@ -852,6 +852,7 @@ class CloudPortTest(unittest.TestCase):
         self.assertIn('--trust', out)
         self.assertIn('--model grok-4.7', out)
         self.assertIn('--workspace /tmp/reuniao', out)
+        self.assertNotIn('--resume', out)
         self.assertNotIn('--force', out)
         self.assertEqual(self.launches, [])
         self.assertEqual(self.app.calls, [])

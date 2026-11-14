@@ -1,7 +1,9 @@
 """O `CloudRuntime` no degrau 1: `list` da run de `CURSOR_CONVERSATION_ID` e `read` com transcript ausente.
 
-`usage`, `open` e `send` ficam de fora até serem provados. `open` entra depois que `agent -p` sair 0, sem
-`--force`. O argv desse comando já está aqui, para o dry-run imprimir, e ninguém o executa neste degrau.
+`usage`, `open` e `send` ficam fora do conjunto. A chamada falha e nomeia o runtime e a capacidade. Quem
+declara `open` e `send` é o PR que rebaseia sobre este arquivo. O primeiro `agent -p` não leva `--resume`
+e não passa por `create-chat`: o id é o `session_id` do JSON. O turno seguinte, com esse id, acrescenta
+`--resume`. Ninguém executa o argv neste módulo.
 """
 
 import os
@@ -47,7 +49,13 @@ class CloudRuntime:
 
 
 def open_argv(model=None, workspace=None, chat_id=None):
-    """O argv do `open` provado no P7. Sem `--force`. Placeholders enquanto o dry-run não tem os valores."""
-    return ['agent', '-p', '--output-format', 'json', '--model', model or '<id>',
-            '--workspace', str(workspace) if workspace else '<dir>', '--trust',
-            '--resume', chat_id or '<chatId>']
+    """O argv que o dry-run imprime. Sem `--force` e sem `create-chat`.
+
+    Sem `chat_id`, é o primeiro turno: o processo imprime um JSON e o id é o `session_id`.
+    Com `chat_id`, o turno seguinte acrescenta `--resume`.
+    """
+    argv = ['agent', '-p', '--output-format', 'json', '--model', model or '<id>',
+            '--workspace', str(workspace) if workspace else '<dir>', '--trust']
+    if chat_id:
+        argv += ['--resume', chat_id]
+    return argv

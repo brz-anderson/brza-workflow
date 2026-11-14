@@ -94,10 +94,13 @@ class ContractTest(unittest.TestCase):
         self.assertNotEqual(record.source, 'cloud')
 
     def test_open_argv_is_agent_p_without_force(self):
-        argv = cloud_runtime.open_argv('grok-4.7', '/tmp/reuniao', 'chat-1')
-        self.assertEqual(argv, ['agent', '-p', '--output-format', 'json', '--model', 'grok-4.7',
-                                '--workspace', '/tmp/reuniao', '--trust', '--resume', 'chat-1'])
-        self.assertNotIn('--force', argv)
+        first = cloud_runtime.open_argv('grok-4.7', '/tmp/reuniao')
+        self.assertEqual(first, ['agent', '-p', '--output-format', 'json', '--model', 'grok-4.7',
+                                 '--workspace', '/tmp/reuniao', '--trust'])
+        self.assertNotIn('--resume', first)
+        self.assertNotIn('--force', first)
+        resumed = cloud_runtime.open_argv('grok-4.7', '/tmp/reuniao', 'chat-1')
+        self.assertEqual(resumed, first + ['--resume', 'chat-1'])
 
     def test_selection_prefers_the_socket_and_honors_the_force_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
