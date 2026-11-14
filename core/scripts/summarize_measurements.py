@@ -987,6 +987,10 @@ def as_number(value):
     return value
 
 
+# Os dois janelados já estão dentro de cache_write. Somá-los de novo conta o cache duas vezes.
+TOKEN_TOTAL_FIELDS = ("input", "cache_write", "cache_read", "output")
+
+
 def token_total(row):
     tokens = row.get("tokens")
     if tokens is None:
@@ -995,7 +999,7 @@ def token_total(row):
     if number is not None:
         return number
     if isinstance(tokens, dict):
-        parts = [as_number(value) for value in tokens.values()]
+        parts = [as_number(tokens[name]) for name in TOKEN_TOTAL_FIELDS if name in tokens]
         parts = [value for value in parts if value is not None]
         return sum(parts) if parts else None
     return None
@@ -1077,7 +1081,8 @@ def aggregate_by_execution(rows, feedback_directory=None, env=None):
         if not session_id:
             continue
         if session_id not in grouped:
-            grouped[session_id] = blank_execution(session_id, "log", row.get("agent") or "claude")
+            grouped[session_id] = blank_execution(
+                session_id, "log", row.get("agent") or row.get("runtime") or ABSENT)
             grouped[session_id]["_costs"] = []
             grouped[session_id]["_tokens"] = []
             order.append(session_id)

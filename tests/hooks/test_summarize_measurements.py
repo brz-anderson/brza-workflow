@@ -19,6 +19,7 @@ import repo_fixture
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "..", "core", "scripts", "summarize_measurements.py")
+MEASURE = os.path.join(HERE, "..", "..", "core", ".claude", "hooks", "measure.py")
 
 
 def load():
@@ -950,6 +951,25 @@ class ByExecutionTest(unittest.TestCase):
         (row,) = self.summarize.aggregate_by_execution(rows, None, {})
         self.assertEqual(row["cost_usd"], "ausente")
         self.assertEqual(row["tokens"], 8)
+
+    def test_token_total_sums_the_measure_object_without_the_cache_windows(self):
+        spec = importlib.util.spec_from_file_location("measure_tokens", MEASURE)
+        measure = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(measure)
+        self.assertEqual(measure.TOKEN_FIELDS,
+                         ("input", "cache_write", "cache_write_5m", "cache_write_1h", "cache_read", "output"))
+        tokens = dict(zip(measure.TOKEN_FIELDS, (10, 30, 20, 10, 5, 2)))
+        self.assertEqual(self.summarize.token_total({"tokens": tokens}), 47)
+
+    def test_the_agent_is_the_runtime_when_the_turn_has_no_agent(self):
+        rows = [{"event": "turn", "session_id": "rt", "runtime": "grok",
+                 "estimated_cost_usd": 1, "tokens": 3}]
+        (row,) = self.summarize.aggregate_by_execution(rows, None, {})
+        self.assertEqual(row["agent"], "grok")
+        bare = [{"event": "turn", "session_id": "sem", "estimated_cost_usd": 1, "tokens": 3}]
+        (other,) = self.summarize.aggregate_by_execution(bare, None, {})
+        self.assertEqual(other["agent"], "ausente")
+        self.assertNotEqual(other["agent"], "claude")
 
     def test_a_real_zero_stays_a_measured_zero(self):
         rows = [{"event": "turn", "session_id": "zerado", "estimated_cost_usd": 0, "tokens": 0}]
