@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -795,28 +795,32 @@ class CloudPortTest(unittest.TestCase):
         data = self.empty_user_data()
         sentinel = Path(data) / 'tabs.json'
         sentinel.write_text('{"tabs":[]}')
-        with self.cloud_env(ORCA_USER_DATA_PATH=data):
-            before = {key: os.environ[key] for key in os.environ if key.startswith('ORCA_')}
-            code, out = self.run_main('list', '--json')
-            during = {key: os.environ[key] for key in os.environ if key.startswith('ORCA_')}
-        self.assertEqual(code, 0, out)
-        sessions = json.loads(out)['sessions']
-        self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0]['id'], 'bc-teste')
-        self.assertEqual(sessions[0]['source'], 'cloud')
-        self.assertEqual(sessions[0]['agent'], 'cursor')
-        self.assertEqual(sessions[0]['status'], 'running')
-        self.assertEqual(sessions[0]['metrics']['cost_usd'], {'value': 'ausente', 'origin': 'ausente'})
-        self.assertEqual(sessions[0]['metrics']['tokens'], {'value': 'ausente', 'origin': 'ausente'})
-        self.assertNotEqual(sessions[0]['metrics']['cost_usd']['value'], 0)
-        self.assertNotEqual(sessions[0]['metrics']['tokens']['value'], 0)
+        seen = []
+        for cid in ('bc-aaa', 'bc-bbb'):
+            with self.cloud_env(ORCA_USER_DATA_PATH=data, CURSOR_CONVERSATION_ID=cid):
+                before = {key: os.environ[key] for key in os.environ if key.startswith('ORCA_')}
+                code, out = self.run_main('list', '--json')
+                during = {key: os.environ[key] for key in os.environ if key.startswith('ORCA_')}
+            self.assertEqual(code, 0, out)
+            sessions = json.loads(out)['sessions']
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]['id'], cid)
+            seen.append(sessions[0]['id'])
+            self.assertEqual(sessions[0]['source'], 'cloud')
+            self.assertEqual(sessions[0]['agent'], 'cursor')
+            self.assertEqual(sessions[0]['status'], 'running')
+            self.assertEqual(sessions[0]['metrics']['cost_usd'], {'value': 'ausente', 'origin': 'ausente'})
+            self.assertEqual(sessions[0]['metrics']['tokens'], {'value': 'ausente', 'origin': 'ausente'})
+            self.assertNotEqual(sessions[0]['metrics']['cost_usd']['value'], 0)
+            self.assertNotEqual(sessions[0]['metrics']['tokens']['value'], 0)
+            self.assertEqual({key: value for key, value in during.items() if key != 'ORCA_USER_DATA_PATH'},
+                             {key: value for key, value in before.items() if key != 'ORCA_USER_DATA_PATH'})
+            self.assertNotIn('ORCA_AGENT_SESSION_ID', during)
         self.assertEqual(sentinel.read_text(), '{"tabs":[]}')
         self.assertFalse(self.map.exists())
         self.assertEqual(self.launches, [])
         self.assertEqual(self.app.calls, [])
-        self.assertEqual({key: value for key, value in during.items() if key != 'ORCA_USER_DATA_PATH'},
-                         {key: value for key, value in before.items() if key != 'ORCA_USER_DATA_PATH'})
-        self.assertNotIn('ORCA_AGENT_SESSION_ID', during)
+        self.assertNotEqual(seen[0], seen[1])
 
     def test_a_present_socket_keeps_the_studio_tab_json_free_of_cloud_records(self):
         data = self.empty_user_data()
@@ -840,11 +844,46 @@ class CloudPortTest(unittest.TestCase):
         self.assertEqual(sessions[0]['source'], 'cloud')
         self.assertEqual(self.app.calls, [])
 
-    def test_diag_cloud_dry_run_prints_abriria_and_does_not_start_a_worker(self):
+    def block_process_start(self):
+        """O dry-run não pode chegar em subprocess, os.system nem os.exec*."""
         def forbidden(*args, **kwargs):
-            self.fail(f'diag-cloud executou: {args}')
+            self.fail(f'diag-cloud executou: {args!r}')
 
-        with patch('subprocess.run', forbidden), self.cloud_env():
+        names = (
+            'subprocess.run', 'subprocess.call', 'subprocess.check_call', 'subprocess.check_output',
+            'subprocess.Popen', 'subprocess.getoutput', 'subprocess.getstatusoutput',
+            'os.system', 'os.execl', 'os.execle', 'os.execlp', 'os.execlpe',
+            'os.execv', 'os.execve', 'os.execvp', 'os.execvpe',
+        )
+        stack = ExitStack()
+        for name in names:
+            stack.enter_context(patch(name, forbidden))
+        return stack
+
+    def test_help_in_the_cloud_without_a_socket_exits_zero_with_the_same_usage(self):
+        data = self.empty_user_data()
+        captured = {}
+
+        def grab(flag):
+            out = io.StringIO()
+            with patch.object(sys, 'argv', ['brza-sessions', flag]), redirect_stdout(out):
+                with self.assertRaises(SystemExit) as caught:
+                    SESSIONS['main']()
+            self.assertIn(caught.exception.code, (0, None))
+            return out.getvalue()
+
+        with patch.dict(os.environ, {'CURSOR_CONVERSATION_ID': '', 'ORCA_USER_DATA_PATH': data}):
+            captured['studio'] = grab('--help')
+        for flag in ('--help', '-h'):
+            with self.cloud_env(ORCA_USER_DATA_PATH=data):
+                captured[flag] = grab(flag)
+        self.assertIn('usage: brza sessions', captured['--help'])
+        self.assertNotIn('capacidade open', captured['--help'])
+        self.assertEqual(captured['--help'], captured['studio'])
+        self.assertEqual(captured['-h'], captured['studio'])
+
+    def test_diag_cloud_dry_run_prints_abriria_and_does_not_start_a_worker(self):
+        with self.block_process_start(), self.cloud_env():
             code, out = self.run_main('diag-cloud', '--agent', 'cursor', '--dry-run', '--model', 'grok-4.7',
                                       '--workspace', '/tmp/reuniao')
         self.assertEqual(code, 0, out)

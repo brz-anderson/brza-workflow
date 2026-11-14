@@ -1113,7 +1113,8 @@ def main():
     if argv and argv[0] == 'diag-cloud':
         return diag_cloud(argv[1:])
     chosen = select_runtime(forced)
-    if chosen.name == 'cloud':
+    # -h/--help é o uso do parser de hoje, antes do despacho: na cloud o verbo cairia em open.
+    if chosen.name == 'cloud' and not (argv and argv[0] in ('-h', '--help')):
         try:
             return cloud_dispatch(chosen, argv)
         except BrzaError as error:
