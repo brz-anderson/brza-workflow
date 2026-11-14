@@ -63,6 +63,8 @@ Sai com 0 sem erro, com 1 com erro. O corte é **o que quebra consulta ou pontei
   `phase-out-of-vocabulary`, `phase-status-mismatch`, `plan-without-origin`, `origin-out-of-vocabulary`,
   `origin-ref-on-request`, `origin-ref-missing`, `origin-ref-not-found`, `plan-without-ready`, `hours-not-a-number`,
   `retomar-not-first`, `plan-without-worklogs` e `worklog-line-without-link` (a linha datada de 2026-10-28 em diante).
+  Na nota de `work/feedbacks/`: `feedback-section-missing`, `feedback-section-order`, `feedback-model-invalid`,
+  `feedback-effort-invalid` e `feedback-result-invalid`.
 - **Aviso, relata e segue:** os mesmos campos obrigatórios em nota sem data nenhuma — data que não está escrita não se
   infere —, `type` redundante ou inválido (`issues/` aceita `unknown` e `migration`), tag fora do vocabulário ou que
   repete campo, `status` em gênero sem estado, `date-on-worklog` (`date:` no frontmatter de worklog),
