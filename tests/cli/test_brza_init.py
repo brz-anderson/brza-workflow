@@ -123,7 +123,7 @@ class AcceptanceTest(InitBase):
                      '.brza/index.jsonl', '.brza/core.lock', 'scripts/summarize_measurements.py',
                      'wiki/guides/.gitkeep'):
             self.assertTrue((self.root / path).is_file(), path)
-        for genre in ('issues', 'worklogs', 'decisions', 'reviews', 'notes'):
+        for genre in ('issues', 'worklogs', 'decisions', 'reviews', 'notes', 'feedbacks'):
             self.assertTrue((self.root / 'work' / genre / '.gitkeep').is_file(), genre)
         for folder in ('.claude/skills', '.claude/agents', '.claude/hooks'):
             self.assertTrue(any((self.root / folder).iterdir()), folder)

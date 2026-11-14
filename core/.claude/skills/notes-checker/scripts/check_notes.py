@@ -646,7 +646,7 @@ def date_of(fm):
 def feedback_findings(text, fm):
     """Seções na ordem do D2, model e effort preenchidos, result no vocabulário. Devolve (regra, detalhe)."""
     found = []
-    for line in without_code(text).split("\n"):
+    for line in without_code(body_of(text)).split("\n"):
         title = line.strip()
         if title in FEEDBACK_SECTIONS and title not in found:
             found.append(title)

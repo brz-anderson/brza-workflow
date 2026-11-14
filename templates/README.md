@@ -15,6 +15,7 @@ As pastas de notas não moram na `{{workspace.branch}}`, que guarda só a norma:
 | `work/decisions/` | A questão e a decisão no mesmo arquivo, de `open` a `done` |
 | `work/reviews/` | Parecer sobre um artefato numa versão |
 | `work/notes/` | Rascunho do dia, de onde o conteúdo é promovido |
+| `work/feedbacks/` | Uma execução de Builder: pedido, escolha, erro e se o esforço regulou |
 | `wiki/guides/` | Como {{workspace.owner}} usa uma ferramenta, API ou produto |
 
 A norma de escrita das notas está no [`work/README.md`](work/README.md). Os comandos rodam da raiz deste repositório.

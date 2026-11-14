@@ -958,6 +958,10 @@ def check_feedback():
     fence = "work/feedbacks/2026-11-14-cerca.md"
     status = "work/feedbacks/2026-11-14-com-status.md"
     refused = "work/feedbacks/2026-11-14-recusado.md"
+    heading_in_front = "work/feedbacks/2026-11-14-titulo-no-front.md"
+    section_only_front = "work/feedbacks/2026-11-14-secao-so-no-front.md"
+    no_result = "work/feedbacks/2026-11-14-sem-result.md"
+    no_model = "work/feedbacks/2026-11-14-sem-model.md"
     notes = {
         valid: front + body(*sections),
         refused: front.replace("result: done", "result: refused") + body(*sections),
@@ -966,6 +970,11 @@ def check_feedback():
         order: front + body("## Pedido", "## Erro", "## Escolha", "## Esforço", "## Próxima vez"),
         fence: front + "## Pedido\n\np\n\n## Escolha\n\ne\n\n```\n## Erro\n```\n\n## Esforço\n\ne\n\n## Próxima vez\n\np\n",
         status: front.replace("result: done", "result: partial").replace("---\n", "---\nstatus: open\n", 1) + body(*sections),
+        heading_in_front: front.replace("result: done\n", "result: done\n## Próxima vez\n", 1) + body(*sections),
+        section_only_front: front.replace("scope:\n", "## Pedido\nscope:\n", 1) + body(
+            "## Escolha", "## Erro", "## Esforço", "## Próxima vez"),
+        no_result: front.replace("result: done\n", "") + body(*sections),
+        no_model: front.replace("model: grok-4.7\n", "") + body(*sections),
     }
     tmp = os.path.realpath(tempfile.mkdtemp())
     fails = total = 0
@@ -993,6 +1002,12 @@ def check_feedback():
         expect("result fora dos três é erro", ("feedback-result-invalid", fields, "no") in errors)
         expect("seções fora de ordem é erro", any(r == "feedback-section-order" and w == order for r, w, _ in errors))
         expect("seção só dentro de cerca não conta", ("feedback-section-missing", fence, "## Erro") in errors)
+        expect("título de seção comentado no frontmatter não gera ordem falsa",
+               not any(w == heading_in_front for _, w, _ in out["errors"]))
+        expect("seção que só está no frontmatter continua ausente",
+               ("feedback-section-missing", section_only_front, "## Pedido") in errors)
+        expect("result ausente é erro", ("feedback-result-invalid", no_result, "") in errors)
+        expect("model ausente é erro", ("feedback-model-invalid", no_model, "") in errors)
         expect("result partial é válido", not any(r == "feedback-result-invalid" and w == status for r, w, _ in errors))
         expect("status em feedback é aviso, não erro de vocabulário",
                ("status-on-stateless-genre", status) in warnings
