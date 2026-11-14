@@ -17,9 +17,11 @@
 Saídas: 1 com algum ERRO, 0 sem. Cada linha diz o que conferiu e, no erro e no aviso, o comando que conserta. --json
 devolve a lista das conferências, com level, check, message e fix.
 
---env confere o runtime, o socket, o app, a identidade e a CURSOR_API_KEY, e não muda o rc do doctor sem a flag.
-Com CURSOR_CONVERSATION_ID o runtime é cloud: socket ausente, app ausente e identidade diferente não são erro, e a
-chave ausente é aviso. Sem essa variável, socket ausente continua erro, para um Studio caído no Mac não passar.
+--env confere o runtime da porta, o socket, o app, a identidade e a chave, e não muda o rc do doctor sem a flag.
+O runtime sai de select_runtime: socket presente é studio, mesmo com CURSOR_CONVERSATION_ID; sem socket e com o id,
+é cloud. Na cloud, socket ausente, app ausente e identidade diferente não são erro, e a chave ausente é aviso.
+No studio, socket ausente continua erro e a identidade diferente continua ERRO. A chave é CURSOR_API_KEY ou
+BRZA_CURSOR_API_KEY; o aviso não manda exportar CURSOR_API_KEY no processo pai e não mostra o valor.
 
 A identidade e a medição vêm do ambiente que a função `claude` do ~/.zshrc e o claude-brza põem na sessão; num terminal
 aberto sem eles, as duas saem em erro. O workspace é o do cwd (runtime.WORKSPACE, pelo `brza_root.find`) e o checkout do
@@ -40,6 +42,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[2] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
+import agent_runtime  # noqa: E402
 import brza_runtime as runtime  # noqa: E402
 
 INSTALL = runpy.run_path(str(HERE.parents[2] / 'bin' / 'brza-install'))
@@ -269,21 +272,32 @@ NAMES = {'identity': 'identidade', 'measurement': 'medição', 'links': 'links',
          'dev_profile': 'perfil', 'app_age': 'app'}
 
 
-def cloud_env() -> bool:
-    return bool(os.environ.get('CURSOR_CONVERSATION_ID', '').strip())
-
-
 def soften(check: dict) -> dict:
     if check['level'] == 'ERRO':
         return result('AVISO', check['check'], check['message'], check['fix'])
     return check
 
 
+def key_defined() -> bool:
+    """A chave do open. O valor não entra na mensagem, nem o comprimento."""
+    for name in ('BRZA_CURSOR_API_KEY', 'CURSOR_API_KEY'):
+        if os.environ.get(name, '').strip():
+            return True
+    return False
+
+
 def env_checks() -> list[dict]:
-    """Na cloud, socket, app e identidade deixam de ser erro. Sem a variável, socket ausente continua erro."""
-    cloud = cloud_env()
+    """O runtime é o da porta. Na cloud, socket, app e identidade deixam de ser erro. No studio, não."""
+    chosen = agent_runtime.select_runtime()
+    cloud = chosen.name == 'cloud'
     cid = os.environ.get('CURSOR_CONVERSATION_ID', '').strip()
-    checks = [result('ok', 'runtime', f'cloud ({cid})' if cloud else 'studio, sem CURSOR_CONVERSATION_ID')]
+    if cloud:
+        label = f'cloud ({cid})'
+    elif cid:
+        label = 'studio'
+    else:
+        label = 'studio, sem CURSOR_CONVERSATION_ID'
+    checks = [result('ok', 'runtime', label)]
     socket = runtime.runtime_file()
     if socket.is_file():
         checks.append(result('ok', 'socket', f'{socket} presente'))
@@ -302,11 +316,11 @@ def env_checks() -> list[dict]:
     except (runtime.BrzaError, OSError) as error:
         ident = result('ERRO', 'identidade', f'a conferência quebrou ({error})')
     checks.append(soften(ident) if cloud else ident)
-    if os.environ.get('CURSOR_API_KEY', '').strip():
-        checks.append(result('ok', 'chave', 'CURSOR_API_KEY definida'))
+    if key_defined():
+        checks.append(result('ok', 'chave', 'chave definida'))
     else:
-        checks.append(result('AVISO', 'chave', 'CURSOR_API_KEY ausente; custo e tokens ficam ausentes',
-                             'exporte CURSOR_API_KEY no ambiente da sessão que for provar o open'))
+        checks.append(result('AVISO', 'chave', 'chave ausente; custo e tokens ficam ausentes',
+                             'defina BRZA_CURSOR_API_KEY no segredo da sessão que for provar o open'))
     return checks
 
 
@@ -324,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog='brza doctor', description='Confere a sessão e a máquina para o BrzA Studio.')
     ap.add_argument('--json', action='store_true', help='devolve as conferências em JSON')
     ap.add_argument('--env', action='store_true',
-                    help='confere o ambiente: na cloud, socket, app e identidade não são erro; a chave ausente é aviso')
+                    help='confere o ambiente pelo runtime da porta; na cloud, socket, app e identidade não são erro')
     args = ap.parse_args(argv)
     checks = env_checks() if args.env else run_checks()
     if args.json:

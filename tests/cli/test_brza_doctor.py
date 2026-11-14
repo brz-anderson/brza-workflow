@@ -420,7 +420,8 @@ class DoctorTest(unittest.TestCase):
         data = self.base / 'user-data-cloud'
         data.mkdir()
         missing_app = self.base / 'sem-app'
-        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'ORCA_USER_DATA_PATH': str(data)}
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': '',
+               'ORCA_USER_DATA_PATH': str(data)}
         with patch.dict(os.environ, env), patch.dict(GLOBALS, {'APP': missing_app}):
             code, out = self.run_doctor('--env')
         self.assertEqual(code, 0, out)
@@ -447,11 +448,45 @@ class DoctorTest(unittest.TestCase):
         data = self.base / 'user-data-socket'
         data.mkdir()
         (data / 'orca-runtime.json').write_text('{}')
-        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'ORCA_USER_DATA_PATH': str(data)}
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': '',
+               'ORCA_USER_DATA_PATH': str(data)}
         with patch.dict(os.environ, env):
             code, out = self.run_doctor('--env')
         self.assertEqual(code, 0, out)
         self.assertTrue(self.line(out, 'socket').startswith('ok'), out)
+        self.assertIn('studio', self.line(out, 'runtime'))
+        self.assertNotIn('cloud', self.line(out, 'runtime'))
+
+    def test_env_socket_and_conversation_id_stay_studio_and_keep_the_identity_error(self):
+        self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
+        data = self.base / 'user-data-both'
+        data.mkdir()
+        (data / 'orca-runtime.json').write_text('{}')
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': '',
+               'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertNotEqual(code, 0)
+        self.assertIn('studio', self.line(out, 'runtime'))
+        self.assertNotIn('cloud', self.line(out, 'runtime'))
+        self.assertTrue(self.line(out, 'identidade').startswith('ERRO'), out)
+
+    def test_env_treats_brza_cursor_api_key_as_present_without_printing_it(self):
+        sentinel = 'sentinela-brza-chave-9c2e'
+        data = self.base / 'user-data-key'
+        data.mkdir()
+        (data / 'orca-runtime.json').write_text('{}')
+        env = {'CURSOR_CONVERSATION_ID': '', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': sentinel,
+               'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertEqual(code, 0, out)
+        line = self.line(out, 'chave')
+        self.assertTrue(line.startswith('ok'), out)
+        self.assertNotIn(sentinel, out)
+        self.assertNotIn(str(len(sentinel)), line)
+        self.assertNotIn('CURSOR_API_KEY', line)
+        self.assertNotIn('exporte CURSOR_API_KEY', out)
 
     def test_conversation_id_does_not_soften_the_doctor_without_env(self):
         self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
