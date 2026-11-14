@@ -1112,8 +1112,10 @@ def main():
         return 1
     if argv and argv[0] == 'diag-cloud':
         return diag_cloud(argv[1:])
-    chosen = select_runtime(forced)
-    if chosen.name == 'cloud':
+    # `--help` é do parser, nos dois runtimes. Na cloud o id da conversa existe e o
+    # dispatch não tem esse verbo; sem este desvio o help sai 1.
+    chosen = None if argv in (['-h'], ['--help']) else select_runtime(forced)
+    if chosen is not None and chosen.name == 'cloud':
         try:
             return cloud_dispatch(chosen, argv)
         except BrzaError as error:

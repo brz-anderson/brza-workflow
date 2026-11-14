@@ -787,7 +787,7 @@ class CloudPortTest(unittest.TestCase):
         return temp.name
 
     def cloud_env(self, **extra):
-        values = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': ''}
+        values = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': ''}
         values.update(extra)
         return patch.dict(os.environ, values)
 
