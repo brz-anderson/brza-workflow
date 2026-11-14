@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Confere se a sessão e a máquina estão prontas para o BrzA Studio, e diz o comando que conserta o que falta.
 
-  brza-doctor [--json]
+  brza-doctor [--json] [--env]
       ERRO  identidade: git var GIT_AUTHOR_IDENT ou GIT_COMMITTER_IDENT não é o `[author].email` do manifesto do workspace
             (ou, sem ele, o `git config user.email`)
       ERRO  medição: o .claude/settings.json do workspace sem o measure.py, ou BRZA_WORKSPACE fora do ambiente
@@ -16,6 +16,10 @@
 
 Saídas: 1 com algum ERRO, 0 sem. Cada linha diz o que conferiu e, no erro e no aviso, o comando que conserta. --json
 devolve a lista das conferências, com level, check, message e fix.
+
+--env confere o runtime, o socket, o app, a identidade e a CURSOR_API_KEY, e não muda o rc do doctor sem a flag.
+Com CURSOR_CONVERSATION_ID o runtime é cloud: socket ausente, app ausente e identidade diferente não são erro, e a
+chave ausente é aviso. Sem essa variável, socket ausente continua erro, para um Studio caído no Mac não passar.
 
 A identidade e a medição vêm do ambiente que a função `claude` do ~/.zshrc e o claude-brza põem na sessão; num terminal
 aberto sem eles, as duas saem em erro. O workspace é o do cwd (runtime.WORKSPACE, pelo `brza_root.find`) e o checkout do
@@ -265,6 +269,47 @@ NAMES = {'identity': 'identidade', 'measurement': 'medição', 'links': 'links',
          'dev_profile': 'perfil', 'app_age': 'app'}
 
 
+def cloud_env() -> bool:
+    return bool(os.environ.get('CURSOR_CONVERSATION_ID', '').strip())
+
+
+def soften(check: dict) -> dict:
+    if check['level'] == 'ERRO':
+        return result('AVISO', check['check'], check['message'], check['fix'])
+    return check
+
+
+def env_checks() -> list[dict]:
+    """Na cloud, socket, app e identidade deixam de ser erro. Sem a variável, socket ausente continua erro."""
+    cloud = cloud_env()
+    cid = os.environ.get('CURSOR_CONVERSATION_ID', '').strip()
+    checks = [result('ok', 'runtime', f'cloud ({cid})' if cloud else 'studio, sem CURSOR_CONVERSATION_ID')]
+    socket = runtime.runtime_file()
+    if socket.is_file():
+        checks.append(result('ok', 'socket', f'{socket} presente'))
+    elif cloud:
+        checks.append(result('AVISO', 'socket', 'socket do Studio ausente; o runtime detectado é cloud',
+                             'abra o BrzA Studio só para usar o runtime studio'))
+    else:
+        checks.append(result('ERRO', 'socket', f'socket do Studio ausente em {socket}', 'abra o BrzA Studio'))
+    if APP.exists():
+        checks.append(result('ok', 'app', f'{APP} instalado'))
+    else:
+        checks.append(result('AVISO', 'app', f'{APP} não está instalado',
+                             'brza app install, no Mac, com o app fechado'))
+    try:
+        ident = identity()
+    except (runtime.BrzaError, OSError) as error:
+        ident = result('ERRO', 'identidade', f'a conferência quebrou ({error})')
+    checks.append(soften(ident) if cloud else ident)
+    if os.environ.get('CURSOR_API_KEY', '').strip():
+        checks.append(result('ok', 'chave', 'CURSOR_API_KEY definida'))
+    else:
+        checks.append(result('AVISO', 'chave', 'CURSOR_API_KEY ausente; custo e tokens ficam ausentes',
+                             'exporte CURSOR_API_KEY no ambiente da sessão que for provar o open'))
+    return checks
+
+
 def run_checks() -> list[dict]:
     out = []
     for check in CHECKS:
@@ -278,8 +323,10 @@ def run_checks() -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog='brza doctor', description='Confere a sessão e a máquina para o BrzA Studio.')
     ap.add_argument('--json', action='store_true', help='devolve as conferências em JSON')
+    ap.add_argument('--env', action='store_true',
+                    help='confere o ambiente: na cloud, socket, app e identidade não são erro; a chave ausente é aviso')
     args = ap.parse_args(argv)
-    checks = run_checks()
+    checks = env_checks() if args.env else run_checks()
     if args.json:
         print(json.dumps(checks, ensure_ascii=False, indent=2))
     else:

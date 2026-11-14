@@ -10,7 +10,8 @@ Uso:
   brza sessions <nome> [--agent claude|codex|grok|antigravity|agy] [--checkout CAMINHO]
                 [--prompt TEXTO | --prompt-file ARQUIVO] [--model MODELO [--effort ESFORÇO]]
                 [--title TÍTULO] [--rename] [--wait] [--dry-run]
-  brza sessions list [--prefix PREFIXO] [--json]
+  brza sessions list [--prefix PREFIXO] [--json] [--runtime studio|cloud]
+  brza sessions diag-cloud --agent cursor [--dry-run] [--model ID] [--workspace DIR]
   brza sessions send <nome> <texto> [--json]
   brza sessions send [nomes...] [--prefix PREFIXO] (--text TEXTO | --file ARQUIVO) [--operation ID] [--json]
   brza sessions wait [nomes...] [--prefix PREFIXO] [--marker ARQUIVO:REGEX] [--any] [--timeout SEGUNDOS] [--json]
@@ -51,6 +52,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'bin'))  # o brza_runtime mora no bin/ do brza-workflow
 from brza_runtime import (WORKSPACE, BrzaError, NoWorkspace, brza, brza_root, canonicalize, git,  # noqa: E402,F401
                           require_workspace, rpc, send_to_chat, user_data, mutation, new_operation)
+from agent_runtime import MissingCapability, require_capability, select_runtime  # noqa: E402
+from cloud_runtime import CloudRuntime, open_argv  # noqa: E402
 
 CHAT_COMMAND = 'claude-brza'
 VERBS = ('open', 'list', 'send', 'title', 'close', 'wait', 'read', 'model', 'usage')
@@ -1004,8 +1007,118 @@ def launch_worker(name,agent,checkout,prompt,model=None,effort=None):
                       'model':model,'effort':effort,'operation':operation,'round_id':operation}
 
 
+def split_runtime(argv):
+    """Tira `--runtime studio|cloud` de qualquer posição, para o parser de hoje não ver a flag."""
+    rest, forced, index = [], None, 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == '--runtime' or arg.startswith('--runtime='):
+            if arg == '--runtime':
+                if index + 1 >= len(argv):
+                    raise BrzaError('--runtime exige studio ou cloud')
+                index += 1
+                value = argv[index]
+            else:
+                value = arg.split('=', 1)[1]
+            if value not in ('studio', 'cloud'):
+                raise BrzaError('--runtime exige studio ou cloud')
+            forced = value
+        else:
+            rest.append(arg)
+        index += 1
+    return forced, rest
+
+
+def cloud_list(runtime, argv):
+    ap = argparse.ArgumentParser(prog='brza sessions list')
+    ap.add_argument('--prefix')
+    ap.add_argument('--json', action='store_true')
+    args = ap.parse_args(argv)
+    records = runtime.list()
+    if args.prefix is not None:
+        records = [record for record in records
+                   if (record.id or '').startswith(args.prefix) or (record.title or '').startswith(args.prefix)]
+    if args.json:
+        print(json.dumps({'sessions': [record.as_dict() for record in records]}, ensure_ascii=False))
+        return 0
+    for record in records:
+        print(f'{record.id}  {record.status or "-"}  {record.source}  {record.agent}')
+    return 0
+
+
+def cloud_read(runtime, argv):
+    """O transcript da cloud ainda não existe. A saída leva o campo, com a marca `ausente`, e não chama o Studio."""
+    ap = argparse.ArgumentParser(prog='brza sessions read')
+    ap.add_argument('name', nargs='?')
+    ap.add_argument('--last', action='store_true')
+    ap.add_argument('--json', action='store_true')
+    args = ap.parse_args(argv)
+    record = runtime.read(args.name)
+    if args.json:
+        print(json.dumps(record, ensure_ascii=False))
+    else:
+        print(f'{record["id"] or "-"}  transcript={record["transcript"]}')
+    return 0
+
+
+def cloud_dispatch(runtime, argv):
+    """O degrau 1 cumpre `list` e `read`. O resto falha nomeando o runtime e a capacidade, sem efeito colateral."""
+    if not argv:
+        raise BrzaError('cloud: informe um verbo')
+    verb = argv[0]
+    if verb == 'list':
+        return cloud_list(runtime, argv[1:])
+    if verb == 'read':
+        return cloud_read(runtime, argv[1:])
+    if verb in ('usage', 'send', 'open'):
+        require_capability(runtime, verb)
+        raise BrzaError(f'cloud: {verb} sem implementação')
+    if verb in ('wait', 'title', 'close', 'model'):
+        raise MissingCapability(runtime.name, verb)
+    require_capability(runtime, 'open')
+    raise BrzaError('cloud: open sem implementação')
+
+
+def diag_cloud(argv):
+    """Imprime o argv do `open` e não o executa. Sem `--dry-run`, a capacidade `open` falta e a saída nomeia isso."""
+    ap = argparse.ArgumentParser(prog='brza sessions diag-cloud')
+    ap.add_argument('--agent', default='cursor')
+    ap.add_argument('--model')
+    ap.add_argument('--workspace')
+    ap.add_argument('--resume')
+    ap.add_argument('--dry-run', action='store_true')
+    args = ap.parse_args(argv)
+    if args.agent != 'cursor':
+        print(f'CHECK:    diag-cloud: --agent {args.agent} não é cursor; nada foi aberto')
+        return 1
+    planned = open_argv(args.model, args.workspace, args.resume)
+    if args.dry_run:
+        print('abriria: ' + shlex.join(planned))
+        return 0
+    try:
+        CloudRuntime().open({'model': args.model, 'workspace': args.workspace, 'chat_id': args.resume, 'argv': planned})
+    except BrzaError as error:
+        print(f'CHECK:    {error}')
+        return 1
+    print('CHECK:    diag-cloud: o open não está declarado')
+    return 1
+
+
 def main():
-    argv = sys.argv[1:]
+    try:
+        forced, argv = split_runtime(sys.argv[1:])
+    except BrzaError as error:
+        print(f'CHECK:    {error}')
+        return 1
+    if argv and argv[0] == 'diag-cloud':
+        return diag_cloud(argv[1:])
+    chosen = select_runtime(forced)
+    if chosen.name == 'cloud':
+        try:
+            return cloud_dispatch(chosen, argv)
+        except BrzaError as error:
+            print(f'CHECK:    {error}')
+            return 1
     if argv and argv[0] in VERBS[1:]:
         return by_name(argv)
     if argv and argv[0] == 'open':
