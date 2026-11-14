@@ -24,6 +24,11 @@ decisões das travas de retomada e do /compact. As negações de hook saem com o
   python3 scripts/summarize_measurements.py --by-task --pending --session <id>
                                                                  o que o commit da sessão vai fechar, e os turnos sem
                                                                  tarefa das outras sessões do workstream paradas há 2 h
+  python3 scripts/summarize_measurements.py --by-execution       uma linha por execução. Custo e tokens que o log não
+                                                                 traz saem `ausente`, com a origem do campo, nunca zero.
+                                                                 A run cloud entra pelo CURSOR_CONVERSATION_ID. A nota em
+                                                                 work/feedbacks/, quando a pasta existe, preenche a
+                                                                 execução pela sessão e não inventa custo.
 
 Log que não existe é pulado; linha que não é JSON é contada e ignorada. Só biblioteca padrão, Python 3.9.
 """
@@ -972,6 +977,161 @@ def pending_text(rows, session_id, now, workstream=None):
     return "\n".join(lines)
 
 
+ABSENT = "ausente"
+
+
+def as_number(value):
+    """Número de verdade. Bool não conta, e ausência não vira zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def token_total(row):
+    tokens = row.get("tokens")
+    if tokens is None:
+        return None
+    number = as_number(tokens)
+    if number is not None:
+        return number
+    if isinstance(tokens, dict):
+        parts = [as_number(value) for value in tokens.values()]
+        parts = [value for value in parts if value is not None]
+        return sum(parts) if parts else None
+    return None
+
+
+def fold_numbers(values):
+    """Soma quando cada valor existe. Ausência de um valor deixa o campo ausente, e não zero."""
+    if not values or any(value is None for value in values):
+        return ABSENT, ABSENT
+    return sum(values), "hook"
+
+
+def blank_execution(session_id, source, agent):
+    return {"id": session_id, "source": source, "agent": agent, "task": ABSENT, "task_type": ABSENT,
+            "model": ABSENT, "effort": ABSENT, "result": ABSENT, "workstream": ABSENT,
+            "cost_usd": ABSENT, "cost_origin": ABSENT, "tokens": ABSENT, "tokens_origin": ABSENT}
+
+
+def parse_feedback(text):
+    """Frontmatter mínimo e o texto de `## Pedido`. Campo que não é número de métrica não vira custo."""
+    note, body = {}, text
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end >= 0:
+            for line in text[4:end].splitlines():
+                if ":" not in line or line[:1] in " \t-" or line.startswith("#"):
+                    continue
+                key, value = line.split(":", 1)
+                note[key.strip()] = value.strip().strip("\"'")
+            body = text[end + 4:]
+    task, capture = [], False
+    for line in body.splitlines():
+        if line.startswith("## "):
+            if capture:
+                break
+            capture = line.strip() == "## Pedido"
+            continue
+        if capture and line.strip():
+            task.append(line.strip())
+    if task:
+        note["task"] = " ".join(task)
+    return note
+
+
+def read_feedbacks(directory):
+    """A pasta do gênero, se existir. Sem ela, não há nota: o P2 do PLN-025 pode ainda não ter entrado."""
+    if not directory or not os.path.isdir(directory):
+        return []
+    notes = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                notes.append(parse_feedback(handle.read()))
+        except OSError:
+            continue
+    return notes
+
+
+def apply_feedback(execution, note):
+    if note.get("task"):
+        execution["task"] = note["task"]
+    for key in ("task_type", "model", "effort", "result"):
+        if note.get(key):
+            execution[key] = note[key]
+    if note.get("builder"):
+        execution["workstream"] = note["builder"]
+
+
+def aggregate_by_execution(rows, feedback_directory=None, env=None):
+    """Uma execução por `session_id` dos turnos, mais a nota e a run cloud. Custo e tokens saem do turno."""
+    env = os.environ if env is None else env
+    grouped, order = {}, []
+    for row in rows:
+        if row.get("event") != "turn" or row.get("fact_audit"):
+            continue
+        session_id = row.get("session_id")
+        if not session_id:
+            continue
+        if session_id not in grouped:
+            grouped[session_id] = blank_execution(session_id, "log", row.get("agent") or "claude")
+            grouped[session_id]["_costs"] = []
+            grouped[session_id]["_tokens"] = []
+            order.append(session_id)
+        bucket = grouped[session_id]
+        bucket["_costs"].append(as_number(row.get("estimated_cost_usd")))
+        bucket["_tokens"].append(token_total(row))
+        if row.get("model"):
+            bucket["model"] = row["model"]
+        if row.get("effort"):
+            bucket["effort"] = row["effort"]
+        if row.get("prompt_head") and bucket["task"] == ABSENT:
+            bucket["task"] = row["prompt_head"]
+        if row.get("workstream"):
+            bucket["workstream"] = row["workstream"]
+    for session_id in order:
+        bucket = grouped[session_id]
+        bucket["cost_usd"], bucket["cost_origin"] = fold_numbers(bucket.pop("_costs"))
+        bucket["tokens"], bucket["tokens_origin"] = fold_numbers(bucket.pop("_tokens"))
+    for note in read_feedbacks(feedback_directory):
+        session_id = str(note.get("session") or "").strip()
+        if not session_id:
+            continue
+        if session_id not in grouped:
+            agent = "cursor" if session_id.startswith("bc-") else ABSENT
+            grouped[session_id] = blank_execution(session_id, "note", agent)
+            order.append(session_id)
+        apply_feedback(grouped[session_id], note)
+    conversation = (env.get("CURSOR_CONVERSATION_ID") or "").strip()
+    if conversation and conversation not in grouped:
+        grouped[conversation] = blank_execution(conversation, "cloud", "cursor")
+        order.append(conversation)
+    return [grouped[session_id] for session_id in order]
+
+
+def feedback_dir():
+    return os.path.join(workspace_root(), "work", "feedbacks")
+
+
+def format_metric(value):
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def print_by_execution(executions):
+    if not executions:
+        print("nenhuma execução")
+        return
+    for row in executions:
+        print(f"{row['id']}  {row['source']}  {row['agent']}  "
+              f"custo={format_metric(row['cost_usd'])} ({row['cost_origin']})  "
+              f"tokens={format_metric(row['tokens'])} ({row['tokens_origin']})")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dir", default=DEFAULT_DIR, help="diretório com o log")
@@ -990,7 +1150,11 @@ def main():
     parser.add_argument("--pending", action="store_true",
                         help="com --by-task e --session, o que o commit da sessão vai fechar (o aviso do close-task)")
     parser.add_argument("--session", default="", help="o id da sessão do --pending")
+    parser.add_argument("--by-execution", action="store_true",
+                        help="uma linha por execução; custo e tokens ausentes saem como ausente, com a origem")
     args = parser.parse_args()
+    if args.by_execution and (args.facts or args.by_workstream or args.by_task or args.denials):
+        parser.error("--by-execution não se combina com --facts, --by-workstream, --by-task nem --denials")
     if args.facts and (args.by_workstream or args.denials):
         parser.error("--facts não se combina com --by-workstream nem com --denials")
     if args.by_task and (args.facts or args.by_workstream or args.denials):
@@ -1003,6 +1167,16 @@ def main():
     # No --facts a data filtra o `fact`, e não o log: o desfecho que chega depois dela vale para o fato de dentro. No
     # --by-task, filtra a saída, porque os marcos de antes da data cortam os segmentos de depois.
     rows, bad, exists = read_log(os.path.join(args.dir, LOG), "" if args.facts or args.by_task else args.since)
+    if args.by_execution:
+        executions = aggregate_by_execution(rows, feedback_dir(), os.environ)
+        if args.json:
+            print(json.dumps({"executions": executions}, ensure_ascii=False, indent=2))
+            return 0
+        where = f"{len(rows)}" if exists else "sem log"
+        print(f"{args.dir}: {LOG} {where}" + (f" (+{bad} ilegível)" if bad else ""))
+        print()
+        print_by_execution(executions)
+        return 0
     if not exists:
         if args.pending:
             print("nada a fechar")  # o aviso do close-task sai 0 sempre
