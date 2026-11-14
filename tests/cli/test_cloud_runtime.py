@@ -5,13 +5,16 @@ Nada aqui chama o `agent` de verdade nem lê `BRZA_CURSOR_API_KEY` do ambiente.
 
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.cli.test_cloud_runtime
 """
+import io
 import json
 import os
 import stat
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / 'packages' / 'client'))
@@ -24,6 +27,9 @@ MODEL = 'grok-4.7-low'
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
+
+if os.environ.get("BRZA_FAKE_BEHAVIOR") == "hold":
+    time.sleep(30)
 
 key = os.environ.get("CURSOR_API_KEY") or ""
 brza = os.environ.get("BRZA_CURSOR_API_KEY") or ""
@@ -308,6 +314,74 @@ class CloudRuntimeTest(unittest.TestCase):
         line = json.loads(self.log.read_text())
         self.assertEqual(line['estimated_cost_usd'], 'ausente')
         self.assertEqual(line['tokens']['output'], 'ausente')
+        self.assert_secret_gone()
+
+    def test_send_without_memory_does_not_spawn(self):
+        runtime = self.runtime_for()
+        with self.assertRaises(cloud_runtime.CloudTurnError) as caught:
+            runtime.send('sess-p7', 'de novo')
+        message = str(caught.exception)
+        self.assertIn('cloud', message)
+        self.assertIn('persona', message)
+        self.assertIn('workspace', message)
+        self.assertFalse((self.tmp / 'capture.json').exists())
+
+    def test_cold_send_repeats_the_persona_home_and_the_workspace(self):
+        first = self.runtime_for()
+        opened = first.open('p7', MODEL, str(self.tmp / 'workspace'), 'agent', PROMPT)
+        home = first._homes['p7']
+        state = Path(home) / '.config' / 'cursor' / 'session-state'
+        self.assertEqual(state.read_text(), 'kept')
+        first.close()
+        self.runtime = None
+        self.assertEqual(files_with(home, SECRET), [])
+        self.assertEqual(state.read_text(), 'kept')
+        second = cloud_runtime.CloudRuntime(env=self.env(), log_path=str(self.log), timeout_s=2)
+        self.runtime = second
+        sent = second.send(
+            opened.session_id, 'de novo', persona='p7', workspace=str(self.tmp / 'workspace'))
+        self.assertEqual(sent.session_id, opened.session_id)
+        flags = self.flags()
+        self.assertEqual(flags[flags.index('--workspace') + 1], str(self.tmp / 'workspace'))
+        self.assertEqual(flags[flags.index('--resume') + 1], 'sess-p7')
+        self.assertEqual(second._homes['p7'], home)
+        self.assert_secret_gone()
+
+    def test_cli_send_requires_persona_and_workspace(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                cloud_runtime.main(['send', '--session', 'sess-p7', '--prompt', 'de novo'])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_failed_communicate_kills_the_agent(self):
+        pids = []
+        real_popen = cloud_runtime.subprocess.Popen
+
+        def popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            pids.append(proc.pid)
+
+            def boom(timeout=None):
+                raise RuntimeError('communicate falhou')
+
+            proc.communicate = boom
+            return proc
+
+        def kill_leftovers():
+            for pid in pids:
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(kill_leftovers)
+        runtime = self.runtime_for(BRZA_FAKE_BEHAVIOR='hold', timeout_s=2)
+        with mock.patch.object(cloud_runtime.subprocess, 'Popen', popen):
+            with self.assertRaises(RuntimeError):
+                runtime.open('p7', MODEL, str(self.tmp / 'workspace'), 'agent', PROMPT)
+        self.assertTrue(pids)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pids[0], 0)
         self.assert_secret_gone()
 
 
