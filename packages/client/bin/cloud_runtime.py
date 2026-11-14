@@ -144,9 +144,12 @@ class CloudRuntime:
         homes = [self._persona_path(_safe_name(label)) for label in list(self._homes)]
         key = self._key()
         for home in homes:
-            if key and os.path.isdir(home) and not os.path.islink(home):
+            if not os.path.isdir(home) or os.path.islink(home):
+                continue
+            if key:
                 self._scrub_persona(home, key, refuse_protected=False)
-            if not self.keep_home and os.path.isdir(home) and not os.path.islink(home):
+            _drop_persona_credentials(home)
+            if not self.keep_home:
                 shutil.rmtree(home)
         self._homes.clear()
         self._sessions.clear()
@@ -613,6 +616,23 @@ def _remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _drop_persona_credentials(home):
+    """O close tira o chat local e qualquer auth.json. Link não é seguido."""
+    chats = os.path.join(home, '.cursor', 'chats')
+    if os.path.islink(chats):
+        _remove(chats)
+    elif os.path.isdir(chats):
+        shutil.rmtree(chats)
+    for dirpath, dirnames, filenames in os.walk(home):
+        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
+        for name in filenames:
+            if name != 'auth.json':
+                continue
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path) or _regular(path):
+                _remove(path)
 
 
 def _parse_payload(stdout):

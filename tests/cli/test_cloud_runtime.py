@@ -9,13 +9,14 @@ import hashlib
 import io
 import json
 import os
+import runpy
 import signal
 import stat
 import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -572,6 +573,96 @@ class CloudRuntimeTest(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pids[0], 0)
         self.assert_secret_gone()
+
+
+    def test_brza_key_stays_out_of_argv_parent_env_and_session_output(self):
+        sentinel = 'brza-sentinel-gate2-not-real'
+        touched = ('HOME', 'PATH', 'BRZA_CURSOR_API_KEY', 'CURSOR_API_KEY',
+                   'BRZA_FAKE_CAPTURE', 'BRZA_FAKE_BEHAVIOR', 'BRZA_FAKE_SESSION',
+                   'CURSOR_CONVERSATION_ID')
+        saved = {name: os.environ.get(name) for name in touched}
+        try:
+            os.environ['HOME'] = str(self.tmp / 'real-home')
+            os.environ['PATH'] = str(self.tmp / 'bin') + os.pathsep + (saved['PATH'] or '/usr/bin:/bin')
+            os.environ['BRZA_CURSOR_API_KEY'] = sentinel
+            os.environ.pop('CURSOR_API_KEY', None)
+            os.environ['BRZA_FAKE_CAPTURE'] = str(self.tmp / 'capture.json')
+            os.environ['BRZA_FAKE_BEHAVIOR'] = 'ok'
+            os.environ['BRZA_FAKE_SESSION'] = 'sess-gate'
+            os.environ['CURSOR_CONVERSATION_ID'] = 'bc-gate'
+            runtime = cloud_runtime.CloudRuntime(log_path=str(self.log), timeout_s=2, keep_home=True)
+            self.runtime = runtime
+            self.assertIs(runtime.env, os.environ)
+            opened = runtime.open(self.spec())
+            self.assertNotIn('CURSOR_API_KEY', os.environ)
+            self.assertEqual(os.environ.get('BRZA_CURSOR_API_KEY'), sentinel)
+            opened_capture = self.capture()
+            runtime.close()
+            self.runtime = None
+            self.assertNotIn('CURSOR_API_KEY', os.environ)
+            sessions = runpy.run_path(str(ROOT / 'packages' / 'client' / 'bin' / 'brza-sessions'))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                with patch.object(sys, 'argv', ['brza-sessions', '--runtime', 'cloud', 'send', opened.session_id, 'continua']):
+                    code = sessions['main']()
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        self.assertEqual(code, 0, stdout.getvalue())
+        for capture in (opened_capture, self.capture()):
+            argv = capture['argv']
+            self.assertTrue(capture['cursor_key_set'])
+            self.assertTrue(capture['brza_absent'])
+            self.assertEqual(capture['key_sha256'], hashlib.sha256(sentinel.encode()).hexdigest())
+            self.assertFalse(any(sentinel in part for part in argv))
+            self.assertNotIn('BRZA_CURSOR_API_KEY', argv)
+        rendered = stdout.getvalue() + stderr.getvalue() + self.log.read_text()
+        self.assertNotIn(sentinel, rendered)
+        self.assertNotIn(sentinel, json.dumps(opened.measurement, ensure_ascii=False))
+        self.assertIn(opened.session_id, stdout.getvalue())
+
+    def test_each_persona_home_is_isolated_and_close_drops_chats_and_credentials(self):
+        runtime = self.runtime_for(keep_home=True)
+        runtime.open(self.spec(persona='p7'))
+        runtime.open(self.spec(persona='revisor', mode='ask'))
+        homes = {name: Path(runtime._homes[name]) for name in ('p7', 'revisor')}
+        self.assertNotEqual(homes['p7'], homes['revisor'])
+        worktree = str(self.tmp / 'workspace')
+        flags = self.flags()
+        self.assertEqual(flags[flags.index('--mode') + 1], 'ask')
+        self.assertEqual(flags[flags.index('--workspace') + 1], worktree)
+        trust = flags.index('--trust')
+        self.assertNotEqual(flags[trust + 1], str(homes['revisor']))
+        argv = self.capture()['argv']
+        for home in homes.values():
+            self.assertFalse(any(str(home) in part for part in argv))
+            self.assertFalse(worktree.startswith(str(home)))
+        planted = {}
+        for name, home in homes.items():
+            chats = home / '.cursor' / 'chats' / 'bucket' / 'store.db'
+            chats.parent.mkdir(parents=True)
+            chats.write_text('conversa-' + name)
+            auth = home / '.config' / 'cursor' / 'auth.json'
+            auth.parent.mkdir(parents=True, exist_ok=True)
+            auth.write_text('credential-' + name)
+            cursor_auth = home / '.cursor' / 'auth.json'
+            cursor_auth.write_text('credential-cursor-' + name)
+            planted[name] = (chats, auth, cursor_auth)
+        for name in ('.', '..', ' .. '):
+            with self.subTest(name=name):
+                with self.assertRaises(cloud_runtime.CloudTurnError):
+                    runtime.open(self.spec(persona=name))
+        runtime.close()
+        self.runtime = None
+        for name, (chats, auth, cursor_auth) in planted.items():
+            self.assertFalse((homes[name] / '.cursor' / 'chats').exists(), name)
+            self.assertFalse(chats.exists(), name)
+            self.assertFalse(auth.exists(), name)
+            self.assertFalse(cursor_auth.exists(), name)
+            self.assertTrue((homes[name] / 'persona.json').is_file(), name)
 
 
 if __name__ == '__main__':
