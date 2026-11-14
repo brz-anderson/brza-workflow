@@ -15,9 +15,11 @@ entram em `capabilities` quando o PR A chegar, sem reescrever o turno. O
 guarda o chat no bucket do workspace. Sem `--force`, sem `--yolo` e sem
 `--api-key`. A
 chave vai só no ambiente do filho, como `CURSOR_API_KEY`. O `HOME` do filho é
-um diretório temporário por persona, reusado no `send` para o resume achar o
-estado local; no fim do turno apaga-se qualquer arquivo desse diretório, e o
-`auth.json` do HOME do pai, que contenha a chave.
+um diretório estável por persona, reusado no `send` — inclusive noutro
+processo — para o resume achar o chat local. No fim do turno apaga-se qualquer
+arquivo desse diretório, e o `auth.json` do HOME do pai, que contenha a chave.
+Um `send` sem a persona e o workspace do `open`, e sem memória deste processo,
+falha antes de chamar o `agent`.
 """
 
 import argparse
@@ -168,28 +170,46 @@ class CloudRuntime(AgentRuntime):
                           mode=mode, session=None, prompt=prompt)
 
     def send(self, session, prompt, persona=None, model=None, workspace=None, mode=None):
-        """Turno seguinte, com `--resume`. `session` é o `session_id` do `open`."""
+        """Turno seguinte, com `--resume`. `session` é o `session_id` do `open`.
+
+        Sem a memória deste processo, `persona` e `workspace` são obrigatórios:
+        o CLI indexa o chat pelos dois, e omitir o workspace ainda devolve um
+        turno com rc 0 noutro bucket.
+        """
         self.require('send')
         if not isinstance(session, str) or not session:
             raise CloudTurnError('runtime cloud: send precisa do session_id devolvido pelo open.')
-        # O CLI indexa o chat pelo workspace. Sem repetir o do open, o resume abre outro
-        # bucket e o modelo não vê o turno anterior.
         remembered = self._sessions.get(session, {})
         if persona is None:
-            persona = remembered.get('persona', session)
+            persona = remembered.get('persona')
         if model is None:
             model = remembered.get('model')
         if workspace is None:
             workspace = remembered.get('workspace')
         if mode is None:
             mode = remembered.get('mode')
+        missing = [name for name, value in (('persona', persona), ('workspace', workspace)) if not value]
+        if missing:
+            raise CloudTurnError(
+                'runtime cloud: send sem ' + ' e sem '.join(missing) +
+                ' não repete o bucket do open. Passe persona e workspace, '
+                'ou use o mesmo CloudRuntime do open.')
         return self._turn(capability='send', persona=persona, model=model, workspace=workspace,
                           mode=mode, session=session, prompt=prompt)
 
     def close(self):
-        """Apaga os HOME temporários das personas. A chave já saiu no fim de cada turno."""
+        """Tira a chave do HOME da persona e esquece a memória do processo.
+
+        O diretório permanece: outro processo, com a mesma persona, retoma o
+        chat local. A chave não fica em disco.
+        """
+        key = self._key()
         for home in self._homes.values():
-            shutil.rmtree(home, ignore_errors=True)
+            if key:
+                _scrub_tree(home, key)
+        if key:
+            for path in _auth_paths(self._env):
+                _scrub_file(path, key)
         self._homes.clear()
         self._sessions.clear()
 
@@ -208,7 +228,10 @@ class CloudRuntime(AgentRuntime):
         home = self._homes.get(label)
         if home and os.path.isdir(home):
             return home
-        home = tempfile.mkdtemp(prefix=f'brza-cloud-{label}-')
+        parent = self._env.get('HOME') or tempfile.gettempdir()
+        home = os.path.join(parent, '.local', 'share', 'brza', 'cloud-runtime', label)
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        os.chmod(home, 0o700)
         self._homes[label] = home
         return home
 
@@ -250,6 +273,7 @@ class CloudRuntime(AgentRuntime):
         env = self._child_env(key, home)
         started = time.monotonic()
         timed_out = False
+        proc = None
         stdout, stderr, returncode = '', '', 1
         try:
             proc = subprocess.Popen(
@@ -260,12 +284,17 @@ class CloudRuntime(AgentRuntime):
                 returncode = proc.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
-                _kill_group(proc.pid)
+                _reap(proc)
                 stdout, stderr = proc.communicate()
-                returncode = proc.returncode
+                returncode = proc.returncode if proc.returncode is not None else 1
+            except BaseException:
+                _reap(proc)
+                raise
             stdout = stdout or ''
             stderr = stderr or ''
         finally:
+            _reap(proc)
+            _close_pipes(proc)
             self._scrub(home, key)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         payload = _parse_payload(stdout)
@@ -393,6 +422,29 @@ def _kill_group(pid):
         pass
 
 
+def _reap(proc):
+    """Mata o grupo do `agent` se ele ainda estiver vivo. O scrub vem depois."""
+    if proc is None or proc.poll() is not None:
+        return
+    _kill_group(proc.pid)
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _close_pipes(proc):
+    if proc is None:
+        return
+    for stream in (proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
 def _print_turn(turn):
     measurement = turn.measurement
     print(json.dumps({
@@ -420,9 +472,9 @@ def main(argv=None):
     send_cmd = sub.add_parser('send')
     send_cmd.add_argument('--session', required=True)
     send_cmd.add_argument('--prompt', required=True)
-    send_cmd.add_argument('--persona')
+    send_cmd.add_argument('--persona', required=True)
     send_cmd.add_argument('--model')
-    send_cmd.add_argument('--workspace')
+    send_cmd.add_argument('--workspace', required=True)
     send_cmd.add_argument('--mode')
     send_cmd.add_argument('--timeout', **shared_timeout)
     send_cmd.add_argument('--log')
