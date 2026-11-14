@@ -17,6 +17,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / 'bin'))
@@ -63,6 +64,11 @@ if leak:
     path = Path(leak)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(key)
+leak_cache = os.environ.get("BRZA_LEAK_CACHE")
+if leak_cache:
+    path = Path(leak_cache)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"b" * 65533 + key.encode())
 if behavior == "timeout":
     time.sleep(30)
 session = os.environ.get("BRZA_FAKE_SESSION", "sess-p7")
@@ -368,6 +374,64 @@ class CloudRuntimeTest(unittest.TestCase):
         runtime.override_meta(opened.session_id, mode='plan')
         runtime.send(opened.session_id, 'de novo')
         self.assertEqual(self.flags()[self.flags().index('--mode') + 1], 'plan')
+
+    def test_a_persona_name_cannot_escape_and_the_neighbor_stays(self):
+        base = self.tmp / 'real-home' / '.local' / 'share' / 'brza'
+        sibling = base / 'cloud-runtime' / 'irma'
+        sibling.mkdir(parents=True)
+        (sibling / 'marker.txt').write_text('fica')
+        cache = base / 'cloud-runtime-cache'
+        cache.mkdir()
+        (cache / 'marker.txt').write_text('cache')
+        before_mode = sibling.stat().st_mode
+        runtime = self.runtime_for()
+        for name in ('..', '.', ' .. ', '../x'):
+            with self.subTest(name=name):
+                with self.assertRaises(cloud_runtime.CloudTurnError):
+                    runtime.open(self.spec(persona=name))
+                self.assertFalse((self.tmp / 'capture.json').exists())
+        runtime._homes['..'] = str(sibling)
+        runtime._homes['../x'] = str(cache)
+        with self.assertRaises(cloud_runtime.CloudTurnError):
+            runtime.close()
+        self.runtime = None
+        self.assertEqual((sibling / 'marker.txt').read_text(), 'fica')
+        self.assertEqual((cache / 'marker.txt').read_text(), 'cache')
+        self.assertEqual(sibling.stat().st_mode, before_mode)
+
+    def test_an_old_cache_file_is_not_read_and_a_new_leak_is_removed(self):
+        leak = (self.tmp / 'real-home' / '.local' / 'share' / 'brza'
+                / 'cloud-runtime-cache' / 'xdg' / 'leak.bin')
+        runtime = self.runtime_for(BRZA_LEAK_CACHE=str(leak))
+        cache = Path(runtime._shared_cache())
+        old = cache / 'old.bin'
+        old.write_bytes(b'a' * (cloud_runtime.READ_BLOCK + 50))
+        opened = []
+        real_open = open
+
+        def tracking(path, *args, **kwargs):
+            if os.path.basename(str(path)) == 'old.bin':
+                opened.append(str(path))
+            return real_open(path, *args, **kwargs)
+
+        with patch('cloud_runtime.open', tracking):
+            runtime.open(self.spec())
+        self.assertEqual(opened, [])
+        self.assertTrue(old.is_file())
+        self.assertFalse(leak.exists())
+
+    def test_close_scrubs_a_key_planted_after_the_turn(self):
+        runtime = self.runtime_for(keep_home=True)
+        runtime.open(self.spec())
+        home = Path(runtime._homes['p7'])
+        auth = home / '.config' / 'cursor' / 'auth.json'
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text(SECRET)
+        runtime.close()
+        self.runtime = None
+        self.assertTrue(home.is_dir())
+        self.assertFalse(auth.exists())
+        self.assertEqual((home / 'persona.json').is_file(), True)
 
     def test_close_deletes_the_persona_home(self):
         runtime = self.runtime_for()

@@ -41,6 +41,7 @@ TOKEN_FIELDS = (
 META_NAME = 'persona.json'
 HOME_PARTS = ('.local', 'share', 'brza', 'cloud-runtime')
 CACHE_NAME = 'cloud-runtime-cache'
+READ_BLOCK = 65536
 CACHE_DIRS = (
     '.npm',
     '.bun',
@@ -140,12 +141,13 @@ class CloudRuntime:
 
     def close(self):
         """Apaga o home da persona. Com `keep_home`, só tira a chave para um send de outro processo."""
+        homes = [self._persona_path(_safe_name(label)) for label in list(self._homes)]
         key = self._key()
-        for home in list(self._homes.values()):
-            if key:
+        for home in homes:
+            if key and os.path.isdir(home) and not os.path.islink(home):
                 self._scrub_persona(home, key, refuse_protected=False)
-            if not self.keep_home and os.path.lexists(home) and not os.path.islink(home):
-                shutil.rmtree(home, ignore_errors=True)
+            if not self.keep_home and os.path.isdir(home) and not os.path.islink(home):
+                shutil.rmtree(home)
         self._homes.clear()
         self._sessions.clear()
 
@@ -178,22 +180,37 @@ class CloudRuntime:
     def _parent_home(self):
         return self.env.get('HOME') or os.path.expanduser('~')
 
-    def _home_for(self, persona):
-        label = _safe_name(persona)
-        cached = self._homes.get(label)
-        if cached and os.path.isdir(cached) and not os.path.islink(cached):
-            return cached
+    def _persona_path(self, label):
+        """O home só existe em `cloud-runtime/<rótulo>`. A checagem vem antes de criar ou apagar."""
         current = self._parent_home()
         for part in (*HOME_PARTS, label):
             current = os.path.join(current, part)
             if os.path.islink(current):
                 raise CloudTurnError(
                     f'cloud: {current} é um symlink. O home da persona não segue link a partir de .local.')
+        resolved = os.path.realpath(current)
+        if resolved != current or os.path.basename(resolved) != label:
+            raise CloudTurnError(f'cloud: o home da persona tem de ser cloud-runtime/{label}.')
+        return current
+
+    def _home_for(self, persona):
+        label = _safe_name(persona)
+        home = self._persona_path(label)
+        cached = self._homes.get(label)
+        if cached and os.path.realpath(cached) != home:
+            raise CloudTurnError(f'cloud: o home da persona tem de ser cloud-runtime/{label}.')
+        if os.path.isdir(home) and not os.path.islink(home):
+            self._homes[label] = home
+            return home
+        current = self._parent_home()
+        for part in HOME_PARTS:
+            current = os.path.join(current, part)
             if not os.path.isdir(current):
                 os.mkdir(current, 0o700)
-        os.chmod(current, 0o700)
-        self._homes[label] = current
-        return current
+        os.mkdir(home, 0o700)
+        os.chmod(home, 0o700)
+        self._homes[label] = home
+        return home
 
     def _shared_cache(self):
         path = os.path.join(self._parent_home(), '.local', 'share', 'brza', CACHE_NAME)
@@ -268,6 +285,7 @@ class CloudRuntime:
         self._share_caches(home)
         self._scrub_persona(home, key, refuse_protected=True)
         before = _snapshot(workspace)
+        cache_before = _snapshot(self._shared_cache())
         argv = self._argv(binary, model, workspace, mode, session, prompt)
         env = self._child_env(key, home)
         started = time.monotonic()
@@ -296,7 +314,7 @@ class CloudRuntime:
             _close_pipes(proc)
             self._scrub_persona(home, key, refuse_protected=False)
             self._scrub_workspace(workspace, key, before)
-            self._scrub_owned(self._shared_cache(), key)
+            self._scrub_owned(self._shared_cache(), key, cache_before)
             self._relocate_caches(home)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         payload = _parse_payload(stdout)
@@ -418,10 +436,11 @@ class CloudRuntime:
         _scrub_tree(workspace, key, self, workspace=workspace, refuse_protected=False,
                     touched=lambda path: _touched(path, before))
 
-    def _scrub_owned(self, root, key):
+    def _scrub_owned(self, root, key, before):
         if not key or not root:
             return
-        _scrub_tree(root, key, self, workspace=root, refuse_protected=False, touched=None)
+        _scrub_tree(root, key, self, workspace=root, refuse_protected=False,
+                    touched=lambda path: _touched(path, before))
 
 
 def open_argv(model=None, workspace=None, chat_id=None):
@@ -438,8 +457,11 @@ def open_argv(model=None, workspace=None, chat_id=None):
 
 
 def _safe_name(name):
-    cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(name or 'persona')).strip('-')
-    return (cleaned or 'persona')[:40]
+    cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(name if name is not None else '')).strip('-')[:40]
+    pieces = [piece for piece in cleaned.split('-') if piece]
+    if cleaned in ('', '.', '..') or any(piece in ('.', '..') for piece in pieces):
+        raise CloudTurnError('cloud: o nome da persona não pode ser vazio, . ou ..')
+    return cleaned
 
 
 def _default_log(env):
@@ -568,14 +590,22 @@ def _scrub_link(path, key, runtime, workspace, refuse_protected):
 
 
 def _contains_key(path, key):
-    if not _regular(path):
+    if not _regular(path) or not key:
         return False
+    needle = key.encode('utf-8')
     try:
         with open(path, 'rb') as handle:
-            blob = handle.read()
+            overlap = b''
+            while True:
+                chunk = handle.read(READ_BLOCK)
+                if not chunk:
+                    return False
+                window = overlap + chunk
+                if needle in window:
+                    return True
+                overlap = window[1 - len(needle):] if len(needle) > 1 else b''
     except OSError:
         return False
-    return key.encode('utf-8') in blob
 
 
 def _remove(path):

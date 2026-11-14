@@ -909,6 +909,70 @@ class CloudPortTest(unittest.TestCase):
         self.assertNotIn('abriria', out)
         self.assertEqual(self.launches, [])
 
+    def cloud_agent(self):
+        """Chave falsa e um `agent` falso. O `cloud_env` zera as chaves, e sem isto o caso some."""
+        import cloud_runtime
+        root = Path(self.empty_user_data())
+        home = root / 'home'
+        home.mkdir()
+        bindir = root / 'bin'
+        bindir.mkdir()
+        capture = root / 'capture.json'
+        capture.write_text('[]')
+        agent = bindir / 'agent'
+        agent.write_text(
+            '#!/usr/bin/env python3\n'
+            'import json, os, sys\n'
+            'from pathlib import Path\n'
+            'key = os.environ["CURSOR_API_KEY"]\n'
+            'if key in sys.argv:\n'
+            '    raise SystemExit("a chave foi para o argv")\n'
+            'path = Path(os.environ["BRZA_CAPTURE"])\n'
+            'seen = json.loads(path.read_text())\n'
+            'seen.append(sys.argv)\n'
+            'path.write_text(json.dumps(seen))\n'
+            'print(json.dumps({"session_id": "sess-1", "result": "ok"}))\n'
+        )
+        agent.chmod(0o755)
+        env = {
+            'HOME': str(home),
+            'PATH': f'{bindir}{os.pathsep}/usr/bin',
+            'BRZA_CURSOR_API_KEY': 'brza-test-key-not-real',
+            'CURSOR_API_KEY': '',
+            'BRZA_CAPTURE': str(capture),
+            'ORCA_USER_DATA_PATH': str(root),
+        }
+        return cloud_runtime, root, capture, env
+
+    def test_diag_cloud_with_a_key_and_an_agent_does_not_call_open(self):
+        _runtime, _root, capture, env = self.cloud_agent()
+        with self.cloud_env(**env):
+            before = capture.read_text()
+            code, out = self.run_main('diag-cloud', '--agent', 'cursor')
+        self.assertNotEqual(code, 0, out)
+        self.assertIn('cloud', out)
+        self.assertIn('não chama open', out)
+        self.assertEqual(capture.read_text(), before)
+
+    def test_cloud_send_calls_cloud_runtime_send(self):
+        cloud_runtime, root, capture, env = self.cloud_agent()
+        with self.cloud_env(**env):
+            runtime = cloud_runtime.CloudRuntime(keep_home=True)
+            turn = runtime.open({
+                'persona': 'p7', 'model': 'grok-4.7-low', 'workspace': str(root),
+                'mode': 'ask', 'prompt': 'abre',
+            })
+            runtime.close()
+            self.assertEqual(turn.session_id, 'sess-1')
+            code, out = self.run_main('--runtime', 'cloud', 'send', 'sess-1', 'continua')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)['session_id'], 'sess-1')
+        resumed = json.loads(capture.read_text())[-1]
+        self.assertIn('--resume', resumed)
+        self.assertIn('sess-1', resumed)
+        self.assertNotIn('brza-test-key-not-real', resumed)
+        self.assertNotIn('brza-test-key-not-real', out)
+
     def test_diag_cloud_refuses_an_agent_other_than_cursor(self):
         code, out = self.run_main('diag-cloud', '--agent', 'grok', '--dry-run')
         self.assertNotEqual(code, 0)
