@@ -136,6 +136,8 @@ def files_with(root, secret):
 
 class CloudRuntimeTest(unittest.TestCase):
     def setUp(self):
+        self.locked = []
+        self.runtime = None
         self.tmp = Path(tempfile.mkdtemp(prefix='brza-cloud-test-'))
         self.addCleanup(lambda: __import__('shutil').rmtree(self.tmp, ignore_errors=True))
         bindir = self.tmp / 'bin'
@@ -146,11 +148,26 @@ class CloudRuntimeTest(unittest.TestCase):
         (self.tmp / 'real-home').mkdir()
         (self.tmp / 'workspace').mkdir()
         self.log = self.tmp / 'measurements.jsonl'
-        self.runtime = None
 
     def tearDown(self):
+        for path, mode in self.locked:
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                pass
         if self.runtime is not None:
             self.runtime.close()
+
+    def lock_directory(self, path):
+        path = Path(path)
+        mode = path.stat().st_mode & 0o777
+        self.locked.append((path, mode))
+        os.chmod(path, 0o500)
+
+    def unlock_directories(self):
+        while self.locked:
+            path, mode = self.locked.pop()
+            os.chmod(path, mode)
 
     def env(self, **extra):
         base = {
@@ -229,7 +246,9 @@ class CloudRuntimeTest(unittest.TestCase):
         self.assertEqual(got['key_sha256'], hashlib.sha256(SECRET.encode()).hexdigest())
         self.assertNotIn('CURSOR_API_KEY', runtime.env)
         home = next(iter(runtime._homes.values()))
-        self.assertEqual((Path(home) / '.config' / 'cursor' / 'session-state').read_text(), 'kept')
+        session_state = Path(home) / '.config' / 'cursor' / 'session-state'
+        self.assertEqual(session_state.read_text(), 'kept')
+        self.assertFalse(cloud_runtime._contains_key(session_state, SECRET))
         plugins = Path(home) / '.cursor' / 'plugins'
         self.assertTrue(plugins.is_symlink())
         self.assertEqual((plugins / 'marker').read_text(), 'cache')
@@ -433,6 +452,98 @@ class CloudRuntimeTest(unittest.TestCase):
         self.assertTrue(home.is_dir())
         self.assertFalse(auth.exists())
         self.assertEqual((home / 'persona.json').is_file(), True)
+
+    def plant_locked_leftover(self, home, kind):
+        home = Path(home)
+        if kind == 'chats':
+            chats = home / '.cursor' / 'chats'
+            chats.mkdir(parents=True)
+            store = chats / 'store.db'
+            store.write_text('conversa')
+            self.lock_directory(chats)
+            return store
+        if kind == 'auth.json':
+            cursor = home / '.config' / 'cursor'
+            cursor.mkdir(parents=True, exist_ok=True)
+            auth = cursor / 'auth.json'
+            auth.write_text('credential-sem-chave')
+            self.lock_directory(cursor)
+            return auth
+        sealed = home / 'sealed'
+        sealed.mkdir(exist_ok=True)
+        note = sealed / 'note.txt'
+        note.write_text('prefixo-' + SECRET)
+        self.lock_directory(sealed)
+        return note
+
+    def clear_planted_leftovers(self, home):
+        self.unlock_directories()
+        home = Path(home)
+        chats = home / '.cursor' / 'chats'
+        if chats.is_symlink() or chats.is_file():
+            chats.unlink()
+        elif chats.is_dir():
+            for child in chats.iterdir():
+                child.unlink()
+            chats.rmdir()
+        auth = home / '.config' / 'cursor' / 'auth.json'
+        if auth.is_symlink() or auth.is_file():
+            auth.unlink()
+        note = home / 'sealed' / 'note.txt'
+        if note.is_file():
+            note.unlink()
+        sealed = home / 'sealed'
+        if sealed.is_dir() and not any(sealed.iterdir()):
+            sealed.rmdir()
+        capture = self.tmp / 'capture.json'
+        if capture.exists():
+            capture.unlink()
+
+    def assert_leftover_refuses(self, action, planted, spawned):
+        with self.assertRaises(cloud_runtime.CloudTurnError) as caught:
+            action()
+        message = str(caught.exception)
+        self.assertIn('sobrou', message)
+        self.assertNotIn(SECRET, message)
+        self.assertNotIn(str(planted), message)
+        self.assertTrue(planted.exists())
+        if spawned is not None:
+            self.assertFalse(spawned.exists())
+
+    def test_close_refuses_credentials_kept_by_a_directory_without_write(self):
+        runtime = self.runtime_for(keep_home=True)
+        runtime.open(self.spec())
+        home = runtime._homes['p7']
+        for kind in ('chats', 'auth.json', 'key'):
+            with self.subTest(kind=kind):
+                planted = self.plant_locked_leftover(home, kind)
+                try:
+                    self.assert_leftover_refuses(runtime.close, planted, None)
+                finally:
+                    self.clear_planted_leftovers(home)
+
+    def test_close_without_keep_home_refuses_when_the_home_cannot_be_removed(self):
+        runtime = self.runtime_for()
+        runtime.open(self.spec())
+        home = Path(runtime._homes['p7'])
+        planted = self.plant_locked_leftover(home, 'auth.json')
+        try:
+            self.assert_leftover_refuses(runtime.close, planted, None)
+            self.assertTrue(home.is_dir())
+        finally:
+            self.clear_planted_leftovers(home)
+
+    def test_open_refuses_orphan_credentials_kept_by_a_directory_without_write(self):
+        runtime = self.runtime_for()
+        home = runtime._home_for('p7')
+        capture = self.tmp / 'capture.json'
+        for kind in ('chats', 'auth.json', 'key'):
+            with self.subTest(kind=kind):
+                planted = self.plant_locked_leftover(home, kind)
+                try:
+                    self.assert_leftover_refuses(lambda: runtime.open(self.spec()), planted, capture)
+                finally:
+                    self.clear_planted_leftovers(home)
 
     def test_close_deletes_the_persona_home(self):
         runtime = self.runtime_for()
