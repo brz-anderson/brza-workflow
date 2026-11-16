@@ -10,8 +10,8 @@ modo, persona e workspace do `persona.json` no home da persona.
 
 A chave vai só no filho, como `CURSOR_API_KEY`. O scrub cobre o home da persona e os
 arquivos do workspace criados ou modificados no turno. O HOME pai não é tocado. O
-`close` apaga o home da persona, salvo `keep_home`. Chat, `auth.json` ou arquivo com
-a chave que sobrar depois da limpeza recusa o turno.
+`close` apaga o home da persona, salvo `keep_home`. Chat, `auth.json`, arquivo com
+a chave ou o que não deu para ler, se sobrar depois da limpeza, recusa o turno.
 """
 
 import argparse
@@ -43,6 +43,9 @@ META_NAME = 'persona.json'
 HOME_PARTS = ('.local', 'share', 'brza', 'cloud-runtime')
 CACHE_NAME = 'cloud-runtime-cache'
 READ_BLOCK = 65536
+LEFTOVER_CREDENTIAL = (
+    'cloud: sobrou chat, auth.json ou arquivo com a chave no home da persona. '
+    'O turno foi recusado.')
 CACHE_DIRS = (
     '.npm',
     '.bun',
@@ -144,22 +147,33 @@ class CloudRuntime:
         """Apaga o home da persona. Com `keep_home`, deixa o `persona.json`. Credencial que sobrar recusa."""
         homes = [self._persona_path(_safe_name(label)) for label in list(self._homes)]
         key = self._key()
-        for home in homes:
-            if not os.path.isdir(home) or os.path.islink(home):
-                continue
-            if key:
-                self._scrub_persona(home, key, refuse_protected=False)
-            _drop_persona_credentials(home)
-            if not self.keep_home:
-                try:
-                    shutil.rmtree(home)
-                except OSError:
-                    _refuse_remaining_credentials(home, key)
-                    raise
-            else:
-                _refuse_remaining_credentials(home, key)
-        self._homes.clear()
-        self._sessions.clear()
+        leftover = False
+        stuck = False
+        try:
+            for home in homes:
+                if not os.path.isdir(home) or os.path.islink(home):
+                    continue
+                if key:
+                    self._scrub_persona(home, key, refuse_protected=False)
+                _drop_persona_credentials(home)
+                if not self.keep_home:
+                    try:
+                        shutil.rmtree(home)
+                    except OSError:
+                        if _credential_refused(home, key):
+                            leftover = True
+                        else:
+                            stuck = True
+                elif _credential_refused(home, key):
+                    leftover = True
+        finally:
+            self._homes.clear()
+            self._sessions.clear()
+        if leftover:
+            raise CloudTurnError(LEFTOVER_CREDENTIAL) from None
+        if stuck:
+            raise CloudTurnError(
+                'cloud: o home da persona não foi apagado. O turno foi recusado.') from None
 
     def _require_turn(self, capability):
         try:
@@ -604,7 +618,7 @@ def _scrub_link(path, key, runtime, workspace, refuse_protected):
     _remove(path)
 
 
-def _contains_key(path, key):
+def _contains_key(path, key, unreadable=False):
     if not _regular(path) or not key:
         return False
     needle = key.encode('utf-8')
@@ -620,7 +634,7 @@ def _contains_key(path, key):
                     return True
                 overlap = window[1 - len(needle):] if len(needle) > 1 else b''
     except OSError:
-        return False
+        return unreadable
 
 
 def _remove(path):
@@ -650,9 +664,15 @@ def _drop_persona_credentials(home):
 def _refuse_remaining_credentials(home, key):
     """Recusa o turno se chat, auth.json ou a chave continuarem no home."""
     if _credentials_remain(home, key):
-        raise CloudTurnError(
-            'cloud: sobrou chat, auth.json ou arquivo com a chave no home da persona. '
-            'O turno foi recusado.') from None
+        raise CloudTurnError(LEFTOVER_CREDENTIAL) from None
+
+
+def _credential_refused(home, key):
+    try:
+        _refuse_remaining_credentials(home, key)
+    except CloudTurnError:
+        return True
+    return False
 
 
 def _credentials_remain(home, key):
@@ -660,28 +680,35 @@ def _credentials_remain(home, key):
         return False
     if os.path.lexists(os.path.join(home, '.cursor', 'chats')):
         return True
-    for dirpath, dirnames, filenames in os.walk(home):
+    blocked = False
+
+    def onerror(_err):
+        nonlocal blocked
+        blocked = True
+
+    for dirpath, dirnames, filenames in os.walk(home, onerror=onerror):
         dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
         for name in filenames:
             path = os.path.join(dirpath, name)
             if name == 'auth.json' or _path_holds_key(path, key):
                 return True
-    return False
+    return blocked
 
 
 def _path_holds_key(path, key):
-    if _contains_key(path, key):
-        return True
     try:
         info = os.lstat(path)
     except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            target = os.path.realpath(path)
+        except OSError:
+            return True
+        return _contains_key(target, key, unreadable=True)
+    if not stat.S_ISREG(info.st_mode):
         return False
-    if not stat.S_ISLNK(info.st_mode):
-        return False
-    try:
-        return _contains_key(os.path.realpath(path), key)
-    except OSError:
-        return False
+    return _contains_key(path, key, unreadable=True)
 
 
 def _parse_payload(stdout):
