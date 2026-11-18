@@ -1,6 +1,6 @@
-"""CloudRuntime: list/read do degrau 1 e o turno `open`/`send` pelo CLI `agent`.
+"""CloudRuntime: `list` e `read` da run, e o turno `open`/`send` pelo CLI `agent`.
 
-`list` e `read` vêm do PR #3. `open` e `send` entram no conjunto só quando há chave
+`open` e `send` entram no conjunto só quando há chave
 (`CURSOR_API_KEY` ou `BRZA_CURSOR_API_KEY`) e o binário `agent`. Sem um dos dois, a
 chamada falha por `require_capability` e nomeia o runtime e a capacidade.
 

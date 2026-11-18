@@ -771,7 +771,7 @@ class CommandTest(unittest.TestCase):
 
 
 class CloudPortTest(unittest.TestCase):
-    """O degrau 1 da porta: list da run cloud, dry-run, e falha que nomeia runtime e capacidade."""
+    """A porta na cloud: list da run, dry-run, e falha que nomeia runtime e capacidade."""
 
     setUp = CommandTest.setUp
     transcript = CommandTest.transcript
