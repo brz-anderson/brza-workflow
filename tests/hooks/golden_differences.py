@@ -32,7 +32,7 @@ WHY = {
     "aspas": "a regra dos blocos de shell manda aspas em caminho e expansão, depois do `head $(which brza)` sem aspas de "
              "2026-11-02: o caminho do app tem espaço, e o bloco roda em bash",
     "feedback": "o gênero `work/feedbacks/`, uma nota por execução e sem `status`, com as cinco seções e model, effort "
-                "e result (PLN-025/P2, D2, R1.1)",
+                "e result",
 }
 
 DIFFERENCES = [
@@ -283,8 +283,13 @@ checkout. O commit é com a identidade do"""),
 """, ""),
 ]
 
-# PLN-025/P2: o gênero work/feedbacks/ na norma e no catálogo da skill. O `old` é o texto da master de ouro; o `new` é o
-# que o render do núcleo produz, com `{{workspace.branch}}` já trocado.
+# O gênero work/feedbacks/ na norma e no catálogo da skill. O `old` é o texto da master de ouro; o `new` é o
+# que o render do núcleo produz, com o placeholder da branch já trocado.
+DIFFERENCES.append(Difference(
+    "work/README.md", "feedback",
+    "`brza note migration-open`, nunca data.\n",
+    "`brza note migration-open`, nunca data. `feedbacks/` usa o mesmo prefixo de data.\n",
+))
 DIFFERENCES.append(Difference(
     "work/README.md", "feedback",
     "  - [`work/notes/`](#worknotes)\n  - [`wiki/guides/`](#wikiguides)\n",
@@ -295,14 +300,6 @@ DIFFERENCES.append(Difference(
     "| `notes/` | `note` | Rascunho do dia, de onde o conteúdo é promovido a arquivo próprio |\n",
     "| `notes/` | `note` | Rascunho do dia, de onde o conteúdo é promovido a arquivo próprio |\n"
     "| `feedbacks/` | `feedback` | Uma execução de Builder: pedido, escolha, erro e se o esforço regulou |\n",
-))
-DIFFERENCES.append(Difference(
-    "work/README.md", "feedback",
-    "do assunto — `worklogs/` e `notes/`. Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número\n"
-    "sequencial reservado no índice da `master` por `brza note plan-open`, `brza note review-open` e\n",
-    "do assunto — `worklogs/`, `notes/` e `feedbacks/`.\n"
-    "Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número sequencial reservado no índice da\n"
-    "`master` por `brza note plan-open`, `brza note review-open` e\n",
 ))
 DIFFERENCES.append(Difference(
     "work/README.md", "feedback",

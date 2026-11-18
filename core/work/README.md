@@ -158,10 +158,9 @@ opened: 2026-10-27
 
 **Um assunto por arquivo**, em Markdown, nome em kebab-case e **único no acervo inteiro** — salvo o `README.md`, que é
 a norma de cada zona, nunca nota, e repete o nome por construção. Prefixo de data `AAAA-MM-DD-` só onde a data é parte
-do assunto — `worklogs/`, `notes/` e `feedbacks/`.
-Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número sequencial reservado no índice da
-`{{workspace.branch}}` por `brza note plan-open`, `brza note review-open` e
-`brza note migration-open`, nunca data.
+do assunto — `worklogs/` e `notes/`. Plano (`PLN-NNN`), revisão (`REV-NNN`) e migração (`MIG-NNN`) levam número
+sequencial reservado no índice da `{{workspace.branch}}` por `brza note plan-open`, `brza note review-open` e
+`brza note migration-open`, nunca data. `feedbacks/` usa o mesmo prefixo de data.
 
 **A imagem de uma nota fica ao lado dela**, com o nome da nota e um sufixo quando há mais de uma — `<nome>.png`,
 `<nome>-escuro.png` — e o corpo a linka. É assim com o PNG da alternativa escolhida numa issue e com o print de um

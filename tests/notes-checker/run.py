@@ -933,7 +933,7 @@ def check_pln012_p5():
 
 
 def check_feedback():
-    """D2: work/feedbacks/ exige as cinco seções, nesta ordem, e model, effort e result válidos."""
+    """work/feedbacks/ exige as cinco seções, nesta ordem, e model, effort e result válidos."""
     sections = ("## Pedido", "## Escolha", "## Erro", "## Esforço", "## Próxima vez")
 
     def body(*titles):

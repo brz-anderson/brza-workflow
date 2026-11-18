@@ -88,7 +88,7 @@ GENRES = {
     "work/feedbacks": "feedback",
     "wiki/guides": "guide",
 }
-# D2 do PLN-025: uma nota por execução, sem status. model e effort inválidos são os vazios — a lista de modelos e a
+# Uma nota por execução, sem status. model e effort inválidos são os vazios — a lista de modelos e a
 # escada de esforço mudam por runtime. result só aceita estes três.
 FEEDBACK_SECTIONS = ("## Pedido", "## Escolha", "## Erro", "## Esforço", "## Próxima vez")
 FEEDBACK_RESULTS = {"done", "refused", "partial"}
@@ -644,7 +644,7 @@ def date_of(fm):
 
 
 def feedback_findings(text, fm):
-    """Seções na ordem do D2, model e effort preenchidos, result no vocabulário. Devolve (regra, detalhe)."""
+    """As cinco seções, nesta ordem, com model e effort preenchidos e result no vocabulário. Devolve (regra, detalhe)."""
     found = []
     for line in without_code(body_of(text)).split("\n"):
         title = line.strip()
