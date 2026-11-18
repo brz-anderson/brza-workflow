@@ -19,6 +19,7 @@ import repo_fixture
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "..", "core", "scripts", "summarize_measurements.py")
+MEASURE = os.path.join(HERE, "..", "..", "core", ".claude", "hooks", "measure.py")
 
 
 def load():
@@ -915,6 +916,117 @@ class RootTest(unittest.TestCase):
         self.assertEqual(os.path.realpath(self.summarize.workspace_root(os.path.join(self.tree, "scripts"), {})),
                          self.main)
 
+class ByExecutionTest(unittest.TestCase):
+    def setUp(self):
+        self.summarize = load()
+
+    def test_missing_cost_and_tokens_are_ausente_and_a_measured_pair_keeps_the_numbers(self):
+        rows = [
+            {"event": "turn", "session_id": "claude-com", "timestamp": "2026-11-14T10:00:00-03:00",
+             "model": "claude-haiku-4-5", "effort": "low", "estimated_cost_usd": 1.25,
+             "tokens": {"input": 10, "output": 2}, "prompt_head": "medir"},
+            {"event": "turn", "session_id": "grok-sem", "timestamp": "2026-11-14T11:00:00-03:00",
+             "model": "grok-4.7", "estimated_cost_usd": None, "tokens": None},
+            {"event": "subagent", "session_id": "claude-com", "estimated_cost_usd": 9},
+        ]
+        found = {row["id"]: row for row in self.summarize.aggregate_by_execution(rows, None, {})}
+        measured = found["claude-com"]
+        self.assertEqual(measured["cost_usd"], 1.25)
+        self.assertEqual(measured["cost_origin"], "hook")
+        self.assertEqual(measured["tokens"], 12)
+        self.assertEqual(measured["tokens_origin"], "hook")
+        absent = found["grok-sem"]
+        self.assertEqual(absent["cost_usd"], "ausente")
+        self.assertEqual(absent["tokens"], "ausente")
+        self.assertEqual(absent["cost_origin"], "ausente")
+        self.assertEqual(absent["tokens_origin"], "ausente")
+        self.assertNotEqual(absent["cost_usd"], 0)
+        self.assertNotEqual(absent["tokens"], 0)
+
+    def test_a_missing_turn_cost_does_not_become_a_partial_sum(self):
+        rows = [
+            {"event": "turn", "session_id": "mista", "estimated_cost_usd": 1.25, "tokens": 4},
+            {"event": "turn", "session_id": "mista", "estimated_cost_usd": None, "tokens": 4},
+        ]
+        (row,) = self.summarize.aggregate_by_execution(rows, None, {})
+        self.assertEqual(row["cost_usd"], "ausente")
+        self.assertEqual(row["tokens"], 8)
+
+    def test_token_total_sums_the_measure_object_without_the_cache_windows(self):
+        spec = importlib.util.spec_from_file_location("measure_tokens", MEASURE)
+        measure = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(measure)
+        self.assertEqual(measure.TOKEN_FIELDS,
+                         ("input", "cache_write", "cache_write_5m", "cache_write_1h", "cache_read", "output"))
+        tokens = dict(zip(measure.TOKEN_FIELDS, (10, 30, 20, 10, 5, 2)))
+        self.assertEqual(self.summarize.token_total({"tokens": tokens}), 47)
+
+    def test_the_agent_is_the_runtime_when_the_turn_has_no_agent(self):
+        rows = [{"event": "turn", "session_id": "rt", "runtime": "grok",
+                 "estimated_cost_usd": 1, "tokens": 3}]
+        (row,) = self.summarize.aggregate_by_execution(rows, None, {})
+        self.assertEqual(row["agent"], "grok")
+        bare = [{"event": "turn", "session_id": "sem", "estimated_cost_usd": 1, "tokens": 3}]
+        (other,) = self.summarize.aggregate_by_execution(bare, None, {})
+        self.assertEqual(other["agent"], "ausente")
+        self.assertNotEqual(other["agent"], "claude")
+
+    def test_a_real_zero_stays_a_measured_zero(self):
+        rows = [{"event": "turn", "session_id": "zerado", "estimated_cost_usd": 0, "tokens": 0}]
+        (row,) = self.summarize.aggregate_by_execution(rows, None, {})
+        self.assertEqual((row["cost_usd"], row["cost_origin"], row["tokens"], row["tokens_origin"]),
+                         (0, "hook", 0, "hook"))
+
+    def test_cloud_conversation_appears_with_ausente_cost_and_tokens(self):
+        rows = self.summarize.aggregate_by_execution([], None, {"CURSOR_CONVERSATION_ID": "bc-teste"})
+        self.assertEqual([row["id"] for row in rows], ["bc-teste"])
+        self.assertEqual(rows[0]["source"], "cloud")
+        self.assertEqual(rows[0]["cost_usd"], "ausente")
+        self.assertEqual(rows[0]["tokens"], "ausente")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.summarize.print_by_execution(rows)
+        line = out.getvalue().strip()
+        self.assertEqual(line, "bc-teste  cloud  cursor  custo=ausente (ausente)  tokens=ausente (ausente)")
+        self.assertNotIn("0", line)
+
+    def test_feedback_note_fills_the_task_and_does_not_invent_a_zero_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            note = ("---\nsession: bc-nota\ntask_type: plano\nmodel: grok-4.7\neffort: high\n"
+                    "result: partial\nestimated_cost_usd: 0\n---\n# Nota\n\n## Pedido\n\nAbrir o plano.\n\n## Escolha\n")
+            with open(os.path.join(tmp, "2026-11-14-nota.md"), "w", encoding="utf-8") as handle:
+                handle.write(note)
+            found = self.summarize.aggregate_by_execution([], tmp, {})
+        self.assertEqual(found[0]["id"], "bc-nota")
+        self.assertEqual(found[0]["task"], "Abrir o plano.")
+        self.assertEqual(found[0]["model"], "grok-4.7")
+        self.assertEqual(found[0]["effort"], "high")
+        self.assertEqual(found[0]["result"], "partial")
+        self.assertEqual(found[0]["task_type"], "plano")
+        self.assertEqual(found[0]["cost_usd"], "ausente")
+        self.assertEqual(found[0]["tokens"], "ausente")
+
+    def test_missing_feedback_dir_is_not_required(self):
+        found = self.summarize.aggregate_by_execution([], "/nao/existe/feedbacks", {"CURSOR_CONVERSATION_ID": "bc-so"})
+        self.assertEqual([row["id"] for row in found], ["bc-so"])
+
+    def test_command_line_prints_the_cloud_run_without_a_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            argv = ["summarize", "--dir", tmp, "--by-execution"]
+            env = {"CURSOR_CONVERSATION_ID": "bc-teste", "CURSOR_API_KEY": ""}
+            with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, env), \
+                    mock.patch.object(self.summarize, "feedback_dir", lambda: os.path.join(tmp, "ausente")), \
+                    contextlib.redirect_stdout(out):
+                code = self.summarize.main()
+        self.assertEqual(code, 0, out.getvalue())
+        text = out.getvalue()
+        self.assertIn("bc-teste  cloud  cursor  custo=ausente (ausente)  tokens=ausente (ausente)", text)
+        self.assertNotIn("custo=0", text)
+        self.assertNotIn("tokens=0", text)
+
+
+class RootVariableTest(RootTest):
     def test_the_variables_win_over_the_git(self):
         scripts = os.path.join(self.tree, "scripts")
         self.assertEqual(self.summarize.workspace_root(scripts, {"BRZA_WORKSPACE": "/x/y"}), "/x/y")

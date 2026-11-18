@@ -10,6 +10,7 @@ import json
 import os
 import plistlib
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,8 +27,11 @@ sys.path.insert(0, str(BIN))
 import brza_runtime as runtime  # noqa: E402
 
 DOCTOR = runpy.run_path(str(CLIENT / 'brza-doctor'))
+import agent_runtime  # noqa: E402  o doctor já pôs o client/bin no path
 # As funções leem os globais do módulo em que nasceram, não da cópia que o run_path devolve.
 GLOBALS = DOCTOR['main'].__globals__
+ORIGINAL_GIT_IDENT = GLOBALS['git_ident']
+ORIGINAL_GIT_CONFIG_EMAIL = GLOBALS['git_config_email']
 EMAIL = 'dev@acme.example'
 IDENT = f'Alguém <{EMAIL}> 1793166405 -0300'
 MANIFEST = ('schema = 1\n\n[workspace]\nname = "acme-notes"\n\n[author]\nname = "Alguém"\nemail = "{email}"\n\n'
@@ -414,6 +418,263 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('sem git', self.line(out, 'identidade'))
         self.assertTrue(self.line(out, 'app').startswith('ok'))
+
+    def test_env_cloud_without_socket_exits_zero_and_warns(self):
+        self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
+        data = self.base / 'user-data-cloud'
+        data.mkdir()
+        missing_app = self.base / 'sem-app'
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': '',
+               'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env), patch.dict(GLOBALS, {'APP': missing_app}):
+            code, out = self.run_doctor('--env')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('ERRO', out)
+        self.assertTrue(self.line(out, 'socket').startswith('AVISO'), out)
+        self.assertIn('cloud', self.line(out, 'socket'))
+        self.assertTrue(self.line(out, 'app').startswith('AVISO'), out)
+        self.assertTrue(self.line(out, 'identidade').startswith('AVISO'), out)
+        self.assertTrue(self.line(out, 'chave').startswith('AVISO'), out)
+        self.assertIn('ausente', self.line(out, 'chave'))
+
+    def test_env_without_cloud_and_without_socket_is_an_error(self):
+        data = self.base / 'user-data-mac'
+        data.mkdir()
+        env = {'CURSOR_CONVERSATION_ID': '', 'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertNotEqual(code, 0)
+        line = self.line(out, 'socket')
+        self.assertTrue(line.startswith('ERRO'), out)
+        self.assertIn('ausente', line)
+
+    def test_env_cloud_with_socket_does_not_warn_about_the_socket(self):
+        data = self.base / 'user-data-socket'
+        data.mkdir()
+        (data / 'orca-runtime.json').write_text('{}')
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': '',
+               'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.line(out, 'socket').startswith('ok'), out)
+        self.assertIn('studio', self.line(out, 'runtime'))
+        self.assertNotIn('cloud', self.line(out, 'runtime'))
+
+    def test_env_socket_and_conversation_id_stay_studio_and_keep_the_identity_error(self):
+        self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
+        data = self.base / 'user-data-both'
+        data.mkdir()
+        (data / 'orca-runtime.json').write_text('{}')
+        env = {'CURSOR_CONVERSATION_ID': 'bc-teste', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': '',
+               'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        self.assertNotEqual(code, 0)
+        self.assertIn('studio', self.line(out, 'runtime'))
+        self.assertNotIn('cloud', self.line(out, 'runtime'))
+        self.assertTrue(self.line(out, 'identidade').startswith('ERRO'), out)
+
+    def test_env_treats_brza_cursor_api_key_as_present_without_printing_it(self):
+        sentinel = 'sentinela-brza-chave-9c2e'
+        data = self.base / 'user-data-key'
+        data.mkdir()
+        (data / 'orca-runtime.json').write_text('{}')
+        env = {'CURSOR_CONVERSATION_ID': '', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': sentinel,
+               'ORCA_USER_DATA_PATH': str(data)}
+        with patch.dict(os.environ, env):
+            code, out = self.run_doctor('--env')
+        line = self.line(out, 'chave')
+        if sentinel in out or str(len(sentinel)) in line:
+            self.fail('a chave ou o comprimento apareceu na saída')
+        self.assertEqual(code, 0)
+        self.assertTrue(line.startswith('ok'))
+        self.assertNotIn('CURSOR_API_KEY', line)
+        self.assertNotIn('exporte CURSOR_API_KEY', out)
+
+    def test_false_key_is_not_printed_passed_or_stored_in_the_parent(self):
+        """Sentinela falsa. A saída, o argv e o ambiente do pai não ficam com ela, nem em parte."""
+        left, right = 'zq7Nm4kL9c2eQ8p1', 'w3rT6yH0b5vA2s8d'
+        sentinel = left + right
+        window = 8
+
+        def leaked(blob) -> bool:
+            text = blob if isinstance(blob, str) else ''
+            if not text:
+                return False
+            if sentinel in text or left in text or right in text:
+                return True
+            for piece in (left, right):
+                for index in range(0, len(piece) - window + 1):
+                    if piece[index:index + window] in text:
+                        return True
+            return False
+
+        def assert_clean(blob, where):
+            if leaked(blob):
+                self.fail(f'a chave apareceu em {where}')
+
+        def run_captured(call):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = call()
+            return code, out.getvalue(), err.getvalue()
+
+        data = self.base / 'user-data-secret'
+        data.mkdir()
+        private = {'CURSOR_CONVERSATION_ID': 'bc-aaa', 'BRZA_CURSOR_API_KEY': sentinel, 'CURSOR_API_KEY': ''}
+        with patch.dict(os.environ, {'ORCA_USER_DATA_PATH': str(data), 'CURSOR_CONVERSATION_ID': ''}):
+            os.environ.pop('BRZA_CURSOR_API_KEY', None)
+            os.environ.pop('CURSOR_API_KEY', None)
+            before = dict(os.environ)
+            chosen = agent_runtime.select_runtime(env=private)
+            changed = sorted(key for key in set(os.environ) | set(before) if os.environ.get(key) != before.get(key))
+            if changed:
+                self.fail(f'o select_runtime alterou o ambiente do pai: {changed}')
+            self.assertEqual(chosen.name, 'cloud')
+            listed = json.dumps([record.as_dict() for record in chosen.list()], ensure_ascii=False)
+            assert_clean(listed, 'list da seleção')
+            self.assertNotIn('CURSOR_API_KEY', listed)
+
+        argv_hits = []
+
+        def watch(args):
+            parts = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
+            argv_hits.append(parts)
+            if any(leaked(part) for part in parts):
+                raise AssertionError('a chave foi parar num argv')
+
+        def spy_call(real):
+            def spy(*args, **kwargs):
+                for arg in args:
+                    if isinstance(arg, (list, tuple)):
+                        watch(arg)
+                    elif isinstance(arg, str):
+                        watch([arg])
+                return real(*args, **kwargs)
+            return spy
+
+        def spy_exec(*args, **kwargs):
+            for arg in args:
+                if isinstance(arg, (list, tuple)):
+                    watch(arg)
+                elif isinstance(arg, str):
+                    watch([arg])
+            raise AssertionError('exec no caminho')
+
+        def spy_set(mapping, key, value):
+            if leaked(value if isinstance(value, str) else ''):
+                raise AssertionError('a chave foi gravada no ambiente do pai')
+            return environ_set(mapping, key, value)
+
+        def spy_putenv(name, value):
+            if leaked(value if isinstance(value, str) else ''):
+                raise AssertionError('a chave foi gravada no ambiente do pai')
+            return os_putenv(name, value)
+
+        environ_set = os._Environ.__setitem__
+        os_putenv = os.putenv
+        sessions = runpy.run_path(str(CLIENT / 'brza-sessions'))
+        # O setUp troca o git. Aqui o doctor volta ao subprocess.run de produção, para o espião ver o argv.
+        GLOBALS['git_ident'] = ORIGINAL_GIT_IDENT
+        GLOBALS['git_config_email'] = ORIGINAL_GIT_CONFIG_EMAIL
+        env = {'CURSOR_CONVERSATION_ID': 'bc-aaa', 'CURSOR_API_KEY': '', 'BRZA_CURSOR_API_KEY': sentinel,
+               'ORCA_USER_DATA_PATH': str(data)}
+        call_through = (
+            'subprocess.run', 'subprocess.call', 'subprocess.check_call', 'subprocess.check_output',
+            'subprocess.Popen', 'subprocess.getoutput', 'subprocess.getstatusoutput', 'os.system',
+        )
+        originals = {
+            'subprocess.run': subprocess.run, 'subprocess.call': subprocess.call,
+            'subprocess.check_call': subprocess.check_call, 'subprocess.check_output': subprocess.check_output,
+            'subprocess.Popen': subprocess.Popen, 'subprocess.getoutput': subprocess.getoutput,
+            'subprocess.getstatusoutput': subprocess.getstatusoutput, 'os.system': os.system,
+        }
+        patches = [patch.dict(os.environ, env), patch.object(os._Environ, '__setitem__', spy_set),
+                   patch('os.putenv', spy_putenv)]
+        for name in call_through:
+            patches.append(patch(name, spy_call(originals[name])))
+        for name in ('os.execl', 'os.execle', 'os.execlp', 'os.execlpe', 'os.execv', 'os.execve', 'os.execvp',
+                     'os.execvpe'):
+            patches.append(patch(name, spy_exec))
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            parent_before = dict(os.environ)
+            cloud_calls = (
+                ('doctor --env', lambda: GLOBALS['main'](['--env']), None, 0),
+                ('doctor --env --json', lambda: GLOBALS['main'](['--env', '--json']), None, 0),
+                ('sessions list --json', lambda: sessions['main'](), ['brza-sessions', 'list', '--json'], 0),
+                ('sessions read --json', lambda: sessions['main'](), ['brza-sessions', 'read', '--json'], 0),
+                ('diag-cloud --dry-run', lambda: sessions['main'](),
+                 ['brza-sessions', 'diag-cloud', '--agent', 'cursor', '--dry-run'], 0),
+                ('diag-cloud', lambda: sessions['main'](), ['brza-sessions', 'diag-cloud', '--agent', 'cursor'], 1),
+            )
+            captured = {}
+            for label, call, argv, expected in cloud_calls:
+                if argv is None:
+                    code, out, err = run_captured(call)
+                else:
+                    with patch.object(sys, 'argv', argv):
+                        code, out, err = run_captured(call)
+                captured[label] = out
+                self.assertEqual(code, expected, label)
+                assert_clean(out, label)
+                assert_clean(err, f'stderr de {label}')
+                if '--json' in label:
+                    assert_clean(json.dumps(json.loads(out)), f'JSON de {label}')
+            self.assertIn('abriria', captured['diag-cloud --dry-run'])
+            for flag in ('--help', '-h'):
+                with patch.object(sys, 'argv', ['brza-sessions', flag]):
+                    out, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as caught:
+                            sessions['main']()
+                self.assertIn(caught.exception.code, (0, None))
+                assert_clean(out.getvalue(), flag)
+                assert_clean(err.getvalue(), f'stderr de {flag}')
+            chosen = agent_runtime.select_runtime()
+            self.assertEqual(chosen.name, 'cloud')
+            assert_clean(json.dumps([record.as_dict() for record in chosen.list()]), 'select_runtime cloud')
+            planned = sessions['open_argv']('grok-4.7', str(self.workspace), None)
+            assert_clean(shlex.join(planned), 'open_argv')
+            self.assertNotIn('--api-key', planned)
+            self.assertNotIn('--resume', planned)
+            (data / 'orca-runtime.json').write_text('{}')
+            code, out, err = run_captured(lambda: GLOBALS['main'](['--env', '--json']))
+            assert_clean(out, 'doctor studio')
+            assert_clean(err, 'stderr do doctor studio')
+            payload = json.loads(out)
+            assert_clean(json.dumps(payload), 'JSON do doctor studio')
+            runtime_line = next(item['message'] for item in payload if item['check'] == 'runtime')
+            self.assertIn('studio', runtime_line)
+            self.assertNotIn('cloud', runtime_line)
+            studio = agent_runtime.select_runtime()
+            self.assertEqual(studio.name, 'studio')
+            with self.assertRaises(agent_runtime.BrzaError) as raised:
+                studio.list()
+            assert_clean(str(raised.exception), 'studio list')
+            if os.environ.get('CURSOR_API_KEY', ''):
+                self.fail('a chave foi gravada no ambiente do pai')
+            for key, value in os.environ.items():
+                if key == 'BRZA_CURSOR_API_KEY':
+                    continue
+                if leaked(value if isinstance(value, str) else ''):
+                    self.fail('a chave foi gravada no ambiente do pai')
+            if os.environ.get('BRZA_CURSOR_API_KEY') != parent_before.get('BRZA_CURSOR_API_KEY'):
+                self.fail('a chave no ambiente do pai mudou')
+        self.assertTrue(any('git' in tokens and 'var' in tokens for tokens in argv_hits))
+        for parts in argv_hits:
+            for part in parts:
+                if leaked(part):
+                    self.fail('a chave foi parar num argv')
+
+    def test_conversation_id_does_not_soften_the_doctor_without_env(self):
+        self.ident = 'Outra Pessoa <outra@example.com> 1793166405 -0300'
+        with patch.dict(os.environ, {'CURSOR_CONVERSATION_ID': 'bc-teste'}):
+            code, out = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertTrue(self.line(out, 'identidade').startswith('ERRO'))
 
 
 if __name__ == '__main__':
