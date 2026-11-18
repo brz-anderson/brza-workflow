@@ -1,9 +1,9 @@
-"""O `CloudRuntime` no degrau 1: `list` da run de `CURSOR_CONVERSATION_ID` e `read` com transcript ausente.
+"""`CloudRuntime`: `list` da run de `CURSOR_CONVERSATION_ID` e `read` com transcript ausente.
 
-`usage`, `open` e `send` ficam fora do conjunto. A chamada falha e nomeia o runtime e a capacidade. Quem
-declara `open` e `send` é o PR que rebaseia sobre este arquivo. O primeiro `agent -p` não leva `--resume`
+`usage`, `open` e `send` ficam fora do conjunto. A chamada falha e nomeia o runtime e a capacidade.
+Este módulo não declara `open` nem `send` e não executa o argv. O primeiro `agent -p` não leva `--resume`
 e não passa por `create-chat`: o id é o `session_id` do JSON. O turno seguinte, com esse id, acrescenta
-`--resume`. Ninguém executa o argv neste módulo.
+`--resume`.
 """
 
 import os

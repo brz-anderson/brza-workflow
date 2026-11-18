@@ -1045,7 +1045,7 @@ def parse_feedback(text):
 
 
 def read_feedbacks(directory):
-    """A pasta do gênero, se existir. Sem ela, não há nota: o P2 do PLN-025 pode ainda não ter entrado."""
+    """A pasta do gênero, se existir. Sem ela, não há nota e a execução segue sem esse texto."""
     if not directory or not os.path.isdir(directory):
         return []
     notes = []

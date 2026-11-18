@@ -1,4 +1,4 @@
-"""A porta `AgentRuntime` (ADR-003): o consumidor fala com o adaptador, e a capacidade fora do conjunto falha.
+"""A porta `AgentRuntime`: o consumidor fala com o adaptador, e a capacidade fora do conjunto falha.
 
 `capabilities`, `list` e `read` existem na porta. `usage`, `open` e `send` são opcionais. Cada adaptador declara
 o que cumpre. Chamar o que não está no conjunto sai com erro que nomeia o runtime e a capacidade. O `StudioRuntime`

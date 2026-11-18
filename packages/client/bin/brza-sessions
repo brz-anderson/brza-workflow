@@ -1062,7 +1062,7 @@ def cloud_read(runtime, argv):
 
 
 def cloud_dispatch(runtime, argv):
-    """O degrau 1 cumpre `list` e `read`. O resto falha nomeando o runtime e a capacidade, sem efeito colateral."""
+    """Cumpre `list` e `read`. O resto falha nomeando o runtime e a capacidade, sem efeito colateral."""
     if not argv:
         raise BrzaError('cloud: informe um verbo')
     verb = argv[0]
