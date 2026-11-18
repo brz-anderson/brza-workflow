@@ -17,10 +17,13 @@ METRIC_ORIGINS = ('hook', 'note', 'api', ABSENT)
 class MissingCapability(BrzaError):
     """A capacidade não está no conjunto do adaptador. A mensagem leva o runtime e a capacidade."""
 
-    def __init__(self, runtime_name, capability):
+    def __init__(self, runtime_name, capability, hint=''):
         self.runtime_name = runtime_name
         self.capability = capability
-        super().__init__(f'{runtime_name}: capacidade {capability} não declarada')
+        message = f'{runtime_name}: capacidade {capability} não declarada'
+        if hint:
+            message = f'{message}. {hint}'
+        super().__init__(message)
 
 
 def require_capability(runtime, capability):
@@ -119,10 +122,10 @@ def select_runtime(forced=None, env=None):
         return StudioRuntime()
     if forced == 'cloud':
         from cloud_runtime import CloudRuntime
-        return CloudRuntime(env)
+        return CloudRuntime(env, keep_home=True)
     if socket_present():
         return StudioRuntime()
     if conversation_id(env):
         from cloud_runtime import CloudRuntime
-        return CloudRuntime(env)
+        return CloudRuntime(env, keep_home=True)
     return StudioRuntime()
