@@ -576,7 +576,7 @@ class CloudRuntimeTest(unittest.TestCase):
 
 
     def test_brza_key_stays_out_of_argv_parent_env_and_session_output(self):
-        sentinel = 'brza-sentinel-gate2-not-real'
+        sentinel = 'brza-sentinel-not-a-key'
         touched = ('HOME', 'PATH', 'BRZA_CURSOR_API_KEY', 'CURSOR_API_KEY',
                    'BRZA_FAKE_CAPTURE', 'BRZA_FAKE_BEHAVIOR', 'BRZA_FAKE_SESSION',
                    'CURSOR_CONVERSATION_ID')
@@ -588,8 +588,8 @@ class CloudRuntimeTest(unittest.TestCase):
             os.environ.pop('CURSOR_API_KEY', None)
             os.environ['BRZA_FAKE_CAPTURE'] = str(self.tmp / 'capture.json')
             os.environ['BRZA_FAKE_BEHAVIOR'] = 'ok'
-            os.environ['BRZA_FAKE_SESSION'] = 'sess-gate'
-            os.environ['CURSOR_CONVERSATION_ID'] = 'bc-gate'
+            os.environ['BRZA_FAKE_SESSION'] = 'sess-cold'
+            os.environ['CURSOR_CONVERSATION_ID'] = 'bc-cold'
             runtime = cloud_runtime.CloudRuntime(log_path=str(self.log), timeout_s=2, keep_home=True)
             self.runtime = runtime
             self.assertIs(runtime.env, os.environ)
